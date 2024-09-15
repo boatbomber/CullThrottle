@@ -30,6 +30,10 @@ type ObjectData = {
 	lastUpdateClock: number,
 	jitterOffset: number,
 	changeConnections: { RBXScriptConnection },
+	cframeSource: Instance,
+	cframeType: string,
+	boundingBoxSource: Instance,
+	boundingBoxType: string,
 }
 
 type CullThrottleProto = {
@@ -115,25 +119,72 @@ function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): numbe
 	return self._performanceFalloffFactor
 end
 
-function CullThrottle._getObjectCFrame(self: CullThrottle, object: Instance): CFrame?
+function CullThrottle._getObjectCFrameSource(self: CullThrottle, object: Instance): (Instance?, string?)
 	if object == workspace then
 		-- Workspace technically inherits Model,
 		-- but the origin vector isn't useful here
-		return nil
+		return nil, nil
 	end
 
-	-- TODO: Cache the IsA check in the object data
 	if object:IsA("BasePart") then
-		return object.CFrame
+		return object, "BasePart"
 	elseif object:IsA("Model") then
-		return object:GetPivot()
+		return object, "Model"
 	elseif object:IsA("Bone") then
-		return object.TransformedWorldCFrame
+		return object, "Bone"
 	elseif object:IsA("Attachment") then
-		return object.WorldCFrame
+		return object, "Attachment"
 	elseif object:IsA("Beam") then
-		-- Beams are roughly located between their attachments
-		local attachment0, attachment1 = object.Attachment0, object.Attachment1
+		return object, "Beam"
+	elseif not object.Parent then
+		return nil, nil
+	else
+		return self:_getObjectCFrameSource(object.Parent)
+	end
+end
+
+function CullThrottle._getObjectBoundingBoxSource(self: CullThrottle, object: Instance): (Instance?, string?)
+	if object == workspace then
+		-- Workspace technically inherits Model,
+		-- but the origin vector isn't useful here
+		return nil, nil
+	end
+
+	if object:IsA("BasePart") then
+		return object, "BasePart"
+	elseif object:IsA("Model") then
+		return object, "Model"
+	elseif object:IsA("Bone") then
+		return object, "Bone"
+	elseif object:IsA("Attachment") then
+		return object, "Attachment"
+	elseif object:IsA("Beam") then
+		return object, "Beam"
+	elseif object:IsA("PointLight") or object:IsA("SpotLight") then
+		return object, "Light"
+	elseif object:IsA("Sound") then
+		return object, "Sound"
+	elseif not object.Parent then
+		return nil, nil
+	else
+		return self:_getObjectCFrameSource(object.Parent)
+	end
+end
+
+function CullThrottle._getObjectCFrame(_self: CullThrottle, objectData: ObjectData): CFrame?
+	local object = objectData.cframeSource
+	local sourceType = objectData.cframeType
+
+	if sourceType == "BasePart" then
+		return (object :: BasePart).CFrame
+	elseif sourceType == "Model" then
+		return (object :: Model):GetPivot()
+	elseif sourceType == "Bone" then
+		return (object :: Bone).TransformedWorldCFrame
+	elseif sourceType == "Attachment" then
+		return (object :: Attachment).WorldCFrame
+	elseif sourceType == "Beam" then
+		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
 			warn("Cannot determine position of Beam since it does not have attachments")
 			return nil
@@ -141,74 +192,68 @@ function CullThrottle._getObjectCFrame(self: CullThrottle, object: Instance): CF
 		return attachment0.WorldCFrame:Lerp(attachment1.WorldCFrame, 0.5)
 	end
 
-	-- We don't know how to get the position of this,
-	-- so let's assume it's at the parent position
-	if not object.Parent then
-		warn("Cannot determine cframe of " .. object.ClassName .. ", unknown class with no parent")
-		return nil
-	end
-
-	local parentCFrame = self:_getObjectCFrame(object.Parent)
-	if not parentCFrame then
-		warn("Cannot determine position of " .. object:GetFullName() .. ", ancestry objects lack cframe info")
-	end
-
-	return parentCFrame
+	return nil
 end
 
 function CullThrottle._connectCFrameChangeEvent(
 	self: CullThrottle,
-	object: Instance,
+	objectData: ObjectData,
 	callback: (CFrame) -> ()
 ): { RBXScriptConnection }
 	local connections = {}
 
-	if object == workspace then
-		-- Workspace technically inherits Model,
-		-- but the origin vector isn't useful here
+	local object = objectData.cframeSource
+	if not object then
 		return connections
 	end
 
-	if object:IsA("BasePart") then
+	local sourceType = objectData.cframeType
+
+	if sourceType == "BasePart" then
+		local typedObject: BasePart = object :: BasePart
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("CFrame"):Connect(function()
-				callback(object.CFrame)
+			typedObject:GetPropertyChangedSignal("CFrame"):Connect(function()
+				callback(typedObject.CFrame)
 			end)
 		)
-	elseif object:IsA("Model") then
-		if object.PrimaryPart then
+	elseif sourceType == "Model" then
+		local typedObject: Model = object :: Model
+		if typedObject.PrimaryPart then
 			table.insert(
 				connections,
-				object.PrimaryPart:GetPropertyChangedSignal("CFrame"):Connect(function()
-					callback(object:GetPivot())
+				typedObject.PrimaryPart:GetPropertyChangedSignal("CFrame"):Connect(function()
+					callback(typedObject:GetPivot())
 				end)
 			)
 		else
 			table.insert(
 				connections,
-				object:GetPropertyChangedSignal("WorldPivot"):Connect(function()
-					callback(object:GetPivot())
+				typedObject:GetPropertyChangedSignal("WorldPivot"):Connect(function()
+					callback(typedObject:GetPivot())
 				end)
 			)
 		end
-	elseif object:IsA("Bone") then
+	elseif sourceType == "Bone" then
+		local typedObject: Bone = object :: Bone
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("TransformedWorldCFrame"):Connect(function()
-				callback(object.TransformedWorldCFrame)
+			typedObject:GetPropertyChangedSignal("TransformedWorldCFrame"):Connect(function()
+				callback(typedObject.TransformedWorldCFrame)
 			end)
 		)
-	elseif object:IsA("Attachment") then
+	elseif sourceType == "Attachment" then
+		local typedObject: Attachment = object :: Attachment
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(object.WorldCFrame)
+			typedObject:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
+				callback(typedObject.WorldCFrame)
 			end)
 		)
-	elseif object:IsA("Beam") then
+	elseif sourceType == "Beam" then
+		local typedObject: Beam = object :: Beam
 		-- Beams are roughly located between their attachments
-		local attachment0, attachment1 = object.Attachment0, object.Attachment1
+		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
 			warn("Cannot determine position of Beam since it does not have attachments")
 			return connections
@@ -216,111 +261,85 @@ function CullThrottle._connectCFrameChangeEvent(
 		table.insert(
 			connections,
 			attachment0:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(self:_getObjectCFrame(object) or CFrame.identity)
+				callback(self:_getObjectCFrame(objectData) or CFrame.identity)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment1:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(self:_getObjectCFrame(object) or CFrame.identity)
+				callback(self:_getObjectCFrame(objectData) or CFrame.identity)
 			end)
 		)
-	else
-		-- We don't know how to get the position of this,
-		-- so let's assume it's at the parent position
-		if not object.Parent then
-			warn("Cannot connect cframe of " .. object.ClassName .. ", unknown class with no parent")
-			return connections
-		end
-
-		local parentConnections = self:_connectCFrameChangeEvent(object.Parent, callback)
-		if not parentConnections then
-			warn("Cannot connect cframe of " .. object:GetFullName() .. ", ancestry objects lack cframe info")
-		end
-
-		return parentConnections
 	end
 
 	return connections
 end
 
-function CullThrottle._getObjectBoundingBox(self: CullThrottle, object: Instance): Vector3?
-	if object == workspace then
-		-- Workspace technically inherits Model,
-		-- but the origin vector isn't useful here
-		return nil
-	end
+function CullThrottle._getObjectBoundingBox(_self: CullThrottle, objectData: ObjectData): Vector3?
+	local object = objectData.boundingBoxSource
+	local sourceType = objectData.boundingBoxType
 
-	if object:IsA("BasePart") then
-		return object.Size
-	elseif object:IsA("Model") then
-		local _, size = object:GetBoundingBox()
+	if sourceType == "BasePart" then
+		return (object :: BasePart).Size
+	elseif sourceType == "Model" then
+		local _, size = (object :: Model):GetBoundingBox()
 		return size
-	elseif object:IsA("Beam") then
-		-- Beams sized between their attachments with their defined width
-		local attachment0, attachment1 = object.Attachment0, object.Attachment1
+	elseif sourceType == "Beam" then
+		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
 			warn("Cannot determine position of Beam since it does not have attachments")
 			return nil
 		end
 
-		local width = math.max(object.Width0, object.Width1)
+		local width = math.max((object :: Beam).Width0, (object :: Beam).Width1)
 		local length = (attachment0.WorldPosition - attachment1.WorldPosition).Magnitude
 		return Vector3.new(width, width, length)
-	elseif object:IsA("PointLight") or object:IsA("SpotLight") then
-		return Vector3.one * object.Range
-	elseif object:IsA("Sound") then
-		return Vector3.one * object.RollOffMaxDistance
+	elseif sourceType == "Light" then
+		return Vector3.one * (object :: SpotLight | PointLight).Range
+	elseif sourceType == "Sound" then
+		return Vector3.one * (object :: Sound).RollOffMaxDistance
 	end
 
-	-- We don't know how to get the position of this,
-	-- so let's assume it's at the parent position
-	if not object.Parent then
-		warn("Cannot determine bounding box of " .. object.ClassName .. ", unknown class with no parent")
-		return nil
-	end
-
-	local parentBoundingBox = self:_getObjectBoundingBox(object.Parent)
-	if not parentBoundingBox then
-		warn("Cannot determine bounding box of " .. object:GetFullName() .. ", ancestry objects lack bounding box info")
-	end
-
-	return parentBoundingBox
+	return nil
 end
 
 function CullThrottle._connectBoundingBoxChangeEvent(
 	self: CullThrottle,
-	object: Instance,
+	objectData: ObjectData,
 	callback: (Vector3) -> ()
 ): { RBXScriptConnection }
 	local connections = {}
 
-	if object == workspace then
-		-- Workspace technically inherits Model,
-		-- but the origin vector isn't useful here
+	local object = objectData.boundingBoxSource
+	if not object then
 		return connections
 	end
 
-	if object:IsA("BasePart") then
+	local sourceType = objectData.boundingBoxType
+
+	if sourceType == "BasePart" then
+		local typedObject: BasePart = object :: BasePart
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("Size"):Connect(function()
-				callback(object.Size)
+			typedObject:GetPropertyChangedSignal("Size"):Connect(function()
+				callback(typedObject.Size)
 			end)
 		)
-	elseif object:IsA("Model") then
+	elseif sourceType == "Model" then
+		local typedObject: Model = object :: Model
 		-- TODO: Figure out a decent way to tell when a model size
 		-- is changed without scale (ie: new parts added or resized)
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("Scale"):Connect(function()
-				local _, size = object:GetBoundingBox()
+			typedObject:GetPropertyChangedSignal("Scale"):Connect(function()
+				local _, size = typedObject:GetBoundingBox()
 				callback(size)
 			end)
 		)
-	elseif object:IsA("Beam") then
+	elseif sourceType == "Beam" then
+		local typedObject: Beam = object :: Beam
 		-- Beams sized between their attachments with their defined width
-		local attachment0, attachment1 = object.Attachment0, object.Attachment1
+		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
 			warn("Cannot determine bounding box of Beam since it does not have attachments")
 			return connections
@@ -328,68 +347,56 @@ function CullThrottle._connectBoundingBoxChangeEvent(
 
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("Width0"):Connect(function()
-				callback(self:_getObjectBoundingBox(object) or Vector3.one)
+			typedObject:GetPropertyChangedSignal("Width0"):Connect(function()
+				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("Width1"):Connect(function()
-				callback(self:_getObjectBoundingBox(object) or Vector3.one)
+			typedObject:GetPropertyChangedSignal("Width1"):Connect(function()
+				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment0:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(self:_getObjectBoundingBox(object) or Vector3.one)
+				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment1:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(self:_getObjectBoundingBox(object) or Vector3.one)
+				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
-	elseif object:IsA("PointLight") or object:IsA("SpotLight") then
+	elseif sourceType == "Light" then
+		local typedObject: SpotLight | PointLight = object :: SpotLight | PointLight
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("Range"):Connect(function()
-				callback(Vector3.one * object.Range)
+			typedObject:GetPropertyChangedSignal("Range"):Connect(function()
+				callback(Vector3.one * typedObject.Range)
 			end)
 		)
-	elseif object:IsA("Sound") then
+	elseif sourceType == "Sound" then
+		local typedObject: Sound = object :: Sound
 		table.insert(
 			connections,
-			object:GetPropertyChangedSignal("RollOffMaxDistance"):Connect(function()
-				callback(Vector3.one * object.RollOffMaxDistance)
+			typedObject:GetPropertyChangedSignal("RollOffMaxDistance"):Connect(function()
+				callback(Vector3.one * typedObject.RollOffMaxDistance)
 			end)
 		)
-	else
-		-- We don't know how to get the position of this,
-		-- so let's assume it's at the parent position
-		if not object.Parent then
-			warn("Cannot connect cframe of " .. object.ClassName .. ", unknown class with no parent")
-			return connections
-		end
-
-		local parentConnections = self:_connectBoundingBoxChangeEvent(object.Parent, callback)
-		if not parentConnections then
-			warn("Cannot connect cframe of " .. object:GetFullName() .. ", ancestry objects lack cframe info")
-		end
-
-		return parentConnections
 	end
 
 	return connections
 end
 
 function CullThrottle._subscribeToDimensionChanges(self: CullThrottle, object: Instance, objectData: ObjectData)
-	local cframeChangeConnections = self:_connectCFrameChangeEvent(object, function(cframe: CFrame)
+	local cframeChangeConnections = self:_connectCFrameChangeEvent(objectData, function(cframe: CFrame)
 		-- Update CFrame
 		objectData.cframe = cframe
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end)
-	local boundingBoxChangeConnections = self:_connectBoundingBoxChangeEvent(object, function(boundingBox: Vector3)
+	local boundingBoxChangeConnections = self:_connectBoundingBoxChangeEvent(objectData, function(boundingBox: Vector3)
 		-- Update bounding box and radius
 		objectData.halfBoundingBox = boundingBox / 2
 		objectData.radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2
@@ -539,6 +546,12 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number
 	debug.profilebegin("PhysicsObjects")
 	local now = os.clock()
 	local startIndex = self._physicsObjectIterIndex
+
+	if #self._physicsObjects == 0 then
+		debug.profileend()
+		return
+	end
+
 	while os.clock() - now < time_limit do
 		local object = self._physicsObjects[self._physicsObjectIterIndex]
 		self:_nextPhysicsObject()
@@ -554,7 +567,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number
 		end
 
 		-- Update the object's cframe
-		local cframe = self:_getObjectCFrame(object)
+		local cframe = self:_getObjectCFrame(objectData)
 		if cframe then
 			objectData.cframe = cframe
 			self:_updateDesiredVoxelKeys(object, objectData)
@@ -1052,27 +1065,47 @@ function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: n
 end
 
 function CullThrottle.addObject(self: CullThrottle, object: Instance)
-	local cframe = self:_getObjectCFrame(object)
-	if not cframe then
+	local cframeSource, cframeType = self:_getObjectCFrameSource(object)
+	local boundingBoxSource, boundingBoxType = self:_getObjectBoundingBoxSource(object)
+
+	if not cframeSource or not cframeType then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, cframe is unknown")
 	end
 
-	local boundingBox = self:_getObjectBoundingBox(object)
-	if not boundingBox then
+	if not boundingBoxSource or not boundingBoxType then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, bounding box is unknown")
 	end
 
 	local objectData: ObjectData = {
-		cframe = cframe,
-		halfBoundingBox = boundingBox / 2,
-		radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2,
+		cframe = CFrame.new(),
+		halfBoundingBox = Vector3.one,
+		radius = 0.5,
 		voxelKeys = {},
 		desiredVoxelKeys = {},
 		lastCheckClock = 0,
 		lastUpdateClock = 0,
 		jitterOffset = math.random(-1000, 1000) / 500000,
 		changeConnections = {},
+		cframeSource = cframeSource,
+		cframeType = cframeType,
+		boundingBoxSource = boundingBoxSource,
+		boundingBoxType = boundingBoxType,
 	}
+
+	local cframe = self:_getObjectCFrame(objectData)
+	if not cframe then
+		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, cframe is unknown")
+	end
+
+	objectData.cframe = cframe
+
+	local boundingBox = self:_getObjectBoundingBox(objectData)
+	if not boundingBox then
+		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, bounding box is unknown")
+	end
+
+	objectData.halfBoundingBox = boundingBox / 2
+	objectData.radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2
 
 	self:_subscribeToDimensionChanges(object, objectData)
 	self:_updateDesiredVoxelKeys(object, objectData)
