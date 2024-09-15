@@ -13,9 +13,10 @@ local Utility = require(script.Utility)
 
 local EPSILON = 1e-4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.15
-local MIN_SCREEN_SIZE = 1 / 100
-local MAX_SCREEN_SIZE = 10 / 100
+local MIN_SCREEN_SIZE = 0.75 / 100
+local MAX_SCREEN_SIZE = 12 / 100
 local SCREEN_SIZE_RANGE = MAX_SCREEN_SIZE - MIN_SCREEN_SIZE
+local NEARBY_OBJECT_DISTANCE = 50
 
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
@@ -668,6 +669,12 @@ end
 function CullThrottle._getScreenSize(_self: CullThrottle, distance: number, radius: number): number
 	-- Calculate the screen size using the precomputed tan(FoV/2)
 	local screenSize = (radius / distance) / CameraCache.HalfTanFOV
+
+	-- If the object is close to the camera, we'll multiply the true size
+	-- so that nearby objects get extra rendering priority
+	if distance < NEARBY_OBJECT_DISTANCE then
+		screenSize *= 2 - (distance / NEARBY_OBJECT_DISTANCE)
+	end
 
 	return math.clamp(screenSize, MIN_SCREEN_SIZE, MAX_SCREEN_SIZE)
 end
