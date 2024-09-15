@@ -155,10 +155,6 @@ function CullThrottle._getObjectBoundingBoxSource(self: CullThrottle, object: In
 		return object, "BasePart"
 	elseif object:IsA("Model") then
 		return object, "Model"
-	elseif object:IsA("Bone") then
-		return object, "Bone"
-	elseif object:IsA("Attachment") then
-		return object, "Attachment"
 	elseif object:IsA("Beam") then
 		return object, "Beam"
 	elseif object:IsA("PointLight") or object:IsA("SpotLight") then
@@ -168,7 +164,7 @@ function CullThrottle._getObjectBoundingBoxSource(self: CullThrottle, object: In
 	elseif not object.Parent then
 		return nil, nil
 	else
-		return self:_getObjectCFrameSource(object.Parent)
+		return self:_getObjectBoundingBoxSource(object.Parent)
 	end
 end
 
