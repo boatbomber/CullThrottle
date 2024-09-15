@@ -70,7 +70,7 @@ function CullThrottle.new(): CullThrottle
 	self._radiusThresholdForCorners = self._voxelSize * (1 / 8)
 	self._renderDistance = 450
 	self._targetPerformanceTime = 1.5 / 1000 -- 1.5ms default
-	self._bestRefreshRate = 1 / 45
+	self._bestRefreshRate = 1 / 60
 	self._worstRefreshRate = 1 / 15
 	self._refreshRateRange = self._worstRefreshRate - self._bestRefreshRate
 	self._performanceFalloffFactor = 1
