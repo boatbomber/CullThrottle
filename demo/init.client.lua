@@ -57,15 +57,15 @@ FloatingBlocksUpdater.DEBUG_MODE = false
 
 -- We need to tell CullThrottle about all the objects that we want it to manage.
 for _, block in CollectionService:GetTagged("FloatingBlock") do
-	FloatingBlocksUpdater:add(block)
+	FloatingBlocksUpdater:addObject(block)
 end
 
 CollectionService:GetInstanceAddedSignal("FloatingBlock"):Connect(function(block)
-	FloatingBlocksUpdater:add(block)
+	FloatingBlocksUpdater:addObject(block)
 end)
 
 CollectionService:GetInstanceRemovedSignal("FloatingBlock"):Connect(function(block)
-	FloatingBlocksUpdater:remove(block)
+	FloatingBlocksUpdater:removeObject(block)
 end)
 
 -- Each frame, we'll ask CullThrottle for all the objects that should be updated this frame,

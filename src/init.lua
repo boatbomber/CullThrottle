@@ -44,10 +44,10 @@ type CullThrottleProto = {
 	_halfVoxelSizeVec: Vector3,
 	_radiusThresholdForCorners: number,
 	_voxels: { [Vector3]: { Instance } },
-	_objects: {
-		[Instance]: ObjectData,
-	},
+	_objects: { [Instance]: ObjectData },
+	_physicsObjects: { Instance },
 	_objectRefreshQueue: PriorityQueue.PriorityQueue,
+	_physicsObjectIterIndex: number,
 	_vertexVisibilityCache: { [Vector3]: boolean },
 	_lastVoxelVisibility: { [Vector3]: number },
 	_lastCallTimes: { number },
@@ -72,6 +72,8 @@ function CullThrottle.new(): CullThrottle
 	self._performanceFalloffFactor = 1
 	self._voxels = {}
 	self._objects = {}
+	self._physicsObjects = {}
+	self._physicsObjectIterIndex = 1
 	self._objectRefreshQueue = PriorityQueue.new()
 	self._vertexVisibilityCache = {}
 	self._lastVoxelVisibility = {}
@@ -120,6 +122,7 @@ function CullThrottle._getObjectCFrame(self: CullThrottle, object: Instance): CF
 		return nil
 	end
 
+	-- TODO: Cache the IsA check in the object data
 	if object:IsA("BasePart") then
 		return object.CFrame
 	elseif object:IsA("Model") then
@@ -525,6 +528,46 @@ function CullThrottle._processObjectRefreshQueue(self: CullThrottle, time_limit:
 	debug.profileend()
 end
 
+function CullThrottle._nextPhysicsObject(self: CullThrottle)
+	self._physicsObjectIterIndex += 1
+	if self._physicsObjectIterIndex > #self._physicsObjects then
+		self._physicsObjectIterIndex = 1
+	end
+end
+
+function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number)
+	debug.profilebegin("PhysicsObjects")
+	local now = os.clock()
+	local startIndex = self._physicsObjectIterIndex
+	while os.clock() - now < time_limit do
+		local object = self._physicsObjects[self._physicsObjectIterIndex]
+		self:_nextPhysicsObject()
+
+		if not object then
+			continue
+		end
+
+		local objectData = self._objects[object]
+		if not objectData then
+			warn("Physics object", object, "is missing objectData, this shouldn't happen!")
+			continue
+		end
+
+		-- Update the object's cframe
+		local cframe = self:_getObjectCFrame(object)
+		if cframe then
+			objectData.cframe = cframe
+			self:_updateDesiredVoxelKeys(object, objectData)
+		end
+
+		if startIndex == self._physicsObjectIterIndex then
+			-- We've looped through the entire list, no need to continue
+			break
+		end
+	end
+	debug.profileend()
+end
+
 -- Function to check if a box is inside a frustum using SAT
 local verticesToCheck = table.create(8)
 function CullThrottle._isBoxInFrustum(
@@ -890,9 +933,9 @@ function CullThrottle._getObjects(self: CullThrottle, shouldSizeThrottle: boolea
 
 	table.clear(self._vertexVisibilityCache)
 
-	-- Make sure our voxels are up to date
-	-- for up to 0.1 ms
-	self:_processObjectRefreshQueue(1e-4)
+	-- Make sure our voxels are up to date for up to 0.1 ms
+	self:_pollPhysicsObjects(5e-5)
+	self:_processObjectRefreshQueue(5e-5)
 
 	-- Update the performance falloff factor so
 	-- we can adjust our refresh rates to hit our target performance time
@@ -1008,7 +1051,7 @@ function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: n
 	self._refreshRateRange = worst - best
 end
 
-function CullThrottle.add(self: CullThrottle, object: Instance)
+function CullThrottle.addObject(self: CullThrottle, object: Instance)
 	local cframe = self:_getObjectCFrame(object)
 	if not cframe then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, cframe is unknown")
@@ -1043,15 +1086,35 @@ function CullThrottle.add(self: CullThrottle, object: Instance)
 			objectData.desiredVoxelKeys[voxelKey] = nil
 		end
 	end
+
+	return objectData
 end
 
-function CullThrottle.remove(self: CullThrottle, object: Instance)
+function CullThrottle.addPhysicsObject(self: CullThrottle, object: BasePart)
+	self:addObject(object)
+
+	-- Also add it to the physics objects table for polling position changes
+	-- (physics based movement doesn't trigger the normal connection)
+	table.insert(self._physicsObjects, object)
+end
+
+function CullThrottle.removeObject(self: CullThrottle, object: Instance)
 	local objectData = self._objects[object]
 	if not objectData then
 		return
 	end
 
 	self._objects[object] = nil
+
+	local physicsObjectIndex = table.find(self._physicsObjects, object)
+	if physicsObjectIndex then
+		-- Fast unordered remove
+		local n = #self._physicsObjects
+		if physicsObjectIndex ~= n then
+			self._physicsObjects[physicsObjectIndex] = self._physicsObjects[n]
+		end
+		self._physicsObjects[n] = nil
+	end
 
 	for _, connection in objectData.changeConnections do
 		connection:Disconnect()
