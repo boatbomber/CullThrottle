@@ -55,6 +55,21 @@ local function initCamera(camera: Camera)
 			CameraCache.ViewportSize = CameraCache.Object.ViewportSize
 			CameraCache.AspectRatio = CameraCache.ViewportSize.X / CameraCache.ViewportSize.Y
 		end)
+
+	task.defer(function()
+		local testCam = workspace:WaitForChild("_CullThrottleTestCam", 3)
+		if not testCam then
+			return
+		end
+
+		cameraConnections.CFrameChanged:Disconnect()
+		cameraConnections.CFrameChanged = testCam:GetPropertyChangedSignal("CFrame"):Connect(function()
+			CameraCache.CFrame = testCam.CFrame
+			CameraCache.Position = testCam.CFrame.Position
+		end)
+		CameraCache.CFrame = testCam.CFrame
+		CameraCache.Position = testCam.CFrame.Position
+	end)
 end
 
 initCamera(workspace.CurrentCamera)
