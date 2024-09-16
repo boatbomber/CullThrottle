@@ -1,3 +1,5 @@
+math.randomseed(0) -- Constant seed for reproducibility
+
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
