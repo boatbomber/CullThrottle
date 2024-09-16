@@ -324,11 +324,18 @@ function CullThrottle._connectBoundingBoxChangeEvent(
 		)
 	elseif sourceType == "Model" then
 		local typedObject: Model = object :: Model
-		-- TODO: Figure out a decent way to tell when a model size
-		-- is changed without scale (ie: new parts added or resized)
+		-- TODO: Figure out a decent way to tell when a model bounds change
+		-- without connecting to all descendants size changes
 		table.insert(
 			connections,
-			typedObject:GetPropertyChangedSignal("Scale"):Connect(function()
+			typedObject.DescendantAdded:Connect(function()
+				local _, size = typedObject:GetBoundingBox()
+				callback(size)
+			end)
+		)
+		table.insert(
+			connections,
+			typedObject.DescendantRemoving:Connect(function()
 				local _, size = typedObject:GetBoundingBox()
 				callback(size)
 			end)
