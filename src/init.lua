@@ -53,7 +53,6 @@ type CullThrottleProto = {
 	_physicsObjects: { Instance },
 	_objectRefreshQueue: PriorityQueue.PriorityQueue,
 	_physicsObjectIterIndex: number,
-	_vertexVisibilityCache: { [Vector3]: boolean },
 	_lastVoxelVisibility: { [Vector3]: number },
 	_lastCallTimes: { number },
 	_lastCallTimeIndex: number,
@@ -80,7 +79,6 @@ function CullThrottle.new(): CullThrottle
 	self._physicsObjects = {}
 	self._physicsObjectIterIndex = 1
 	self._objectRefreshQueue = PriorityQueue.new()
-	self._vertexVisibilityCache = {}
 	self._lastVoxelVisibility = {}
 	self._lastCallTimes = table.create(5, 0)
 	self._lastCallTimeIndex = 1
@@ -585,88 +583,61 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number
 	debug.profileend()
 end
 
--- Function to check if a box is inside a frustum using SAT
-local verticesToCheck = table.create(8)
 function CullThrottle._isBoxInFrustum(
 	self: CullThrottle,
 	checkForCompletelyInside: boolean,
-	frustumPlanes: { Vector3 },
+	frustumPlanes: { Vector3 }, -- {pos, normal, pos, normal, ...}
 	x0: number,
 	y0: number,
 	z0: number,
 	x1: number,
 	y1: number,
 	z1: number
-): (boolean, boolean)
+): (boolean, boolean) -- Returns (intersects, completelyInside)
 	debug.profilebegin("isBoxInFrustum")
 	local voxelSize = self._voxelSize
-	local vertexVisibilityCache = self._vertexVisibilityCache
-
-	-- Convert the box bounds into the 8 corners of the box in world space
+	-- Ensure x0 <= x1, y0 <= y1, z0 <= z1
 	local x0W, x1W = x0 * voxelSize, x1 * voxelSize
 	local y0W, y1W = y0 * voxelSize, y1 * voxelSize
 	local z0W, z1W = z0 * voxelSize, z1 * voxelSize
-	-- Reuse the same table to avoid allocations and cleanup
-	verticesToCheck[1] = Vector3.new(x0W, y0W, z0W)
-	verticesToCheck[2] = Vector3.new(x1W, y0W, z0W)
-	verticesToCheck[3] = Vector3.new(x0W, y1W, z0W)
-	verticesToCheck[4] = Vector3.new(x1W, y1W, z0W)
-	verticesToCheck[5] = Vector3.new(x0W, y0W, z1W)
-	verticesToCheck[6] = Vector3.new(x1W, y0W, z1W)
-	verticesToCheck[7] = Vector3.new(x0W, y1W, z1W)
-	verticesToCheck[8] = Vector3.new(x1W, y1W, z1W)
 
-	local isBoxInside = true
-	local isBoxCompletelyInside = true
+	local minX, maxX = math.min(x0W, x1W), math.max(x0W, x1W)
+	local minY, maxY = math.min(y0W, y1W), math.max(y0W, y1W)
+	local minZ, maxZ = math.min(z0W, z1W), math.max(z0W, z1W)
 
+	-- Define the box center and half-extents
+	local center = Vector3.new((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2)
+	local extents = Vector3.new((maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2)
+
+	local completelyInside = true
+
+	-- Check each frustum plane
 	for i = 1, #frustumPlanes, 2 do
-		local pos, normal = frustumPlanes[i], frustumPlanes[i + 1]
-		local allCornersOutside = true
-		local allCornersInside = true
+		local planePos, planeNormal = frustumPlanes[i], frustumPlanes[i + 1]
 
-		-- Check the position of each corner relative to the plane
-		for _, vertex in verticesToCheck do
-			local isVertexInside = false
-			if vertexVisibilityCache[vertex] ~= nil then
-				isVertexInside = vertexVisibilityCache[vertex]
-			else
-				-- Check if corner lies outside the frustum plane
-				if normal:Dot(vertex - pos) <= EPSILON then
-					isVertexInside = true
-					-- This corner is inside
-				else
-					isVertexInside = false
-				end
-				vertexVisibilityCache[vertex] = isVertexInside
-			end
+		-- Compute the distance from box center to the plane
+		local dist = (center - planePos):Dot(planeNormal)
 
-			if isVertexInside then
-				allCornersOutside = false
-				if not checkForCompletelyInside then
-					-- We can early exit on the first inside corner
-					debug.profileend()
-					return true, true
-				end
-			else
-				allCornersInside = false
-			end
+		-- Compute the projection interval radius of box onto the plane normal
+		local radius = math.abs(extents.X * planeNormal.X)
+			+ math.abs(extents.Y * planeNormal.Y)
+			+ math.abs(extents.Z * planeNormal.Z)
+
+		-- If the distance is greater than the radius, the box is outside the frustum
+		if dist > radius + EPSILON then
+			debug.profileend()
+			return false, false
 		end
 
-		if allCornersOutside then
-			-- If all corners are outside any plane, the box is outside the frustum
-			isBoxInside = false
-			isBoxCompletelyInside = false
-			break -- No need to check the other planes
-		end
-
-		-- If any corner is outside this plane, the box is not completely inside
-		if not allCornersInside then
-			isBoxCompletelyInside = false
+		-- If the distance plus the radius is positive, the box is not completely inside this plane
+		if checkForCompletelyInside and dist + radius > -EPSILON then
+			completelyInside = false
 		end
 	end
 
+	-- If we've made it here, the box is either inside or intersecting the frustum
 	debug.profileend()
-	return isBoxInside, isBoxCompletelyInside
+	return true, completelyInside
 end
 
 function CullThrottle._getScreenSize(_self: CullThrottle, distance: number, radius: number): number
@@ -953,8 +924,6 @@ end
 
 function CullThrottle._getObjects(self: CullThrottle, shouldSizeThrottle: boolean): () -> (Instance?, number?)
 	local now = os.clock()
-
-	table.clear(self._vertexVisibilityCache)
 
 	-- Make sure our voxels are up to date for up to 0.1 ms
 	self:_pollPhysicsObjects(5e-5)
