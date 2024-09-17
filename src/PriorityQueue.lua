@@ -84,6 +84,24 @@ function PriorityQueue.enqueue(self: PriorityQueue, item: any, priority: number)
 	return self
 end
 
+function PriorityQueue.batchEnqueue(self: PriorityQueue, iparray: {}): ()
+	local items, priorities, indices = self._items, self._priorities, self._indices
+	local size = self._size
+	for i = 1, #iparray, 2 do
+		local item, priority = iparray[i], iparray[i + 1]
+		if indices[item] ~= nil then
+			error("Item " .. tostring(indices[item]) .. " is already in the heap")
+		end
+		size = size + 1
+		items[size], priorities[size] = item, priority
+		indices[item] = size
+	end
+	self._size = size
+	if size > 1 then
+		self:siftdown(size // 2)
+	end
+end
+
 function PriorityQueue.remove(self: PriorityQueue, item: any): boolean
 	local index = self._indices[item]
 	if index == nil then
@@ -108,10 +126,6 @@ function PriorityQueue.remove(self: PriorityQueue, item: any): boolean
 		end
 	end
 	return true
-end
-
-function PriorityQueue.contains(self: PriorityQueue, item: any): boolean
-	return self._indices[item] ~= nil
 end
 
 function PriorityQueue.update(self: PriorityQueue, item: any, priority: number): boolean
@@ -153,30 +167,31 @@ function PriorityQueue.peek(self: PriorityQueue): (any, number)
 	return self._items[1], self._priorities[1]
 end
 
+function PriorityQueue.peekPriority(self: PriorityQueue): number?
+	return self._priorities[1]
+end
+
+function PriorityQueue.items(self: PriorityQueue): { any }
+	return self._items
+end
+
+function PriorityQueue.clear(self: PriorityQueue): ()
+	table.clear(self._indices)
+	table.clear(self._items)
+	table.clear(self._priorities)
+	self._size = 0
+end
+
 function PriorityQueue.len(self: PriorityQueue): number
 	return self._size
 end
 
-function PriorityQueue.empty(self: PriorityQueue): boolean
-	return self._size <= 0
+function PriorityQueue.contains(self: PriorityQueue, item: any): boolean
+	return self._indices[item] ~= nil
 end
 
-function PriorityQueue.batchEnqueue(self: PriorityQueue, iparray: {}): ()
-	local items, priorities, indices = self._items, self._priorities, self._indices
-	local size = self._size
-	for i = 1, #iparray, 2 do
-		local item, priority = iparray[i], iparray[i + 1]
-		if indices[item] ~= nil then
-			error("Item " .. tostring(indices[item]) .. " is already in the heap")
-		end
-		size = size + 1
-		items[size], priorities[size] = item, priority
-		indices[item] = size
-	end
-	self._size = size
-	if size > 1 then
-		self:siftdown(size // 2)
-	end
+function PriorityQueue.isEmpty(self: PriorityQueue): boolean
+	return self._size <= 0
 end
 
 return PriorityQueue

@@ -57,7 +57,7 @@ local function initCamera(camera: Camera)
 		end)
 
 	task.defer(function()
-		local testCam = workspace:WaitForChild("_CullThrottleTestCam", 3)
+		local testCam = workspace:WaitForChild("_CullThrottleTestCam", 4)
 		if not testCam then
 			return
 		end

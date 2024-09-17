@@ -4,16 +4,16 @@ local HEATMAP_COLOR: ColorSequence = ColorSequence.new({
 	ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 6, 17)),
 	ColorSequenceKeypoint.new(0.2, Color3.fromRGB(92, 27, 79)),
 	ColorSequenceKeypoint.new(0.4, Color3.fromRGB(166, 35, 91)),
-	ColorSequenceKeypoint.new(0.6, Color3.fromRGB(227, 43, 60)),
-	ColorSequenceKeypoint.new(0.8, Color3.fromRGB(244, 133, 102)),
-	ColorSequenceKeypoint.new(1, Color3.fromRGB(246, 232, 213)),
+	ColorSequenceKeypoint.new(0.6, Color3.fromRGB(192, 27, 44)),
+	ColorSequenceKeypoint.new(0.8, Color3.fromRGB(253, 136, 104)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 236, 210)),
 })
 
 function Utility.evalColorSequence(sequence: ColorSequence, time: number)
 	-- If time is 0 or 1, return the first or last value respectively
-	if time == 0 then
+	if time <= 0 then
 		return sequence.Keypoints[1].Value
-	elseif time == 1 then
+	elseif time >= 1 then
 		return sequence.Keypoints[#sequence.Keypoints].Value
 	end
 
@@ -41,7 +41,9 @@ end
 function Utility.applyHeatmapColor(object: Instance, alpha: number)
 	local color = Utility.evalColorSequence(HEATMAP_COLOR, alpha)
 	if object:IsA("BasePart") then
-		object.Color = color
+		object.Color = object.Color:Lerp(color, 0.25)
+	elseif object:IsA("TextLabel") then
+		object.TextColor3 = color
 	elseif object:IsA("GuiObject") then
 		object.BackgroundColor3 = color
 	end

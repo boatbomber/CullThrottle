@@ -9,15 +9,22 @@ end
 
 local PriorityQueue = require(script.PriorityQueue)
 local CameraCache = require(script.CameraCache)
-local Utility = require(script.Utility)
 local Gizmo = require(script.Gizmo)
 
 local EPSILON = 1e-4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.15
-local MIN_SCREEN_SIZE = 0.75 / 100
-local MAX_SCREEN_SIZE = 12 / 100
-local SCREEN_SIZE_RANGE = MAX_SCREEN_SIZE - MIN_SCREEN_SIZE
-local NEARBY_OBJECT_DISTANCE = 50
+
+-- This weight gives more update priority to larger objects,
+-- focusing on the objects that contribute the most visually
+local SCREEN_SIZE_PRIORITY_WEIGHT = 80
+-- This weight tries to make everything the same refresh rate,
+-- sacrificing some updates to big objects for the little ones
+-- for a smoother overall vibe
+local REFRESH_RATE_PRIORITY_WEIGHT = 12
+-- This weight gives more priority to nearby objects regardless of size
+-- which can help prioritize objects that are likely the real focus
+-- in cases where there are many objects of similar screen size
+local DISTANCE_PRIORITY_WEIGHT = 8
 
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
@@ -44,7 +51,8 @@ type CullThrottleProto = {
 	_worstRefreshRate: number,
 	_refreshRateRange: number,
 	_renderDistance: number,
-	_targetPerformanceTime: number,
+	_searchTimeBudget: number,
+	_updateTimeBudget: number,
 	_performanceFalloffFactor: number,
 	_voxelSize: number,
 	_halfVoxelSizeVec: Vector3,
@@ -53,6 +61,9 @@ type CullThrottleProto = {
 	_objects: { [Instance]: ObjectData },
 	_physicsObjects: { Instance },
 	_objectRefreshQueue: PriorityQueue.PriorityQueue,
+	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
+	_objectPriorityBatch: { Instance | number },
+	_objectPriorityBatchIndex: number,
 	_physicsObjectIterIndex: number,
 	_lastVoxelVisibility: { [Vector3]: number },
 	_lastCallTimes: { number },
@@ -69,8 +80,9 @@ function CullThrottle.new(): CullThrottle
 	self._voxelSize = 75
 	self._halfVoxelSizeVec = Vector3.one * (self._voxelSize / 2)
 	self._radiusThresholdForCorners = self._voxelSize * (1 / 8)
-	self._renderDistance = 450
-	self._targetPerformanceTime = 1.5 / 1000 -- 1.5ms default
+	self._renderDistance = 400
+	self._searchTimeBudget = 1.5 / 1000
+	self._updateTimeBudget = 0.4 / 1000
 	self._bestRefreshRate = 1 / 60
 	self._worstRefreshRate = 1 / 15
 	self._refreshRateRange = self._worstRefreshRate - self._bestRefreshRate
@@ -80,6 +92,9 @@ function CullThrottle.new(): CullThrottle
 	self._physicsObjects = {}
 	self._physicsObjectIterIndex = 1
 	self._objectRefreshQueue = PriorityQueue.new()
+	self._visibleObjectsQueue = PriorityQueue.new()
+	self._objectPriorityBatch = {}
+	self._objectPriorityBatchIndex = 1
 	self._lastVoxelVisibility = {}
 	self._lastCallTimes = table.create(5, 0)
 	self._lastCallTimeIndex = 1
@@ -110,9 +125,11 @@ function CullThrottle._drawBox(
 	local size = Vector3.new(math.abs(x0World - x1World), math.abs(y0World - y1World), math.abs(z0World - z1World))
 		- (Vector3.one * 2)
 
-	Gizmo.setColor3(color)
-	Gizmo.setTransparency(transparency)
-	Gizmo.drawWireBox(cf, size)
+	task.defer(function()
+		Gizmo.setColor3(color)
+		Gizmo.setTransparency(transparency)
+		Gizmo.drawWireBox(cf, size)
+	end)
 end
 
 function CullThrottle._getAverageCallTime(self: CullThrottle): number
@@ -131,7 +148,7 @@ end
 
 function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): number
 	local averageCallTime = self:_getAverageCallTime()
-	local targetCallTime = self._targetPerformanceTime
+	local targetCallTime = self._searchTimeBudget + self._updateTimeBudget
 	local adjustmentFactor = averageCallTime / targetCallTime
 
 	if adjustmentFactor > 1 then
@@ -541,10 +558,9 @@ function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: Vector3, ob
 	end
 end
 
-function CullThrottle._processObjectRefreshQueue(self: CullThrottle, time_limit: number)
-	debug.profilebegin("ObjectRefreshQueue")
-	local now = os.clock()
-	while (not self._objectRefreshQueue:empty()) and (os.clock() - now < time_limit) do
+function CullThrottle._processObjectRefreshQueue(self: CullThrottle, time_limit: number, now: number)
+	debug.profilebegin("processObjectRefreshQueue")
+	while (not self._objectRefreshQueue:isEmpty()) and (os.clock() - now < time_limit) do
 		local object = self._objectRefreshQueue:dequeue()
 		local objectData = self._objects[object]
 		if (not objectData) or not next(objectData.desiredVoxelKeys) then
@@ -573,9 +589,8 @@ function CullThrottle._nextPhysicsObject(self: CullThrottle)
 	end
 end
 
-function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number)
-	debug.profilebegin("PhysicsObjects")
-	local now = os.clock()
+function CullThrottle._pollPhysicsObjects(self: CullThrottle, time_limit: number, now: number)
+	debug.profilebegin("pollPhysicsObjects")
 	local startIndex = self._physicsObjectIterIndex
 
 	if #self._physicsObjects == 0 then
@@ -671,53 +686,28 @@ end
 
 function CullThrottle._getScreenSize(_self: CullThrottle, distance: number, radius: number): number
 	-- Calculate the screen size using the precomputed tan(FoV/2)
-	local screenSize = (radius / distance) / CameraCache.HalfTanFOV
-
-	-- If the object is close to the camera, we'll multiply the true size
-	-- so that nearby objects get extra rendering priority
-	if distance < NEARBY_OBJECT_DISTANCE then
-		screenSize *= 2 - (distance / NEARBY_OBJECT_DISTANCE)
-	end
-
-	return math.clamp(screenSize, MIN_SCREEN_SIZE, MAX_SCREEN_SIZE)
+	return (radius / distance) / CameraCache.HalfTanFOV
 end
 
-function CullThrottle._processVoxel(
+function CullThrottle._addVoxelToVisibleObjectsQueue(
 	self: CullThrottle,
 	now: number,
-	shouldSizeThrottle: boolean,
 	updateLastVoxelVisiblity: boolean,
 	voxelKey: Vector3,
 	voxel: { Instance },
 	cameraPos: Vector3,
 	bestRefreshRate: number,
-	refreshRateRange: number
+	worstRefreshRate: number,
+	refreshRateRange: number,
+	renderDistance: number
 )
+	debug.profilebegin("addVoxelVisible")
 	if updateLastVoxelVisiblity then
 		self._lastVoxelVisibility[voxelKey] = now
 	end
 
-	if not shouldSizeThrottle then
-		for _, object in voxel do
-			local objectData = self._objects[object]
-			if not objectData then
-				continue
-			end
-
-			if objectData.lastCheckClock == now then
-				-- Avoid duplicate checks on this object
-				continue
-			end
-			objectData.lastCheckClock = now
-
-			debug.profilebegin("usersCode")
-			coroutine.yield(object)
-			debug.profileend()
-
-			objectData.lastUpdateClock = now
-		end
-		return
-	end
+	local objectPriorityBatch = self._objectPriorityBatch
+	local objectPriorityBatchIndex = self._objectPriorityBatchIndex
 
 	for _, object in voxel do
 		local objectData = self._objects[object]
@@ -731,33 +721,60 @@ function CullThrottle._processVoxel(
 		end
 		objectData.lastCheckClock = now
 
-		debug.profilebegin("sizeThrottle")
-		local screenSize = self:_getScreenSize((objectData.cframe.Position - cameraPos).Magnitude, objectData.radius)
-		local sizeRatio = ((screenSize - MIN_SCREEN_SIZE) / SCREEN_SIZE_RANGE) ^ self._performanceFalloffFactor
-		local refreshDelay = bestRefreshRate + (refreshRateRange * (1 - sizeRatio))
-		local elapsed = now - objectData.lastUpdateClock + objectData.jitterOffset
-		debug.profileend()
+		local distance = (objectData.cframe.Position - cameraPos).Magnitude
+		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self._performanceFalloffFactor
+		local elapsed = now - objectData.lastUpdateClock
+		local jitteredElapsed = elapsed + objectData.jitterOffset
 
-		if self.DEBUG_MODE then
-			Utility.applyHeatmapColor(object, sizeRatio)
-		end
+		local objectPriority = 0
 
-		if elapsed <= refreshDelay then
-			-- It is not yet time to update this one
+		if jitteredElapsed < bestRefreshRate then
+			-- No need to refresh faster than our best rate
 			continue
+		elseif jitteredElapsed >= worstRefreshRate then
+			-- Try to at least maintain the worst refresh rate
+			objectPriority = 1 - (jitteredElapsed - bestRefreshRate) / refreshRateRange
+		elseif distance < 5 then
+			-- Objects right by camera should update every frame
+			objectPriority = distance / 5
+		else
+			-- Determine the fair object priority
+			local screenSizePriority = SCREEN_SIZE_PRIORITY_WEIGHT * (1 - screenSize)
+			local refreshPriority = REFRESH_RATE_PRIORITY_WEIGHT
+				* (1 - (jitteredElapsed - bestRefreshRate) / refreshRateRange)
+			local distancePriority = DISTANCE_PRIORITY_WEIGHT * (distance / renderDistance)
+
+			objectPriority = screenSizePriority + refreshPriority + distancePriority
+
+			-- print(
+			-- 	string.format(
+			-- 		"priority: %.4f\n  screenSize: %.4f%%, priority: %.3f\n  elapsed: %.1fms, priority: %.3f\n  distance: %.1f, priority: %.3f",
+			-- 		objectPriority,
+			-- 		screenSize * 100,
+			-- 		screenSizePriority,
+			-- 		jitteredElapsed * 1000,
+			-- 		refreshPriority,
+			-- 		distance,
+			-- 		distancePriority
+			-- 	)
+			-- )
 		end
 
-		debug.profilebegin("usersCode")
-		coroutine.yield(object, elapsed)
-		debug.profileend()
+		objectPriorityBatch[objectPriorityBatchIndex] = object
+		objectPriorityBatch[objectPriorityBatchIndex + 1] = objectPriority
 
-		objectData.lastUpdateClock = now
+		objectPriorityBatchIndex += 2
 	end
+
+	self._objectPriorityBatchIndex = objectPriorityBatchIndex
+
+	debug.profileend()
 end
 
 function CullThrottle._getFrustumVoxelsInVolume(
 	self: CullThrottle,
 	now: number,
+	time_limit: number,
 	frustumPlanes: { Vector3 },
 	x0: number,
 	y0: number,
@@ -771,6 +788,29 @@ function CullThrottle._getFrustumVoxelsInVolume(
 	local voxels = self._voxels
 	local lastVoxelVisibility = self._lastVoxelVisibility
 
+	if os.clock() - now >= time_limit then
+		-- We don't have time to be accurate anymore, just assume they're in view
+		debug.profilebegin("budgetReached_useCachedOnly")
+		for x = x0, x1 - 1 do
+			for y = y0, y1 - 1 do
+				for z = z0, z1 - 1 do
+					local voxelKey = Vector3.new(x, y, z)
+					local voxel = voxels[voxelKey]
+					if not voxel then
+						continue
+					end
+					if lastVoxelVisibility[voxelKey] then
+						callback(voxelKey, voxel, false)
+					end
+				end
+			end
+		end
+
+		self:_drawBox(Color3.new(0, 0, 1), 0, x0, y0, z0, x1, y1, z1)
+		debug.profileend()
+		return
+	end
+
 	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
 
 	-- Special case for volumes of a single voxel
@@ -780,6 +820,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 
 		-- No need to check an empty voxel
 		if not voxel then
+			self:_drawBox(Color3.new(1, 1, 1), 0.5, x0, y0, z0, x1, y1, z1)
 			return
 		end
 
@@ -815,7 +856,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 					continue
 				end
 				containsVoxels = true
-				if now - (self._lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
+				if now - (lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
 					allVoxelsVisible = false
 					break
 				end
@@ -826,6 +867,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 
 	-- Don't bother checking further if this box doesn't contain any voxels
 	if not containsVoxels then
+		self:_drawBox(Color3.new(1, 1, 1), 0.5, x0, y0, z0, x1, y1, z1)
 		return
 	end
 
@@ -888,18 +930,34 @@ function CullThrottle._getFrustumVoxelsInVolume(
 	local lengthZ = z1 - z0
 
 	-- Split along the axis with the greatest length
+	local randomizeSearchOrder = math.random(0, 1) == 0 -- Search them in random order to avoid bias towards one half
 	if lengthX >= lengthY and lengthX >= lengthZ then
 		local splitCoord = (x0 + x1) // 2
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, x0, y0, z0, splitCoord, y1, z1, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, splitCoord, y0, z0, x1, y1, z1, callback)
+		if randomizeSearchOrder then
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, splitCoord, y1, z1, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, splitCoord, y0, z0, x1, y1, z1, callback)
+		else
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, splitCoord, y0, z0, x1, y1, z1, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, splitCoord, y1, z1, callback)
+		end
 	elseif lengthY >= lengthX and lengthY >= lengthZ then
 		local splitCoord = (y0 + y1) // 2
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, x0, y0, z0, x1, splitCoord, z1, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, x0, splitCoord, z0, x1, y1, z1, callback)
+		if randomizeSearchOrder then
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, x1, splitCoord, z1, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, splitCoord, z0, x1, y1, z1, callback)
+		else
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, splitCoord, z0, x1, y1, z1, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, x1, splitCoord, z1, callback)
+		end
 	else
 		local splitCoord = (z0 + z1) // 2
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, x0, y0, z0, x1, y1, splitCoord, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, x0, y0, splitCoord, x1, y1, z1, callback)
+		if randomizeSearchOrder then
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, x1, y1, splitCoord, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, splitCoord, x1, y1, z1, callback)
+		else
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, splitCoord, x1, y1, z1, callback)
+			self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, x0, y0, z0, x1, y1, splitCoord, callback)
+		end
 	end
 end
 
@@ -957,40 +1015,57 @@ function CullThrottle._getPlanesAndBounds(
 	)
 
 	if self.DEBUG_MODE then
-		Gizmo.setColor3(Color3.fromRGB(168, 87, 219))
-		Gizmo.setTransparency(0)
-		Gizmo.drawLine(cameraPos, farPlaneTopLeft)
-		Gizmo.drawLine(cameraPos, farPlaneTopRight)
-		Gizmo.drawLine(cameraPos, farPlaneBottomLeft)
-		Gizmo.drawLine(cameraPos, farPlaneBottomRight)
-		Gizmo.drawLine(farPlaneTopLeft, farPlaneTopRight)
-		Gizmo.drawLine(farPlaneTopRight, farPlaneBottomRight)
-		Gizmo.drawLine(farPlaneBottomLeft, farPlaneBottomRight)
-		Gizmo.drawLine(farPlaneTopLeft, farPlaneBottomLeft)
-		Gizmo.setTransparency(0.5)
-		Gizmo.drawBox(farPlaneCFrame, Vector3.new(farPlaneWidth2 * 2, farPlaneHeight2 * 2, 1))
-		Gizmo.setTransparency(0.7)
-		Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneBottomLeft)
-		Gizmo.drawTriangle(cameraPos, farPlaneTopRight, farPlaneBottomRight)
-		Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneTopRight)
-		Gizmo.drawTriangle(cameraPos, farPlaneBottomLeft, farPlaneBottomRight)
+		task.defer(function()
+			Gizmo.setColor3(Color3.fromRGB(168, 87, 219))
+			Gizmo.setTransparency(0)
+			Gizmo.drawLine(cameraPos, farPlaneTopLeft)
+			Gizmo.drawLine(cameraPos, farPlaneTopRight)
+			Gizmo.drawLine(cameraPos, farPlaneBottomLeft)
+			Gizmo.drawLine(cameraPos, farPlaneBottomRight)
+			Gizmo.drawLine(farPlaneTopLeft, farPlaneTopRight)
+			Gizmo.drawLine(farPlaneTopRight, farPlaneBottomRight)
+			Gizmo.drawLine(farPlaneBottomLeft, farPlaneBottomRight)
+			Gizmo.drawLine(farPlaneTopLeft, farPlaneBottomLeft)
+			Gizmo.setTransparency(0.9)
+			Gizmo.drawBox(farPlaneCFrame, Vector3.new(farPlaneWidth2 * 2, farPlaneHeight2 * 2, 1))
+			Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneBottomLeft)
+			Gizmo.drawTriangle(cameraPos, farPlaneTopRight, farPlaneBottomRight)
+			Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneTopRight)
+			Gizmo.drawTriangle(cameraPos, farPlaneBottomLeft, farPlaneBottomRight)
+			Gizmo.setTransparency(0.5)
+			Gizmo.drawWireBox(
+				CFrame.new((minBound + (maxBound + Vector3.one)) / 2 * voxelSize),
+				((maxBound + Vector3.one) - minBound) * voxelSize
+			)
+		end)
 	end
 
 	return frustumPlanes, minBound, maxBound
 end
 
-function CullThrottle._getObjects(self: CullThrottle, shouldSizeThrottle: boolean): () -> (Instance?, number?)
+function CullThrottle._clearVisibleObjectsQueue(self: CullThrottle)
+	table.clear(self._objectPriorityBatch)
+	self._objectPriorityBatchIndex = 1
+	self._visibleObjectsQueue:clear()
+end
+
+function CullThrottle._fillVisibleObjectsQueue(self: CullThrottle, now: number, time_limit: number)
+	debug.profilebegin("CullThrottle")
+
+	debug.profilebegin("findVisibleObjects")
+
 	if self.DEBUG_MODE then
 		Gizmo.enableGizmos()
 	else
 		Gizmo.disableGizmos()
 	end
 
-	local now = os.clock()
+	-- Clear any objects left over from last frame
+	self:_clearVisibleObjectsQueue()
 
 	-- Make sure our voxels are up to date for up to 0.1 ms
-	self:_pollPhysicsObjects(5e-5)
-	self:_processObjectRefreshQueue(5e-5)
+	self:_pollPhysicsObjects(5e-5, now)
+	self:_processObjectRefreshQueue(5e-5, now)
 
 	-- Update the performance falloff factor so
 	-- we can adjust our refresh rates to hit our target performance time
@@ -998,6 +1073,7 @@ function CullThrottle._getObjects(self: CullThrottle, shouldSizeThrottle: boolea
 
 	local voxelSize = self._voxelSize
 	local bestRefreshRate = self._bestRefreshRate
+	local worstRefreshRate = self._worstRefreshRate
 	local refreshRateRange = self._refreshRateRange
 	local renderDistance = self._renderDistance
 	-- For smaller FOVs, we increase render distance
@@ -1015,62 +1091,131 @@ function CullThrottle._getObjects(self: CullThrottle, shouldSizeThrottle: boolea
 	local maxY = maxBound.Y + 1
 	local maxZ = maxBound.Z + 1
 
-	local thread = coroutine.create(function()
-		local function callback(voxelKey: Vector3, voxel: { Instance }, updateLastVoxelVisiblity: boolean)
-			self:_processVoxel(
-				now,
-				shouldSizeThrottle,
-				updateLastVoxelVisiblity,
-				voxelKey,
-				voxel,
-				cameraPos,
-				bestRefreshRate,
-				refreshRateRange
-			)
-		end
+	local function callback(voxelKey: Vector3, voxel: { Instance }, updateLastVoxelVisiblity: boolean)
+		self:_addVoxelToVisibleObjectsQueue(
+			now,
+			updateLastVoxelVisiblity,
+			voxelKey,
+			voxel,
+			cameraPos,
+			bestRefreshRate,
+			worstRefreshRate,
+			refreshRateRange,
+			renderDistance
+		)
+	end
 
-		-- Split into smaller boxes to start off since the frustum bounding volume
-		-- obviously intersects the frustum planes
+	-- Split into smaller boxes to start off since the frustum bounding volume
+	-- obviously intersects the frustum planes
 
-		-- However if the bounds are not divisible then don't split early
-		if minX == maxX or minY == maxY or minZ == maxZ then
-			self:_getFrustumVoxelsInVolume(now, frustumPlanes, minX, minY, minZ, maxX, maxY, maxZ, callback)
-			return
-		end
+	-- However if the bounds are not divisible then don't split early
+	if minX == maxX or minY == maxY or minZ == maxZ then
+		self:_getFrustumVoxelsInVolume(now, time_limit, frustumPlanes, minX, minY, minZ, maxX, maxY, maxZ, callback)
+		debug.profileend()
 
-		local midBound = (minBound + maxBound) // 2
-		local midX = midBound.X
-		local midY = midBound.Y
-		local midZ = midBound.Z
+		debug.profilebegin("prioritizeVisibleObjects")
+		self._visibleObjectsQueue:batchEnqueue(self._objectPriorityBatch)
+		debug.profileend()
 
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, minX, minY, minZ, midX, midY, midZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, midX, minY, minZ, maxX, midY, midZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, minX, minY, midZ, midX, midY, maxZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, midX, minY, midZ, maxX, midY, maxZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, minX, midY, minZ, midX, maxY, midZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, midX, midY, minZ, maxX, maxY, midZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, minX, midY, midZ, midX, maxY, maxZ, callback)
-		self:_getFrustumVoxelsInVolume(now, frustumPlanes, midX, midY, midZ, maxX, maxY, maxZ, callback)
-	end)
+		debug.profileend()
+		return
+	end
+
+	local midBound = (minBound + maxBound) // 2
+	local midX = midBound.X
+	local midY = midBound.Y
+	local midZ = midBound.Z
+
+	local quadrants = {
+		{ minX, minY, minZ, midX, midY, midZ },
+		{ midX, minY, minZ, maxX, midY, midZ },
+		{ minX, minY, midZ, midX, midY, maxZ },
+		{ midX, minY, midZ, maxX, midY, maxZ },
+		{ minX, midY, minZ, midX, maxY, midZ },
+		{ midX, midY, minZ, maxX, maxY, midZ },
+		{ minX, midY, midZ, midX, maxY, maxZ },
+		{ midX, midY, midZ, maxX, maxY, maxZ },
+	}
+
+	-- Shuffle the order in which we search the quadrants to avoid
+	-- bias in object priority
+	for i = #quadrants, 2, -1 do
+		local j = math.random(i)
+		quadrants[i], quadrants[j] = quadrants[j], quadrants[i]
+	end
+
+	for _, quadrant in quadrants do
+		self:_getFrustumVoxelsInVolume(
+			now,
+			time_limit,
+			frustumPlanes,
+			quadrant[1],
+			quadrant[2],
+			quadrant[3],
+			quadrant[4],
+			quadrant[5],
+			quadrant[6],
+			callback
+		)
+	end
+
+	debug.profileend()
+
+	debug.profilebegin("prioritizeVisibleObjects")
+	self._visibleObjectsQueue:batchEnqueue(self._objectPriorityBatch)
+	debug.profileend()
+
+	debug.profileend()
+end
+
+function CullThrottle._iterateVisibleObjects(self: CullThrottle, shouldLimitTime: boolean): () -> (Instance?, number?)
+	local now = os.clock()
+
+	self:_fillVisibleObjectsQueue(now, if shouldLimitTime then self._searchTimeBudget else 10)
+
+	local queue = self._visibleObjectsQueue
+
+	debug.profilebegin("CullThrottle.iterObjects")
+	local startUpdateClock = os.clock()
+	local updateTimeBudget = self._updateTimeBudget
+	local p0UpdateTimeBudget = updateTimeBudget * 2 -- p0s can go over budget
 
 	return function()
-		if coroutine.status(thread) == "dead" then
+		if queue:isEmpty() then
 			self:_addCallTime(now)
+			debug.profileend()
 			return
 		end
 
-		local success, object, elapsed = coroutine.resume(thread)
-		if not success then
-			warn("CullThrottle._getObjects thread error: " .. tostring(object))
-			return
+		if shouldLimitTime then
+			local budget = if queue:peekPriority() < 1 then p0UpdateTimeBudget else updateTimeBudget
+			if os.clock() - startUpdateClock > budget then
+				-- Out of time, can't update the rest this frame.
+				-- That's okay, they'll be higher priority next time.
+				self:_addCallTime(now)
+				debug.profileend()
+				return
+			end
 		end
 
+		local object = queue:dequeue()
 		if not object then
 			self:_addCallTime(now)
+			debug.profileend()
 			return
 		end
 
-		return object, elapsed
+		local objectData = self._objects[object]
+		if not objectData then
+			self:_addCallTime(now)
+			debug.profileend()
+			return
+		end
+
+		local objectDeltaTime = now - objectData.lastUpdateClock
+		objectData.lastUpdateClock = now
+
+		return object, objectDeltaTime
 	end
 end
 
@@ -1086,7 +1231,7 @@ function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end
 
-	self:_processObjectRefreshQueue(5)
+	self:_processObjectRefreshQueue(5, os.clock())
 end
 
 function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
@@ -1199,12 +1344,18 @@ function CullThrottle.removeObject(self: CullThrottle, object: Instance)
 	end
 end
 
-function CullThrottle.getObjectsInView(self: CullThrottle): () -> (Instance?, number?)
-	return self:_getObjects(false)
+function CullThrottle.getObjectsInView(self: CullThrottle): { Instance }
+	self:_fillVisibleObjectsQueue(os.clock(), 5)
+
+	return self._visibleObjectsQueue:items()
 end
 
-function CullThrottle.getObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?)
-	return self:_getObjects(true)
+function CullThrottle.iterObjectsInView(self: CullThrottle): () -> (Instance?, number?)
+	return self:_iterateVisibleObjects(false)
+end
+
+function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?)
+	return self:_iterateVisibleObjects(true)
 end
 
 return CullThrottle
