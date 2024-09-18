@@ -38,10 +38,14 @@ function Utility.evalColorSequence(sequence: ColorSequence, time: number)
 	return sequence.Keypoints[#sequence.Keypoints].Value
 end
 
+function Utility.getHeatmapColor(alpha: number)
+	return Utility.evalColorSequence(HEATMAP_COLOR, alpha)
+end
+
 function Utility.applyHeatmapColor(object: Instance, alpha: number)
-	local color = Utility.evalColorSequence(HEATMAP_COLOR, alpha)
+	local color = Utility.getHeatmapColor(alpha)
 	if object:IsA("BasePart") then
-		object.Color = object.Color:Lerp(color, 0.25)
+		object.Color = object.Color:Lerp(color, 0.2)
 	elseif object:IsA("TextLabel") then
 		object.TextColor3 = color
 	elseif object:IsA("GuiObject") then

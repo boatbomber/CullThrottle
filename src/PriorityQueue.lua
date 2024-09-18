@@ -84,11 +84,11 @@ function PriorityQueue.enqueue(self: PriorityQueue, item: any, priority: number)
 	return self
 end
 
-function PriorityQueue.batchEnqueue(self: PriorityQueue, iparray: {}): ()
+function PriorityQueue.batchEnqueue(self: PriorityQueue, itemsBatch: { any }, prioritiesBatch: { number }): ()
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local size = self._size
-	for i = 1, #iparray, 2 do
-		local item, priority = iparray[i], iparray[i + 1]
+	for i = 1, #itemsBatch do
+		local item, priority = itemsBatch[i], prioritiesBatch[i]
 		if indices[item] ~= nil then
 			error("Item " .. tostring(indices[item]) .. " is already in the heap")
 		end
