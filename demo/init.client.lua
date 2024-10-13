@@ -2,71 +2,90 @@ math.randomseed(0) -- Constant seed for reproducibility
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
-local VISIBLE_COLOR = Color3.new(1, 1, 1)
-local INVISIBLE_COLOR = Color3.new(0, 0, 0)
-
 local CullThrottle = require(Packages:WaitForChild("CullThrottle"))
 
+local Utility = require(script.Utility)
+local Blocks = require(script.Blocks)
+
+local _VISIBLE_COLOR = Color3.fromRGB(166, 35, 91)
+local INVISIBLE_COLOR = Color3.fromRGB(60, 84, 101)
+local TAG = "FloatingBlock"
+
+-- Let's make some blocks to run effects on
+local BlocksFolder = Instance.new("Folder")
+BlocksFolder.Name = "Blocks"
+
+local blockTimeOffsets = {}
+
+for _, block in Blocks.generateBlockClusters(200, 20_000) do
+	block:AddTag(TAG)
+	block.Color = INVISIBLE_COLOR
+	block.Parent = BlocksFolder
+
+	blockTimeOffsets[block] = math.random() * 2
+end
+
+BlocksFolder.Parent = workspace
+
+-- We need to tell CullThrottle about all the objects that we want it to manage.
 local FloatingBlocksUpdater = CullThrottle.new()
+-- FloatingBlocksUpdater:setRenderDistance(800)
+
+for _, block in CollectionService:GetTagged(TAG) do
+	FloatingBlocksUpdater:addObject(block)
+end
+
+CollectionService:GetInstanceAddedSignal(TAG):Connect(function(block)
+	FloatingBlocksUpdater:addObject(block)
+end)
+
+CollectionService:GetInstanceRemovedSignal(TAG):Connect(function(block)
+	FloatingBlocksUpdater:removeObject(block)
+end)
 
 -- Change colors of blocks to indicate visibility
-FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
-	block.Color = VISIBLE_COLOR
-end)
+-- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
+-- 	block.Color = VISIBLE_COLOR
+-- end)
 
 FloatingBlocksUpdater.ObjectExitedView:Connect(function(block)
 	block.Color = INVISIBLE_COLOR
 end)
 
--- We need to tell CullThrottle about all the objects that we want it to manage.
-for _, block in CollectionService:GetTagged("FloatingBlock") do
-	FloatingBlocksUpdater:addObject(block)
-end
+-- Change color of block to indicate refresh rate
+local blocks, cframes = {}, {}
+RunService.RenderStepped:Connect(function()
+	table.clear(blocks)
+	table.clear(cframes)
 
-CollectionService:GetInstanceAddedSignal("FloatingBlock"):Connect(function(block)
-	FloatingBlocksUpdater:addObject(block)
-end)
+	for block, dt in FloatingBlocksUpdater:iterObjectsToUpdate() do
+		if dt > 0.5 then
+			-- This object hasn't been visible in a while so let's
+			-- avoid a jump in the spin animation and just start spinning
+			-- from where we are
+			dt = 1 / 30
+		end
 
-CollectionService:GetInstanceRemovedSignal("FloatingBlock"):Connect(function(block)
-	FloatingBlocksUpdater:removeObject(block)
-end)
+		Utility.applyHeatmapColor(
+			block,
+			1 - (dt - FloatingBlocksUpdater._bestRefreshRate) / FloatingBlocksUpdater._refreshRateRange
+		)
 
--- Let's make some blocks to run effects on
-local blockTimeOffsets = {}
-
-local BlocksFolder = Instance.new("Folder")
-BlocksFolder.Name = "Blocks"
-for _ = 1, 100 do
-	local groupOrigin = Vector3.new(math.random(-800, 800), math.random(-200, 200), math.random(-800, 800))
-	for _ = 1, 110 do
-		local part = Instance.new("Part")
-		part.Size = Vector3.new(1, 1, 1) * math.random(1, 15)
-		part.Color = Color3.new() -- Color3.fromHSV(math.random(), 0.5, 1)
-		part.CFrame = CFrame.new(
-			groupOrigin + Vector3.new(math.random(-120, 120), math.random(-80, 80), math.random(-120, 120))
-		) * CFrame.Angles(math.rad(math.random(360)), math.rad(math.random(360)), math.rad(math.random(360)))
-		part.Anchored = true
-		part.CanCollide = false
-		part.CastShadow = false
-		part.CanTouch = false
-		part.CanQuery = false
-		part.Locked = true
-		part:AddTag("FloatingBlock")
-		part.Parent = BlocksFolder
-
-		blockTimeOffsets[part] = math.random() * 2
+		table.insert(blocks, block)
+		table.insert(cframes, block.CFrame * CFrame.Angles(0, math.rad(90) * dt, 0))
 	end
-end
 
-BlocksFolder.Parent = workspace
+	workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
+end)
 
 ----------------------------------------------------------------------------------
 -- The rest of this is debug/dev stuff
 
-local Utility = require(script.Utility)
+local DEBUG = false
 
 local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 local ScreenGui = Instance.new("ScreenGui")
@@ -100,10 +119,10 @@ task.spawn(function()
 end)
 
 -- Enable gizmo debug views
-FloatingBlocksUpdater.DEBUG_MODE = false
+FloatingBlocksUpdater.DEBUG_MODE = DEBUG
 
 -- Use a fake camera to get a third person view
-if false then
+if DEBUG then
 	local testCam = Instance.new("Part")
 	testCam.Name = "_CullThrottleTestCam"
 	testCam.Size = Vector3.new(16, 9, 3)
