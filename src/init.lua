@@ -93,10 +93,10 @@ function CullThrottle.new(): CullThrottle
 	self.ObjectEnteredView = self._enteredViewEvent.Event
 	self.ObjectExitedView = self._exitedViewEvent.Event
 
-	self._voxelSize = 75
+	self._voxelSize = 100
 	self._halfVoxelSizeVec = Vector3.one * (self._voxelSize / 2)
 	self._radiusThresholdForCorners = self._voxelSize * (1 / 8)
-	self._renderDistance = 400
+	self._renderDistance = 500
 	self._searchTimeBudget = 1.25 / 1000
 	self._updateTimeBudget = 0.35 / 1000
 	self._bestRefreshRate = 1 / 60
