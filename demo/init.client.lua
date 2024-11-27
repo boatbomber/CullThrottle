@@ -72,7 +72,7 @@ RunService.RenderStepped:Connect(function()
 
 		Utility.applyHeatmapColor(
 			block,
-			1 - (dt - FloatingBlocksUpdater._bestRefreshRate) / FloatingBlocksUpdater._refreshRateRange
+			1 - (dt - FloatingBlocksUpdater.Config.bestRefreshRate) / FloatingBlocksUpdater.Config.refreshRateRange
 		)
 
 		table.insert(blocks, block)

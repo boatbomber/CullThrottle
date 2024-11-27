@@ -1,4 +1,5 @@
 --!strict
+--!native
 --[[
     PriorityQueue by Ilya Kolbin
     url: github.com/iskolbin/priorityqueue

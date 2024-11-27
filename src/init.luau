@@ -1,5 +1,6 @@
 --!strict
 --!optimize 2
+--!native
 
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
@@ -8,11 +9,15 @@ if RunService:IsServer() and not RunService:IsEdit() then
 	error("CullThrottle is a client side effect and cannot be used on the server")
 end
 
+local types = require(script.types)
 local PriorityQueue = require(script.PriorityQueue)
-local CameraCache = require(script.CameraCache)
-local Gizmo = require(script.Gizmo)
+local Config = require(script.Config)
+local ObjectDimensions = require(script.Utilities.ObjectDimensions)
+local CameraCache = require(script.Utilities.CameraCache)
+local Gizmo = require(script.Utilities.Gizmo)
 
 local EPSILON = 1e-4
+local P0_THRESHOLD = 0.7
 local LAST_VISIBILITY_GRACE_PERIOD = 0.15
 local NEARBY_DISTANCE_THRESHOLD = 30
 
@@ -31,50 +36,22 @@ local DISTANCE_PRIORITY_WEIGHT = 2
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
-type ObjectData = {
-	cframe: CFrame,
-	distance: number,
-	halfBoundingBox: Vector3,
-	radius: number,
-	voxelKeys: { [Vector3]: true },
-	desiredVoxelKeys: { [Vector3]: boolean },
-	lastCheckClock: number,
-	lastUpdateClock: number,
-	jitterOffset: number,
-	changeConnections: { RBXScriptConnection },
-	cframeSource: Instance,
-	cframeType: string,
-	boundingBoxSource: Instance,
-	boundingBoxType: string,
-}
-
 type CullThrottleProto = {
-	DEBUG_MODE: boolean,
+	Config: Config.Config,
 	ObjectEnteredView: RBXScriptSignal,
 	ObjectExitedView: RBXScriptSignal,
 	_enteredViewEvent: BindableEvent,
 	_exitedViewEvent: BindableEvent,
-	_bestRefreshRate: number,
-	_worstRefreshRate: number,
-	_refreshRateRange: number,
-	_renderDistance: number,
-	_searchTimeBudget: number,
-	_updateTimeBudget: number,
-	_performanceFalloffFactor: number,
-	_voxelSize: number,
-	_halfVoxelSizeVec: Vector3,
-	_radiusThresholdForCorners: number,
-	_voxels: { [Vector3]: { Instance } },
-	_objects: { [Instance]: ObjectData },
+	_voxels: { [types.VoxelKey]: types.Voxel },
+	_objects: { [Instance]: types.ObjectData },
 	_physicsObjects: { Instance },
-	_objectRefreshQueue: PriorityQueue.PriorityQueue,
+	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue,
+	_updateObjectVoxelsBatch: { items: { Instance }, priorities: { number }, index: number },
 	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
-	_visibleObjects: { Instance },
-	_visibleObjectPriorities: { number },
-	_visibleObjectIndex: number,
+	_visibleObjects: { items: { Instance }, priorities: { number }, index: number },
 	_objectVisibilityTimestamps: { [Instance]: number },
 	_physicsObjectIterIndex: number,
-	_lastVoxelVisibility: { [Vector3]: number },
+	_lastVoxelVisibility: { [types.VoxelKey]: number },
 	_lastCallTimes: { number },
 	_lastCallTimeIndex: number,
 	_renderConnectionId: string,
@@ -85,7 +62,7 @@ export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThro
 function CullThrottle.new(): CullThrottle
 	local self = setmetatable({}, CullThrottle)
 
-	self.DEBUG_MODE = false
+	self.Config = Config.new()
 
 	self._enteredViewEvent = Instance.new("BindableEvent")
 	self._exitedViewEvent = Instance.new("BindableEvent")
@@ -93,25 +70,14 @@ function CullThrottle.new(): CullThrottle
 	self.ObjectEnteredView = self._enteredViewEvent.Event
 	self.ObjectExitedView = self._exitedViewEvent.Event
 
-	self._voxelSize = 100
-	self._halfVoxelSizeVec = Vector3.one * (self._voxelSize / 2)
-	self._radiusThresholdForCorners = self._voxelSize * (1 / 8)
-	self._renderDistance = 500
-	self._searchTimeBudget = 1.25 / 1000
-	self._updateTimeBudget = 0.35 / 1000
-	self._bestRefreshRate = 1 / 60
-	self._worstRefreshRate = 1 / 15
-	self._refreshRateRange = self._worstRefreshRate - self._bestRefreshRate
-	self._performanceFalloffFactor = 1
 	self._voxels = {}
 	self._objects = {}
 	self._physicsObjects = {}
 	self._physicsObjectIterIndex = 1
-	self._objectRefreshQueue = PriorityQueue.new()
+	self._updateObjectVoxelsQueue = PriorityQueue.new()
+	self._updateObjectVoxelsBatch = { items = {}, priorities = {}, index = 0 }
 	self._visibleObjectsQueue = PriorityQueue.new()
-	self._visibleObjects = {}
-	self._visibleObjectPriorities = {}
-	self._visibleObjectIndex = 1
+	self._visibleObjects = { items = {}, priorities = {}, index = 0 }
 	self._objectVisibilityTimestamps = {}
 	self._lastVoxelVisibility = {}
 	self._lastCallTimes = table.create(5, 0)
@@ -136,11 +102,11 @@ function CullThrottle._drawBox(
 	y1: number,
 	z1: number
 )
-	if not self.DEBUG_MODE then
+	if not self.Config.DEBUG_MODE then
 		return
 	end
 
-	local voxelSize = self._voxelSize
+	local voxelSize = self.Config.voxelSize
 	local x0World, y0World, z0World = x0 * voxelSize, y0 * voxelSize, z0 * voxelSize
 	local x1World, y1World, z1World = x1 * voxelSize, y1 * voxelSize, z1 * voxelSize
 
@@ -171,325 +137,29 @@ end
 
 function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): number
 	local averageCallTime = self:_getAverageCallTime()
-	local targetCallTime = self._searchTimeBudget
+	local targetCallTime = self.Config.searchTimeBudget
 	local adjustmentFactor = averageCallTime / targetCallTime
 
 	if adjustmentFactor > 1 then
 		-- We're overbudget, increase falloff (max 2)
-		self._performanceFalloffFactor =
-			math.min(self._performanceFalloffFactor * (1 + (adjustmentFactor - 1) * 0.5), 2)
+		self.Config.performanceFalloffFactor =
+			math.min(self.Config.performanceFalloffFactor * (1 + (adjustmentFactor - 1) * 0.5), 2)
 	else
 		-- We have extra budget, decrease falloff (min 0.5)
-		self._performanceFalloffFactor =
-			math.max(self._performanceFalloffFactor * (1 - (1 - adjustmentFactor) * 0.5), 0.5)
+		self.Config.performanceFalloffFactor =
+			math.max(self.Config.performanceFalloffFactor * (1 - (1 - adjustmentFactor) * 0.5), 0.5)
 	end
 
-	return self._performanceFalloffFactor
-end
-
-function CullThrottle._getObjectCFrameSource(self: CullThrottle, object: Instance): (Instance?, string?)
-	if object == workspace then
-		-- Workspace technically inherits Model,
-		-- but the origin vector isn't useful here
-		return nil, nil
-	end
-
-	if object:IsA("BasePart") then
-		return object, "BasePart"
-	elseif object:IsA("Model") then
-		return object, "Model"
-	elseif object:IsA("Bone") then
-		return object, "Bone"
-	elseif object:IsA("Attachment") then
-		return object, "Attachment"
-	elseif object:IsA("Beam") then
-		return object, "Beam"
-	elseif not object.Parent then
-		return nil, nil
-	else
-		return self:_getObjectCFrameSource(object.Parent)
-	end
-end
-
-function CullThrottle._getObjectBoundingBoxSource(self: CullThrottle, object: Instance): (Instance?, string?)
-	if object == workspace then
-		-- Workspace technically inherits Model,
-		-- but the origin vector isn't useful here
-		return nil, nil
-	end
-
-	if object:IsA("BasePart") then
-		return object, "BasePart"
-	elseif object:IsA("Model") then
-		return object, "Model"
-	elseif object:IsA("Beam") then
-		return object, "Beam"
-	elseif object:IsA("PointLight") or object:IsA("SpotLight") then
-		return object, "Light"
-	elseif object:IsA("Sound") then
-		return object, "Sound"
-	elseif not object.Parent then
-		return nil, nil
-	else
-		return self:_getObjectBoundingBoxSource(object.Parent)
-	end
-end
-
-function CullThrottle._getObjectCFrame(_self: CullThrottle, objectData: ObjectData): CFrame?
-	local object = objectData.cframeSource
-	local sourceType = objectData.cframeType
-
-	if sourceType == "BasePart" then
-		return (object :: BasePart).CFrame
-	elseif sourceType == "Model" then
-		return (object :: Model):GetPivot()
-	elseif sourceType == "Bone" then
-		return (object :: Bone).TransformedWorldCFrame
-	elseif sourceType == "Attachment" then
-		return (object :: Attachment).WorldCFrame
-	elseif sourceType == "Beam" then
-		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
-		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
-			return nil
-		end
-		return attachment0.WorldCFrame:Lerp(attachment1.WorldCFrame, 0.5)
-	end
-
-	return nil
-end
-
-function CullThrottle._connectCFrameChangeEvent(
-	self: CullThrottle,
-	objectData: ObjectData,
-	callback: (CFrame) -> ()
-): { RBXScriptConnection }
-	local connections = {}
-
-	local object = objectData.cframeSource
-	if not object then
-		return connections
-	end
-
-	local sourceType = objectData.cframeType
-
-	if sourceType == "BasePart" then
-		local typedObject: BasePart = object :: BasePart
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("CFrame"):Connect(function()
-				callback(typedObject.CFrame)
-			end)
-		)
-	elseif sourceType == "Model" then
-		local typedObject: Model = object :: Model
-		if typedObject.PrimaryPart then
-			table.insert(
-				connections,
-				typedObject.PrimaryPart:GetPropertyChangedSignal("CFrame"):Connect(function()
-					callback(typedObject:GetPivot())
-				end)
-			)
-		else
-			table.insert(
-				connections,
-				typedObject:GetPropertyChangedSignal("WorldPivot"):Connect(function()
-					callback(typedObject:GetPivot())
-				end)
-			)
-		end
-	elseif sourceType == "Bone" then
-		local typedObject: Bone = object :: Bone
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("TransformedWorldCFrame"):Connect(function()
-				callback(typedObject.TransformedWorldCFrame)
-			end)
-		)
-	elseif sourceType == "Attachment" then
-		local typedObject: Attachment = object :: Attachment
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(typedObject.WorldCFrame)
-			end)
-		)
-	elseif sourceType == "Beam" then
-		local typedObject: Beam = object :: Beam
-		-- Beams are roughly located between their attachments
-		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
-		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
-			return connections
-		end
-		table.insert(
-			connections,
-			attachment0:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(self:_getObjectCFrame(objectData) or CFrame.identity)
-			end)
-		)
-		table.insert(
-			connections,
-			attachment1:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(self:_getObjectCFrame(objectData) or CFrame.identity)
-			end)
-		)
-	end
-
-	return connections
-end
-
-function CullThrottle._getObjectBoundingBox(_self: CullThrottle, objectData: ObjectData): Vector3?
-	local object = objectData.boundingBoxSource
-	local sourceType = objectData.boundingBoxType
-
-	if sourceType == "BasePart" then
-		return (object :: BasePart).Size
-	elseif sourceType == "Model" then
-		local _, size = (object :: Model):GetBoundingBox()
-		return size
-	elseif sourceType == "Beam" then
-		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
-		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
-			return nil
-		end
-
-		local width = math.max((object :: Beam).Width0, (object :: Beam).Width1)
-		local length = (attachment0.WorldPosition - attachment1.WorldPosition).Magnitude
-		return Vector3.new(width, width, length)
-	elseif sourceType == "Light" then
-		return Vector3.one * (object :: SpotLight | PointLight).Range
-	elseif sourceType == "Sound" then
-		return Vector3.one * (object :: Sound).RollOffMaxDistance
-	end
-
-	return nil
-end
-
-function CullThrottle._connectBoundingBoxChangeEvent(
-	self: CullThrottle,
-	objectData: ObjectData,
-	callback: (Vector3) -> ()
-): { RBXScriptConnection }
-	local connections = {}
-
-	local object = objectData.boundingBoxSource
-	if not object then
-		return connections
-	end
-
-	local sourceType = objectData.boundingBoxType
-
-	if sourceType == "BasePart" then
-		local typedObject: BasePart = object :: BasePart
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("Size"):Connect(function()
-				callback(typedObject.Size)
-			end)
-		)
-	elseif sourceType == "Model" then
-		local typedObject: Model = object :: Model
-		-- TODO: Figure out a decent way to tell when a model bounds change
-		-- without connecting to all descendants size changes
-		table.insert(
-			connections,
-			typedObject.DescendantAdded:Connect(function()
-				local _, size = typedObject:GetBoundingBox()
-				callback(size)
-			end)
-		)
-		table.insert(
-			connections,
-			typedObject.DescendantRemoving:Connect(function()
-				local _, size = typedObject:GetBoundingBox()
-				callback(size)
-			end)
-		)
-	elseif sourceType == "Beam" then
-		local typedObject: Beam = object :: Beam
-		-- Beams sized between their attachments with their defined width
-		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
-		if not attachment0 or not attachment1 then
-			warn("Cannot determine bounding box of Beam since it does not have attachments")
-			return connections
-		end
-
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("Width0"):Connect(function()
-				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
-			end)
-		)
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("Width1"):Connect(function()
-				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
-			end)
-		)
-		table.insert(
-			connections,
-			attachment0:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
-			end)
-		)
-		table.insert(
-			connections,
-			attachment1:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(self:_getObjectBoundingBox(objectData) or Vector3.one)
-			end)
-		)
-	elseif sourceType == "Light" then
-		local typedObject: SpotLight | PointLight = object :: SpotLight | PointLight
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("Range"):Connect(function()
-				callback(Vector3.one * typedObject.Range)
-			end)
-		)
-	elseif sourceType == "Sound" then
-		local typedObject: Sound = object :: Sound
-		table.insert(
-			connections,
-			typedObject:GetPropertyChangedSignal("RollOffMaxDistance"):Connect(function()
-				callback(Vector3.one * typedObject.RollOffMaxDistance)
-			end)
-		)
-	end
-
-	return connections
-end
-
-function CullThrottle._subscribeToDimensionChanges(self: CullThrottle, object: Instance, objectData: ObjectData)
-	local cframeChangeConnections = self:_connectCFrameChangeEvent(objectData, function(cframe: CFrame)
-		-- Update CFrame
-		objectData.cframe = cframe
-		self:_updateDesiredVoxelKeys(object, objectData)
-	end)
-	local boundingBoxChangeConnections = self:_connectBoundingBoxChangeEvent(objectData, function(boundingBox: Vector3)
-		-- Update bounding box and radius
-		objectData.halfBoundingBox = boundingBox / 2
-		objectData.radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2
-
-		self:_updateDesiredVoxelKeys(object, objectData)
-	end)
-
-	for _, connection in cframeChangeConnections do
-		table.insert(objectData.changeConnections, connection)
-	end
-	for _, connection in boundingBoxChangeConnections do
-		table.insert(objectData.changeConnections, connection)
-	end
+	return self.Config.performanceFalloffFactor
 end
 
 function CullThrottle._updateDesiredVoxelKeys(
 	self: CullThrottle,
 	object: Instance,
-	objectData: ObjectData
-): { [Vector3]: boolean }
-	local voxelSize = self._voxelSize
-	local radiusThresholdForCorners = self._radiusThresholdForCorners
+	objectData: types.ObjectData
+): { [types.VoxelKey]: boolean }
+	local voxelSize = self.Config.voxelSize
+	local radiusThresholdForCorners = self.Config.radiusThresholdForCorners
 	local desiredVoxelKeys = {}
 
 	-- We'll get the voxelKeys for the center and the 8 corners of the object
@@ -535,13 +205,15 @@ function CullThrottle._updateDesiredVoxelKeys(
 		local difference = position - CameraCache.Position
 		local priority = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
 
-		self._objectRefreshQueue:enqueue(object, priority)
+		self._updateObjectVoxelsBatch.index += 1
+		self._updateObjectVoxelsBatch.items[self._updateObjectVoxelsBatch.index] = object
+		self._updateObjectVoxelsBatch.priorities[self._updateObjectVoxelsBatch.index] = priority
 	end
 
 	return desiredVoxelKeys
 end
 
-function CullThrottle._insertToVoxel(self: CullThrottle, voxelKey: Vector3, object: Instance)
+function CullThrottle._insertToVoxel(self: CullThrottle, voxelKey: types.VoxelKey, object: Instance)
 	local voxel = self._voxels[voxelKey]
 	if not voxel then
 		-- New voxel, init the list with this object inside
@@ -552,7 +224,7 @@ function CullThrottle._insertToVoxel(self: CullThrottle, voxelKey: Vector3, obje
 	end
 end
 
-function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: Vector3, object: Instance)
+function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: types.VoxelKey, object: Instance)
 	local voxel = self._voxels[voxelKey]
 	if not voxel then
 		return
@@ -583,8 +255,19 @@ end
 
 function CullThrottle._processObjectRefreshQueue(self: CullThrottle, timeBudget: number, now: number)
 	debug.profilebegin("processObjectRefreshQueue")
-	while (not self._objectRefreshQueue:isEmpty()) and (os.clock() - now < timeBudget) do
-		local object = self._objectRefreshQueue:dequeue()
+
+	if self._updateObjectVoxelsBatch.index > 0 then
+		self._updateObjectVoxelsQueue:batchEnqueue(
+			self._updateObjectVoxelsBatch.items,
+			self._updateObjectVoxelsBatch.priorities
+		)
+		table.clear(self._updateObjectVoxelsBatch.items)
+		table.clear(self._updateObjectVoxelsBatch.priorities)
+		self._updateObjectVoxelsBatch.index = 0
+	end
+
+	while (not self._updateObjectVoxelsQueue:isEmpty()) and (os.clock() - now < timeBudget) do
+		local object = self._updateObjectVoxelsQueue:dequeue()
 		local objectData = self._objects[object]
 		if (not objectData) or not next(objectData.desiredVoxelKeys) then
 			continue
@@ -602,6 +285,7 @@ function CullThrottle._processObjectRefreshQueue(self: CullThrottle, timeBudget:
 			end
 		end
 	end
+
 	debug.profileend()
 end
 
@@ -636,7 +320,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 		end
 
 		-- Update the object's cframe
-		local cframe = self:_getObjectCFrame(objectData)
+		local cframe = ObjectDimensions._getObjectCFrame(objectData)
 		if cframe then
 			objectData.cframe = cframe
 			self:_updateDesiredVoxelKeys(object, objectData)
@@ -662,7 +346,7 @@ function CullThrottle._isBoxInFrustum(
 	z1: number
 ): (boolean, boolean) -- Returns (intersects, completelyInside)
 	debug.profilebegin("isBoxInFrustum")
-	local voxelSize = self._voxelSize
+	local voxelSize = self.Config.voxelSize
 	-- Ensure x0 <= x1, y0 <= y1, z0 <= z1
 	local x0W, x1W = x0 * voxelSize, x1 * voxelSize
 	local y0W, y1W = y0 * voxelSize, y1 * voxelSize
@@ -716,8 +400,8 @@ function CullThrottle._addVoxelToVisibleObjects(
 	self: CullThrottle,
 	now: number,
 	updateLastVoxelVisiblity: boolean,
-	voxelKey: Vector3,
-	voxel: { Instance },
+	voxelKey: types.VoxelKey,
+	voxel: types.Voxel,
 	cameraPos: Vector3,
 	bestRefreshRate: number,
 	worstRefreshRate: number,
@@ -731,9 +415,9 @@ function CullThrottle._addVoxelToVisibleObjects(
 	end
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
-	local visibleObjects = self._visibleObjects
-	local visibleObjectPriorities = self._visibleObjectPriorities
-	local visibleObjectIndex = self._visibleObjectIndex
+	local visibleObjectsItems = self._visibleObjects.items
+	local visibleObjectsPriorities = self._visibleObjects.priorities
+	local visibleObjectsIndex = self._visibleObjects.index
 
 	for _, object in voxel do
 		local objectData = self._objects[object]
@@ -753,7 +437,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 			continue
 		end
 
-		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self._performanceFalloffFactor
+		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self.Config.performanceFalloffFactor
 		local elapsed = now - objectData.lastUpdateClock
 		local jitteredElapsed = elapsed + objectData.jitterOffset
 
@@ -794,9 +478,9 @@ function CullThrottle._addVoxelToVisibleObjects(
 			-- )
 		end
 
-		visibleObjects[visibleObjectIndex] = object
-		visibleObjectPriorities[visibleObjectIndex] = objectPriority
-		visibleObjectIndex += 1
+		visibleObjectsIndex += 1
+		visibleObjectsItems[visibleObjectsIndex] = object
+		visibleObjectsPriorities[visibleObjectsIndex] = objectPriority
 
 		if objectVisibilityTimestamps[object] == nil then
 			-- This object wasn't visible last frame but it is now
@@ -805,7 +489,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 		objectVisibilityTimestamps[object] = now
 	end
 
-	self._visibleObjectIndex = visibleObjectIndex
+	self._visibleObjects.index = visibleObjectsIndex
 
 	debug.profileend()
 end
@@ -821,7 +505,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 	x1: number,
 	y1: number,
 	z1: number,
-	callback: (Vector3, { Instance }, boolean) -> ()
+	callback: (types.VoxelKey, types.Voxel, boolean) -> ()
 )
 	local isSingleVoxel = x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1
 	local voxels = self._voxels
@@ -1066,7 +750,7 @@ function CullThrottle._getPlanesAndBounds(
 			// voxelSize
 	)
 
-	if self.DEBUG_MODE then
+	if self.Config.DEBUG_MODE then
 		task.defer(function()
 			Gizmo.setColor3(Color3.fromRGB(168, 87, 219))
 			Gizmo.setTransparency(0)
@@ -1096,15 +780,21 @@ function CullThrottle._getPlanesAndBounds(
 end
 
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
-	self._visibleObjectIndex = 1
-	table.clear(self._visibleObjects)
-	table.clear(self._visibleObjectPriorities)
+	if self._visibleObjects.index > 0 then
+		self._visibleObjects.index = 0
+		table.clear(self._visibleObjects.items)
+		table.clear(self._visibleObjects.priorities)
+	end
 	self._visibleObjectsQueue:clear()
 end
 
 function CullThrottle._fillVisibleObjectsQueue(self: CullThrottle)
+	if self._visibleObjects.index == 0 then
+		return
+	end
+
 	debug.profilebegin("fillVisibleObjectsQueue")
-	self._visibleObjectsQueue:batchEnqueue(self._visibleObjects, self._visibleObjectPriorities)
+	self._visibleObjectsQueue:batchEnqueue(self._visibleObjects.items, self._visibleObjects.priorities)
 	debug.profileend()
 end
 
@@ -1126,7 +816,7 @@ end
 function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	debug.profilebegin("findVisibleObjects")
 
-	if self.DEBUG_MODE then
+	if self.Config.DEBUG_MODE then
 		Gizmo.enableGizmos()
 	else
 		Gizmo.disableGizmos()
@@ -1135,12 +825,12 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	-- Clear any objects left over from last frame
 	self:_clearVisibleObjects()
 
-	local timeBudget = self._searchTimeBudget
-	local voxelSize = self._voxelSize
-	local bestRefreshRate = self._bestRefreshRate
-	local worstRefreshRate = self._worstRefreshRate
-	local refreshRateRange = self._refreshRateRange
-	local renderDistance = self._renderDistance
+	local timeBudget = self.Config.searchTimeBudget
+	local voxelSize = self.Config.voxelSize
+	local bestRefreshRate = self.Config.bestRefreshRate
+	local worstRefreshRate = self.Config.worstRefreshRate
+	local refreshRateRange = self.Config.refreshRateRange
+	local renderDistance = self.Config.renderDistance
 	-- For smaller FOVs, we increase render distance
 	if CameraCache.FieldOfView < 60 then
 		renderDistance *= 2 - CameraCache.FieldOfView / 60
@@ -1246,9 +936,9 @@ function CullThrottle._processObjectVisibility(self: CullThrottle)
 end
 
 function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
-	self._voxelSize = voxelSize
-	self._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
-	self._radiusThresholdForCorners = voxelSize * (1 / 8)
+	self.Config.voxelSize = voxelSize
+	self.Config.halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
+	self.Config.radiusThresholdForCorners = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
 	table.clear(self._voxels)
@@ -1261,7 +951,7 @@ function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
 end
 
 function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
-	self._renderDistance = renderDistance
+	self.Config.renderDistance = renderDistance
 end
 
 function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: number)
@@ -1272,14 +962,14 @@ function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: n
 		worst = 1 / worst
 	end
 
-	self._bestRefreshRate = best
-	self._worstRefreshRate = worst
-	self._refreshRateRange = worst - best
+	self.Config.bestRefreshRate = best
+	self.Config.worstRefreshRate = worst
+	self.Config.refreshRateRange = worst - best
 end
 
 function CullThrottle.addObject(self: CullThrottle, object: Instance)
-	local cframeSource, cframeType = self:_getObjectCFrameSource(object)
-	local boundingBoxSource, boundingBoxType = self:_getObjectBoundingBoxSource(object)
+	local cframeSource, cframeType = ObjectDimensions._getObjectCFrameSource(object)
+	local boundingBoxSource, boundingBoxType = ObjectDimensions._getObjectBoundingBoxSource(object)
 
 	if not cframeSource or not cframeType then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, cframe is unknown")
@@ -1289,7 +979,7 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, bounding box is unknown")
 	end
 
-	local objectData: ObjectData = {
+	local objectData: types.ObjectData = {
 		cframe = CFrame.new(),
 		distance = 1,
 		halfBoundingBox = Vector3.one,
@@ -1306,7 +996,7 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 		boundingBoxType = boundingBoxType,
 	}
 
-	local cframe = self:_getObjectCFrame(objectData)
+	local cframe = ObjectDimensions._getObjectCFrame(objectData)
 	if not cframe then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, cframe is unknown")
 	end
@@ -1314,7 +1004,7 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 	objectData.cframe = cframe
 	objectData.distance = (CameraCache.Position - cframe.Position).Magnitude
 
-	local boundingBox = self:_getObjectBoundingBox(objectData)
+	local boundingBox = ObjectDimensions._getObjectBoundingBox(objectData)
 	if not boundingBox then
 		error("Cannot add " .. object:GetFullName() .. " to CullThrottle, bounding box is unknown")
 	end
@@ -1322,7 +1012,17 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 	objectData.halfBoundingBox = boundingBox / 2
 	objectData.radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2
 
-	self:_subscribeToDimensionChanges(object, objectData)
+	ObjectDimensions._subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
+		-- Update CFrame
+		objectData.cframe = newCFrame
+		self:_updateDesiredVoxelKeys(object, objectData)
+	end, function(newBoundingBox: Vector3)
+		-- Update bounding box and radius
+		objectData.halfBoundingBox = newBoundingBox / 2
+		objectData.radius = math.max(newBoundingBox.X, newBoundingBox.Y, newBoundingBox.Z) / 2
+
+		self:_updateDesiredVoxelKeys(object, objectData)
+	end)
 	self:_updateDesiredVoxelKeys(object, objectData)
 
 	self._objects[object] = objectData
@@ -1373,7 +1073,7 @@ function CullThrottle.removeObject(self: CullThrottle, object: Instance)
 end
 
 function CullThrottle.getObjectsInView(self: CullThrottle): { Instance }
-	return self._visibleObjects
+	return self._visibleObjects.items
 end
 
 function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?)
@@ -1385,7 +1085,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 
 	local updateStartClock = os.clock()
 	local queue = self._visibleObjectsQueue
-	local updateTimeBudget = self._updateTimeBudget
+	local updateTimeBudget = self.Config.updateTimeBudget
 	local p0UpdateTimeBudget = updateTimeBudget * 2 -- p0s can go over budget
 
 	return function()
@@ -1394,14 +1094,14 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 			return
 		end
 
-		local budget = if queue:peekPriority() < 1 then p0UpdateTimeBudget else updateTimeBudget
+		local budget = if queue:peekPriority() < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
 		if os.clock() - updateStartClock > budget then
 			-- Out of time, can't update the rest this frame.
 			-- That's okay, they'll be higher priority next time.
 
 			-- Just in case the user iterates multiple times in a single frame,
 			-- lets clear out the leftovers so they don't spill into the second iter
-			self._objectRefreshQueue:clear()
+			self._visibleObjectsQueue:clear()
 
 			debug.profileend()
 			return
