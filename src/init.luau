@@ -14,7 +14,6 @@ local Config = require(script.Config)
 local GoodSignal = require(script.Utilities.GoodSignal)
 local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
-local Gizmo = require(script.Utilities.Gizmo)
 
 local EPSILON = 1e-4
 local P0_THRESHOLD = 0.7
@@ -91,36 +90,6 @@ function CullThrottle.new(): CullThrottle
 	end)
 
 	return self
-end
-
-function CullThrottle._drawBox(
-	self: CullThrottle,
-	color: Color3,
-	transparency: number,
-	x0: number,
-	y0: number,
-	z0: number,
-	x1: number,
-	y1: number,
-	z1: number
-)
-	if not self.Config.DEBUG_MODE then
-		return
-	end
-
-	local voxelSize = self.Config.voxelSize
-	local x0World, y0World, z0World = x0 * voxelSize, y0 * voxelSize, z0 * voxelSize
-	local x1World, y1World, z1World = x1 * voxelSize, y1 * voxelSize, z1 * voxelSize
-
-	local cf = CFrame.new((x0World + x1World) / 2, (y0World + y1World) / 2, (z0World + z1World) / 2)
-	local size = Vector3.new(math.abs(x0World - x1World), math.abs(y0World - y1World), math.abs(z0World - z1World))
-		- (Vector3.one * 2)
-
-	task.defer(function()
-		Gizmo.setColor3(color)
-		Gizmo.setTransparency(transparency)
-		Gizmo.drawWireBox(cf, size)
-	end)
 end
 
 function CullThrottle._getAverageCallTime(self: CullThrottle): number
@@ -529,7 +498,6 @@ function CullThrottle._getFrustumVoxelsInVolume(
 			end
 		end
 
-		self:_drawBox(Color3.new(0, 0, 1), 0, x0, y0, z0, x1, y1, z1)
 		debug.profileend()
 		return
 	end
@@ -543,20 +511,17 @@ function CullThrottle._getFrustumVoxelsInVolume(
 
 		-- No need to check an empty voxel
 		if not voxel then
-			self:_drawBox(Color3.new(1, 1, 1), 0.5, x0, y0, z0, x1, y1, z1)
 			return
 		end
 
 		-- If this voxel was visible a moment ago, assume it still is
 		if now - (lastVoxelVisibility[voxelKey] or 0) < JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
 			callback(voxelKey, voxel, false)
-			self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
 			return
 		end
 
 		-- Alright, we actually do need to check if this voxel is visible
 		local isInside = self:_isBoxInFrustum(false, frustumPlanes, x0, y0, z0, x1, y1, z1)
-		self:_drawBox(if isInside then Color3.new(0, 1, 0) else Color3.new(1, 0, 0), 0, x0, y0, z0, x1, y1, z1)
 		if not isInside then
 			-- Remove voxel visibility
 			lastVoxelVisibility[voxelKey] = nil
@@ -590,7 +555,6 @@ function CullThrottle._getFrustumVoxelsInVolume(
 
 	-- Don't bother checking further if this box doesn't contain any voxels
 	if not containsVoxels then
-		self:_drawBox(Color3.new(1, 1, 1), 0.5, x0, y0, z0, x1, y1, z1)
 		return
 	end
 
@@ -610,7 +574,6 @@ function CullThrottle._getFrustumVoxelsInVolume(
 			end
 		end
 		debug.profileend()
-		self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
 		return
 	end
 
@@ -632,7 +595,6 @@ function CullThrottle._getFrustumVoxelsInVolume(
 			end
 		end
 		debug.profileend()
-		self:_drawBox(Color3.new(1, 0, 0), 0, x0, y0, z0, x1, y1, z1)
 		return
 	end
 
@@ -653,7 +615,6 @@ function CullThrottle._getFrustumVoxelsInVolume(
 			end
 		end
 		debug.profileend()
-		self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
 		return
 	end
 
@@ -698,7 +659,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 end
 
 function CullThrottle._getPlanesAndBounds(
-	self: CullThrottle,
+	_self: CullThrottle,
 	renderDistance: number,
 	voxelSize: number
 ): ({ Vector3 }, Vector3, Vector3)
@@ -750,32 +711,6 @@ function CullThrottle._getPlanesAndBounds(
 			// voxelSize
 	)
 
-	if self.Config.DEBUG_MODE then
-		task.defer(function()
-			Gizmo.setColor3(Color3.fromRGB(168, 87, 219))
-			Gizmo.setTransparency(0)
-			Gizmo.drawLine(cameraPos, farPlaneTopLeft)
-			Gizmo.drawLine(cameraPos, farPlaneTopRight)
-			Gizmo.drawLine(cameraPos, farPlaneBottomLeft)
-			Gizmo.drawLine(cameraPos, farPlaneBottomRight)
-			Gizmo.drawLine(farPlaneTopLeft, farPlaneTopRight)
-			Gizmo.drawLine(farPlaneTopRight, farPlaneBottomRight)
-			Gizmo.drawLine(farPlaneBottomLeft, farPlaneBottomRight)
-			Gizmo.drawLine(farPlaneTopLeft, farPlaneBottomLeft)
-			Gizmo.setTransparency(0.9)
-			Gizmo.drawBox(farPlaneCFrame, Vector3.new(farPlaneWidth2 * 2, farPlaneHeight2 * 2, 1))
-			Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneBottomLeft)
-			Gizmo.drawTriangle(cameraPos, farPlaneTopRight, farPlaneBottomRight)
-			Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneTopRight)
-			Gizmo.drawTriangle(cameraPos, farPlaneBottomLeft, farPlaneBottomRight)
-			Gizmo.setTransparency(0.5)
-			Gizmo.drawWireBox(
-				CFrame.new((minBound + (maxBound + Vector3.one)) / 2 * voxelSize),
-				((maxBound + Vector3.one) - minBound) * voxelSize
-			)
-		end)
-	end
-
 	return frustumPlanes, minBound, maxBound
 end
 
@@ -815,12 +750,6 @@ end
 
 function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	debug.profilebegin("findVisibleObjects")
-
-	if self.Config.DEBUG_MODE then
-		Gizmo.enableGizmos()
-	else
-		Gizmo.disableGizmos()
-	end
 
 	-- Clear any objects left over from last frame
 	self:_clearVisibleObjects()

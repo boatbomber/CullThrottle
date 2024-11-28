@@ -4,7 +4,6 @@ local Config = {}
 Config.__index = Config
 
 type ConfigurationProto = {
-	DEBUG_MODE: boolean,
 	bestRefreshRate: number,
 	worstRefreshRate: number,
 	refreshRateRange: number,
@@ -21,8 +20,6 @@ export type Config = typeof(setmetatable({} :: ConfigurationProto, Config))
 
 function Config.new(): Config
 	local self = setmetatable({}, Config)
-
-	self.DEBUG_MODE = false
 
 	self.voxelSize = 100
 	self.halfVoxelSizeVec = Vector3.one * (self.voxelSize / 2)
