@@ -3,6 +3,7 @@ math.randomseed(0) -- Constant seed for reproducibility
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
@@ -19,14 +20,17 @@ local TAG = "FloatingBlock"
 local BlocksFolder = Instance.new("Folder")
 BlocksFolder.Name = "Blocks"
 
-local blockTimeOffsets = {}
+local blockMetadata = {}
 
 for _, block in Blocks.generateBlockClusters(200, 20_000) do
 	block:AddTag(TAG)
 	block.Color = INVISIBLE_COLOR
 	block.Parent = BlocksFolder
 
-	blockTimeOffsets[block] = math.random() * 2
+	blockMetadata[block] = {
+		Seed = math.random() * 7,
+		Origin = block.CFrame,
+	}
 end
 
 BlocksFolder.Parent = workspace
@@ -64,26 +68,26 @@ RunService.RenderStepped:Connect(function()
 	table.clear(blocks)
 	table.clear(cframes)
 
-	-- These are for the debug graphs --
-	table.clear(objectDeltas)
-	local startUpdate = os.clock()
-	------------------------------------
+	table.clear(objectDeltas) -- For the debug graphs
 
+	local now = os.clock()
 	for block, dt in FloatingBlocksUpdater:iterObjectsToUpdate() do
 		table.insert(objectDeltas, dt)
+		dt = math.min(dt, 1 / 15) * 2
 
-		if dt > 0.8 then
-			-- This object hasn't been visible in a while so let's
-			-- avoid a jump in the spin animation and just start spinning
-			-- from where we are
-			dt = 1 / 10
-		end
+		local metadata = blockMetadata[block]
+
+		local angularForce = CFrame.Angles(
+			math.noise(metadata.Seed, 0.327, now) * dt,
+			math.noise(0.12, metadata.Seed, now) * dt,
+			math.noise(now, metadata.Seed, now) * dt
+		)
 
 		table.insert(blocks, block)
-		table.insert(cframes, block.CFrame * CFrame.Angles(0, math.rad(90) * dt, 0))
+		table.insert(cframes, block.CFrame * angularForce)
 	end
 
-	updateTime = (os.clock() - startUpdate) * 1000
+	updateTime = (os.clock() - now) * 1000
 
 	workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
 end)
@@ -97,11 +101,9 @@ local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui
 local ScreenGui = Instance.new("ScreenGui")
 
 local TopLeftGraphs = Instance.new("Frame")
-TopLeftGraphs.AutomaticSize = Enum.AutomaticSize.Y
-TopLeftGraphs.Size = UDim2.fromScale(0.2, 0)
+TopLeftGraphs.AutomaticSize = Enum.AutomaticSize.XY
 TopLeftGraphs.Position = UDim2.fromOffset(5, 5)
-TopLeftGraphs.BackgroundTransparency = 0.2
-TopLeftGraphs.BackgroundColor3 = Color3.fromRGB(113, 152, 181)
+TopLeftGraphs.BackgroundTransparency = 1
 TopLeftGraphs.Parent = ScreenGui
 
 local TopLeftListLayout = Instance.new("UIListLayout")
@@ -112,35 +114,23 @@ TopLeftListLayout.Padding = UDim.new(0, 10)
 TopLeftListLayout.Parent = TopLeftGraphs
 
 local BottomLeftGraphs = Instance.new("Frame")
-BottomLeftGraphs.AutomaticSize = Enum.AutomaticSize.Y
-BottomLeftGraphs.Size = UDim2.fromScale(0.2, 0)
+BottomLeftGraphs.AutomaticSize = Enum.AutomaticSize.XY
 BottomLeftGraphs.Position = UDim2.new(0, 5, 1, -5)
 BottomLeftGraphs.AnchorPoint = Vector2.new(0, 1)
-BottomLeftGraphs.BackgroundTransparency = 0.2
-BottomLeftGraphs.BackgroundColor3 = Color3.fromRGB(113, 152, 181)
+BottomLeftGraphs.BackgroundTransparency = 1
 BottomLeftGraphs.Parent = ScreenGui
 
-local BottomLeftListLayout = Instance.new("UIListLayout")
-BottomLeftListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-BottomLeftListLayout.FillDirection = Enum.FillDirection.Vertical
-BottomLeftListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-BottomLeftListLayout.Padding = UDim.new(0, 10)
+local BottomLeftListLayout = TopLeftListLayout:Clone()
 BottomLeftListLayout.Parent = BottomLeftGraphs
 
 local BottomRightGraphs = Instance.new("Frame")
-BottomRightGraphs.AutomaticSize = Enum.AutomaticSize.Y
-BottomRightGraphs.Size = UDim2.fromScale(0.2, 0)
+BottomRightGraphs.AutomaticSize = Enum.AutomaticSize.XY
 BottomRightGraphs.Position = UDim2.new(1, -5, 1, -5)
 BottomRightGraphs.AnchorPoint = Vector2.new(1, 1)
-BottomRightGraphs.BackgroundTransparency = 0.2
-BottomRightGraphs.BackgroundColor3 = Color3.fromRGB(113, 152, 181)
+BottomRightGraphs.BackgroundTransparency = 1
 BottomRightGraphs.Parent = ScreenGui
 
-local BottomRightListLayout = Instance.new("UIListLayout")
-BottomRightListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-BottomRightListLayout.FillDirection = Enum.FillDirection.Vertical
-BottomRightListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-BottomRightListLayout.Padding = UDim.new(0, 10)
+local BottomRightListLayout = TopLeftListLayout:Clone()
 BottomRightListLayout.Parent = BottomRightGraphs
 
 local computeTimeGraph = MetricGraph.new(
@@ -163,8 +153,8 @@ computeTimeGraph.Frame.Parent = TopLeftGraphs
 updateTimeGraph.Frame.Parent = TopLeftGraphs
 perfFactorGraph.Frame.Parent = TopLeftGraphs
 
-local objectsVisibleGraph = MetricGraph.new("Objects Visible", table.create(50, 0), 0, 1300)
-local objectsUpdatedGraph = MetricGraph.new("Objects Updated", table.create(50, 0), 0, 1300)
+local objectsVisibleGraph = MetricGraph.new("Objects Visible", table.create(50, 0), 0, 1000)
+local objectsUpdatedGraph = MetricGraph.new("Objects Updated", table.create(50, 0), 0, 600)
 
 objectsVisibleGraph.Frame.Parent = BottomLeftGraphs
 objectsUpdatedGraph.Frame.Parent = BottomLeftGraphs
@@ -198,8 +188,18 @@ p95ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
 
 ScreenGui.Parent = PlayerGui
 
+UserInputService.InputBegan:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.G then
+		ScreenGui.Enabled = not ScreenGui.Enabled
+	end
+end)
+
 local lastMeasurement = os.clock()
 RunService.PreRender:Connect(function(gameDelta)
+	if not ScreenGui.Enabled then
+		return
+	end
+
 	local now = os.clock()
 	if now - lastMeasurement < 1 / 15 then
 		return

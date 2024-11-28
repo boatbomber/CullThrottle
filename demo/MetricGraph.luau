@@ -32,6 +32,7 @@ function MetricGraph.new(title: string, data: { number }, min: number, max: numb
 	self.Frame = Instance.new("Frame")
 	self.Frame.Size = UDim2.fromOffset(300, 120)
 	self.Frame.BackgroundColor3 = Color3.fromRGB(113, 152, 181)
+	self.Frame.BackgroundTransparency = 0.5
 	self.Frame.BorderSizePixel = 0
 
 	self._titleLabel = Instance.new("TextLabel")
@@ -84,7 +85,8 @@ function MetricGraph.new(title: string, data: { number }, min: number, max: numb
 	self._currentLabel.Text = "0"
 	self._currentLabel.TextXAlignment = Enum.TextXAlignment.Right
 	self._currentLabel.Size = UDim2.new(0, 30, 0, 20)
-	self._currentLabel.Position = UDim2.new(1, -32, 0, 0)
+	self._currentLabel.Position = UDim2.new(1, -2, 0.5, 0)
+	self._currentLabel.AnchorPoint = Vector2.new(1, 0.5)
 	self._currentLabel.BackgroundTransparency = 1
 	self._currentLabel.TextColor3 = Color3.new(1, 1, 1)
 	self._currentLabel.TextSize = 16
