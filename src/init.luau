@@ -3,7 +3,6 @@
 --!native
 
 local RunService = game:GetService("RunService")
-local HttpService = game:GetService("HttpService")
 
 if RunService:IsServer() and not RunService:IsEdit() then
 	error("CullThrottle is a client side effect and cannot be used on the server")
@@ -12,6 +11,7 @@ end
 local types = require(script.types)
 local PriorityQueue = require(script.PriorityQueue)
 local Config = require(script.Config)
+local GoodSignal = require(script.Utilities.GoodSignal)
 local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
 local Gizmo = require(script.Utilities.Gizmo)
@@ -23,25 +23,23 @@ local NEARBY_DISTANCE_THRESHOLD = 30
 
 -- This weight gives more update priority to larger objects,
 -- focusing on the objects that contribute the most visually
-local SCREEN_SIZE_PRIORITY_WEIGHT = 80
+local SCREEN_SIZE_PRIORITY_WEIGHT = 90
 -- This weight tries to make everything the same refresh rate,
 -- sacrificing some updates to big objects for the little ones
 -- for a smoother overall vibe
-local REFRESH_RATE_PRIORITY_WEIGHT = 18
+local REFRESH_RATE_PRIORITY_WEIGHT = 9
 -- This weight gives more priority to nearby objects regardless of size
 -- which can help prioritize objects that are likely the real focus
 -- in cases where there are many objects of similar screen size
-local DISTANCE_PRIORITY_WEIGHT = 2
+local DISTANCE_PRIORITY_WEIGHT = 1
 
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
 type CullThrottleProto = {
 	Config: Config.Config,
-	ObjectEnteredView: RBXScriptSignal,
-	ObjectExitedView: RBXScriptSignal,
-	_enteredViewEvent: BindableEvent,
-	_exitedViewEvent: BindableEvent,
+	ObjectEnteredView: any, -- TODO: Anyone got strict typing for GoodSignal?
+	ObjectExitedView: any,
 	_voxels: { [types.VoxelKey]: types.Voxel },
 	_objects: { [Instance]: types.ObjectData },
 	_physicsObjects: { Instance },
@@ -54,7 +52,8 @@ type CullThrottleProto = {
 	_lastVoxelVisibility: { [types.VoxelKey]: number },
 	_lastCallTimes: { number },
 	_lastCallTimeIndex: number,
-	_renderConnectionId: string,
+	_renderConnection: RBXScriptConnection,
+	_processedVisibilityThisFrame: boolean,
 }
 
 export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThrottle))
@@ -64,11 +63,8 @@ function CullThrottle.new(): CullThrottle
 
 	self.Config = Config.new()
 
-	self._enteredViewEvent = Instance.new("BindableEvent")
-	self._exitedViewEvent = Instance.new("BindableEvent")
-
-	self.ObjectEnteredView = self._enteredViewEvent.Event
-	self.ObjectExitedView = self._exitedViewEvent.Event
+	self.ObjectEnteredView = GoodSignal.new()
+	self.ObjectExitedView = GoodSignal.new()
 
 	self._voxels = {}
 	self._objects = {}
@@ -82,9 +78,15 @@ function CullThrottle.new(): CullThrottle
 	self._lastVoxelVisibility = {}
 	self._lastCallTimes = table.create(5, 0)
 	self._lastCallTimeIndex = 1
-	self._renderConnectionId = "CullThrottle_" .. HttpService:GenerateGUID(false)
-
-	RunService:BindToRenderStep(self._renderConnectionId, Enum.RenderPriority.First.Value, function()
+	self._processedVisibilityThisFrame = false
+	self._renderConnection = RunService.PreRender:Connect(function()
+		self._processedVisibilityThisFrame = false
+		if self.ObjectEnteredView._connectionCount == 0 and self.ObjectExitedView._connectionCount == 0 then
+			-- No listeners, so we might not need to do anything this frame.
+			-- If the user tries to get visible objects or iterate objects to update,
+			-- we'll process them at that time.
+			return
+		end
 		self:_processObjectVisibility()
 	end)
 
@@ -136,9 +138,7 @@ function CullThrottle._addCallTime(self: CullThrottle, start: number)
 end
 
 function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): number
-	local averageCallTime = self:_getAverageCallTime()
-	local targetCallTime = self.Config.searchTimeBudget
-	local adjustmentFactor = averageCallTime / targetCallTime
+	local adjustmentFactor = self:_getAverageCallTime() / self.Config.searchTimeBudget
 
 	if adjustmentFactor > 1 then
 		-- We're overbudget, increase falloff (max 2)
@@ -200,7 +200,7 @@ function CullThrottle._updateDesiredVoxelKeys(
 
 	objectData.desiredVoxelKeys = desiredVoxelKeys
 
-	if next(desiredVoxelKeys) then
+	if next(desiredVoxelKeys) and not self._updateObjectVoxelsQueue:contains(object) then
 		-- Use a cheap manhattan distance check for priority
 		local difference = position - CameraCache.Position
 		local priority = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
@@ -253,8 +253,8 @@ function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: types.Voxel
 	end
 end
 
-function CullThrottle._processObjectRefreshQueue(self: CullThrottle, timeBudget: number, now: number)
-	debug.profilebegin("processObjectRefreshQueue")
+function CullThrottle._updateObjectVoxels(self: CullThrottle, timeBudget: number, now: number)
+	debug.profilebegin("updateObjectVoxels")
 
 	if self._updateObjectVoxelsBatch.index > 0 then
 		self._updateObjectVoxelsQueue:batchEnqueue(
@@ -451,7 +451,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 			objectPriority = (1 - screenSize) * 1e6
 		elseif jitteredElapsed >= worstRefreshRate then
 			-- Try to at least maintain the worst refresh rate
-			objectPriority = 1 - (jitteredElapsed - bestRefreshRate) / refreshRateRange
+			objectPriority = 1 - (jitteredElapsed - worstRefreshRate) / worstRefreshRate
 		elseif distance < NEARBY_DISTANCE_THRESHOLD then
 			-- Objects right by camera should update basically every frame
 			objectPriority = distance / NEARBY_DISTANCE_THRESHOLD
@@ -484,7 +484,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 
 		if objectVisibilityTimestamps[object] == nil then
 			-- This object wasn't visible last frame but it is now
-			self._enteredViewEvent:Fire(object)
+			self.ObjectEnteredView:Fire(object)
 		end
 		objectVisibilityTimestamps[object] = now
 	end
@@ -806,7 +806,7 @@ function CullThrottle._signalVisibilityChanges(self: CullThrottle, now: number)
 		if lastSeen ~= now then
 			-- Object was visible last frame but not this frame
 			objectVisibilityTimestamps[object] = nil
-			self._exitedViewEvent:Fire(object)
+			self.ObjectExitedView:Fire(object)
 		end
 	end
 
@@ -912,12 +912,17 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 end
 
 function CullThrottle._processObjectVisibility(self: CullThrottle)
-	debug.profilebegin("CullThrottle")
+	if self._processedVisibilityThisFrame then
+		-- Already processed!
+		return
+	end
+
+	debug.profilebegin("CullThrottle.processObjectVisibility")
 	local start = os.clock()
 
 	-- Make sure our voxels are up to date for up to 0.1 ms
 	self:_pollPhysicsObjects(5e-5, start)
-	self:_processObjectRefreshQueue(5e-5, start)
+	self:_updateObjectVoxels(5e-5, os.clock())
 
 	-- Update the performance falloff factor to
 	-- dynamically adjust the priorities based on
@@ -932,6 +937,8 @@ function CullThrottle._processObjectVisibility(self: CullThrottle)
 
 	-- Record the time taken
 	self:_addCallTime(start)
+
+	self._processedVisibilityThisFrame = true
 	debug.profileend()
 end
 
@@ -947,7 +954,7 @@ function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end
 
-	self:_processObjectRefreshQueue(5, os.clock())
+	self:_updateObjectVoxels(5, os.clock())
 end
 
 function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
@@ -1073,11 +1080,17 @@ function CullThrottle.removeObject(self: CullThrottle, object: Instance)
 end
 
 function CullThrottle.getObjectsInView(self: CullThrottle): { Instance }
+	-- Process visibility if we haven't already processed this frame yet
+	self:_processObjectVisibility()
+
 	return self._visibleObjects.items
 end
 
 function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?)
 	debug.profilebegin("CullThrottle.iterObjects")
+
+	-- Process visibility if we haven't already processed this frame yet
+	self:_processObjectVisibility()
 
 	-- We need to put the visibleObjects into our priority queue,
 	-- which we then empty as we iterate through the objects
@@ -1086,7 +1099,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 	local updateStartClock = os.clock()
 	local queue = self._visibleObjectsQueue
 	local updateTimeBudget = self.Config.updateTimeBudget
-	local p0UpdateTimeBudget = updateTimeBudget * 2 -- p0s can go over budget
+	local p0UpdateTimeBudget = updateTimeBudget * 1.5 -- p0s can go over budget
 
 	return function()
 		if queue:isEmpty() then
@@ -1095,7 +1108,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 		end
 
 		local budget = if queue:peekPriority() < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
-		if os.clock() - updateStartClock > budget then
+		if os.clock() - updateStartClock >= budget then
 			-- Out of time, can't update the rest this frame.
 			-- That's okay, they'll be higher priority next time.
 
