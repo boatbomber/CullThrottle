@@ -16,7 +16,7 @@ local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
 
 local EPSILON = 1e-4
-local P0_THRESHOLD = 0.7
+local P0_THRESHOLD = 0.75
 local LAST_VISIBILITY_GRACE_PERIOD = 0.15
 local NEARBY_DISTANCE_THRESHOLD = 30
 
@@ -1028,7 +1028,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 	local updateStartClock = os.clock()
 	local queue = self._visibleObjectsQueue
 	local updateTimeBudget = self.Config.updateTimeBudget
-	local p0UpdateTimeBudget = updateTimeBudget * 1.5 -- p0s can go over budget
+	local p0UpdateTimeBudget = updateTimeBudget * 2.0 -- p0s can go over budget
 
 	return function()
 		if queue:isEmpty() then

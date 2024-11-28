@@ -64,7 +64,7 @@ local updateTime = 0
 local objectDeltas = {}
 
 local blocks, cframes = {}, {}
-RunService.RenderStepped:Connect(function()
+RunService.PreAnimation:Connect(function()
 	table.clear(blocks)
 	table.clear(cframes)
 
@@ -195,7 +195,7 @@ UserInputService.InputBegan:Connect(function(input)
 end)
 
 local lastMeasurement = os.clock()
-RunService.PreRender:Connect(function(gameDelta)
+RunService.PostSimulation:Connect(function(gameDelta)
 	if not ScreenGui.Enabled then
 		return
 	end

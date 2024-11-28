@@ -32,7 +32,7 @@ function MetricGraph.new(title: string, data: { number }, min: number, max: numb
 	self.Frame = Instance.new("Frame")
 	self.Frame.Size = UDim2.fromOffset(300, 120)
 	self.Frame.BackgroundColor3 = Color3.fromRGB(113, 152, 181)
-	self.Frame.BackgroundTransparency = 0.5
+	self.Frame.BackgroundTransparency = 0.3
 	self.Frame.BorderSizePixel = 0
 
 	self._titleLabel = Instance.new("TextLabel")
