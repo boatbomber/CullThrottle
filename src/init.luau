@@ -22,15 +22,15 @@ local NEARBY_DISTANCE_THRESHOLD = 30
 
 -- This weight gives more update priority to larger objects,
 -- focusing on the objects that contribute the most visually
-local SCREEN_SIZE_PRIORITY_WEIGHT = 90
+local SCREEN_SIZE_PRIORITY_WEIGHT = 85
 -- This weight tries to make everything the same refresh rate,
 -- sacrificing some updates to big objects for the little ones
 -- for a smoother overall vibe
-local REFRESH_RATE_PRIORITY_WEIGHT = 9
+local REFRESH_RATE_PRIORITY_WEIGHT = 13
 -- This weight gives more priority to nearby objects regardless of size
 -- which can help prioritize objects that are likely the real focus
 -- in cases where there are many objects of similar screen size
-local DISTANCE_PRIORITY_WEIGHT = 1
+local DISTANCE_PRIORITY_WEIGHT = 2
 
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle

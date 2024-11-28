@@ -21,10 +21,10 @@ export type Config = typeof(setmetatable({} :: ConfigurationProto, Config))
 function Config.new(): Config
 	local self = setmetatable({}, Config)
 
-	self.voxelSize = 100
+	self.voxelSize = 75
 	self.halfVoxelSizeVec = Vector3.one * (self.voxelSize / 2)
 	self.radiusThresholdForCorners = self.voxelSize * (1 / 8)
-	self.renderDistance = 500
+	self.renderDistance = 400
 	self.searchTimeBudget = 1.25 / 1000
 	self.updateTimeBudget = 0.35 / 1000
 	self.bestRefreshRate = 1 / 60
