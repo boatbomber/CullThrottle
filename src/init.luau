@@ -434,19 +434,6 @@ function CullThrottle._addVoxelToVisibleObjects(
 			local distancePriority = DISTANCE_PRIORITY_WEIGHT * (distance / renderDistance)
 
 			objectPriority = screenSizePriority + refreshPriority + distancePriority
-
-			-- print(
-			-- 	string.format(
-			-- 		"priority: %.4f\n  screenSize: %.4f%%, priority: %.3f\n  elapsed: %.1fms, priority: %.3f\n  distance: %.1f, priority: %.3f",
-			-- 		objectPriority,
-			-- 		screenSize * 100,
-			-- 		screenSizePriority,
-			-- 		jitteredElapsed * 1000,
-			-- 		refreshPriority,
-			-- 		distance,
-			-- 		distancePriority
-			-- 	)
-			-- )
 		end
 
 		visibleObjectsIndex += 1
