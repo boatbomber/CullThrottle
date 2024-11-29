@@ -22,7 +22,7 @@ BlocksFolder.Name = "Blocks"
 
 local blockMetadata = {}
 
-for _, block in Blocks.generateBlockClusters(200, 20_000) do
+for _, block in Blocks.generateBlockClusters(60, 200) do
 	block:AddTag(TAG)
 	block.Color = INVISIBLE_COLOR
 	block.Parent = BlocksFolder
@@ -87,7 +87,7 @@ RunService.PreAnimation:Connect(function()
 		table.insert(cframes, block.CFrame * angularForce)
 	end
 
-	updateTime = (os.clock() - now) * 1000
+	updateTime = os.clock() - now
 
 	workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
 end)
@@ -137,15 +137,15 @@ local computeTimeGraph = MetricGraph.new(
 	"Visibility Compute Time",
 	table.create(50, 0),
 	0,
-	FloatingBlocksUpdater.Config.searchTimeBudget * 1050,
-	"%.3fms"
+	FloatingBlocksUpdater.Config.searchTimeBudget * 1e6,
+	"%dμs"
 )
 local updateTimeGraph = MetricGraph.new(
 	"Object Update Time",
 	table.create(50, 0),
 	0,
-	FloatingBlocksUpdater.Config.updateTimeBudget * 1050,
-	"%.3fms"
+	FloatingBlocksUpdater.Config.updateTimeBudget * 1e6,
+	"%dμs"
 )
 local perfFactorGraph = MetricGraph.new("Performance Factor", table.create(50, 0.5), 0.5, 2, "%.3f")
 
@@ -212,9 +212,9 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	local visibleObjectCount = #FloatingBlocksUpdater:getObjectsInView()
 	local updatedObjectCount = #objectDeltas
 
-	computeTimeGraph:measure(FloatingBlocksUpdater:_getAverageCallTime() * 1000)
-	updateTimeGraph:measure(updateTime)
-	perfFactorGraph:measure(FloatingBlocksUpdater.Config.performanceFalloffFactor)
+	computeTimeGraph:measure(FloatingBlocksUpdater:_getAverageSearchDuration() * 1e6)
+	updateTimeGraph:measure(updateTime * 1e6)
+	perfFactorGraph:measure(FloatingBlocksUpdater._performanceFalloffFactor)
 	objectsVisibleGraph:measure(visibleObjectCount)
 	objectsUpdatedGraph.Max = visibleObjectCount
 	objectsUpdatedGraph:measure(updatedObjectCount)

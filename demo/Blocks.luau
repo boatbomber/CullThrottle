@@ -36,10 +36,8 @@ function Blocks.createCluster(clusterRegion: Region3, count: number): { BasePart
 	return blocks
 end
 
-function Blocks.generateBlockClusters(clusterCount: number, totalCount: number): { BasePart }
+function Blocks.generateBlockClusters(clusterCount: number, blocksPerCluster: number): { BasePart }
 	local blocks = {}
-
-	local blocksPerCluster = totalCount / clusterCount
 
 	for _ = 1, clusterCount do
 		local min = Vector3.new(math.random(-1000, 1000), math.random(-500, 500), math.random(-1000, 1000))

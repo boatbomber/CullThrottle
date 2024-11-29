@@ -16,17 +16,17 @@ local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
 
 local EPSILON = 1e-4
-local P0_THRESHOLD = 0.75
-local LAST_VISIBILITY_GRACE_PERIOD = 0.15
+local P0_THRESHOLD = 0.90
+local LAST_VISIBILITY_GRACE_PERIOD = 0.2
 local NEARBY_DISTANCE_THRESHOLD = 30
 
 -- This weight gives more update priority to larger objects,
 -- focusing on the objects that contribute the most visually
-local SCREEN_SIZE_PRIORITY_WEIGHT = 85
+local SCREEN_SIZE_PRIORITY_WEIGHT = 83
 -- This weight tries to make everything the same refresh rate,
 -- sacrificing some updates to big objects for the little ones
 -- for a smoother overall vibe
-local REFRESH_RATE_PRIORITY_WEIGHT = 13
+local REFRESH_RATE_PRIORITY_WEIGHT = 15
 -- This weight gives more priority to nearby objects regardless of size
 -- which can help prioritize objects that are likely the real focus
 -- in cases where there are many objects of similar screen size
@@ -49,10 +49,11 @@ type CullThrottleProto = {
 	_objectVisibilityTimestamps: { [Instance]: number },
 	_physicsObjectIterIndex: number,
 	_lastVoxelVisibility: { [types.VoxelKey]: number },
-	_lastCallTimes: { number },
-	_lastCallTimeIndex: number,
+	_recordedSearchDurations: { number },
+	_recordedSearchDurationIndex: number,
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
+	_performanceFalloffFactor: number,
 }
 
 export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThrottle))
@@ -75,9 +76,10 @@ function CullThrottle.new(): CullThrottle
 	self._visibleObjects = { items = {}, priorities = {}, index = 0 }
 	self._objectVisibilityTimestamps = {}
 	self._lastVoxelVisibility = {}
-	self._lastCallTimes = table.create(5, 0)
-	self._lastCallTimeIndex = 1
+	self._recordedSearchDurations = table.create(5, 0)
+	self._recordedSearchDurationIndex = 1
 	self._processedVisibilityThisFrame = false
+	self._performanceFalloffFactor = 1
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
 		if self.ObjectEnteredView._connectionCount == 0 and self.ObjectExitedView._connectionCount == 0 then
@@ -92,34 +94,34 @@ function CullThrottle.new(): CullThrottle
 	return self
 end
 
-function CullThrottle._getAverageCallTime(self: CullThrottle): number
+function CullThrottle._getAverageSearchDuration(self: CullThrottle): number
 	local sum = 0
-	for _, callTime in self._lastCallTimes do
-		sum += callTime
+	for _, searchDuration in self._recordedSearchDurations do
+		sum += searchDuration
 	end
-	return sum / #self._lastCallTimes
+	return sum / #self._recordedSearchDurations
 end
 
-function CullThrottle._addCallTime(self: CullThrottle, start: number)
+function CullThrottle._recordSearchDuration(self: CullThrottle, start: number)
 	local callTime = os.clock() - start
-	self._lastCallTimes[self._lastCallTimeIndex] = callTime
-	self._lastCallTimeIndex = (self._lastCallTimeIndex % 5) + 1
+	self._recordedSearchDurations[self._recordedSearchDurationIndex] = callTime
+	self._recordedSearchDurationIndex = (self._recordedSearchDurationIndex % 5) + 1
 end
 
 function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): number
-	local adjustmentFactor = self:_getAverageCallTime() / self.Config.searchTimeBudget
+	local adjustmentFactor = self:_getAverageSearchDuration() / self.Config.searchTimeBudget
 
 	if adjustmentFactor > 1 then
 		-- We're overbudget, increase falloff (max 2)
-		self.Config.performanceFalloffFactor =
-			math.min(self.Config.performanceFalloffFactor * (1 + (adjustmentFactor - 1) * 0.5), 2)
+		self._performanceFalloffFactor =
+			math.min(self._performanceFalloffFactor * (1 + (adjustmentFactor - 1) * 0.5), 2)
 	else
 		-- We have extra budget, decrease falloff (min 0.5)
-		self.Config.performanceFalloffFactor =
-			math.max(self.Config.performanceFalloffFactor * (1 - (1 - adjustmentFactor) * 0.5), 0.5)
+		self._performanceFalloffFactor =
+			math.max(self._performanceFalloffFactor * (1 - (1 - adjustmentFactor) * 0.5), 0.5)
 	end
 
-	return self.Config.performanceFalloffFactor
+	return self._performanceFalloffFactor
 end
 
 function CullThrottle._updateDesiredVoxelKeys(
@@ -406,7 +408,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 			continue
 		end
 
-		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self.Config.performanceFalloffFactor
+		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self._performanceFalloffFactor
 		local elapsed = now - objectData.lastUpdateClock
 		local jitteredElapsed = elapsed + objectData.jitterOffset
 
@@ -414,7 +416,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 
 		local objectPriority = 0
 
-		if jitteredElapsed < bestRefreshRate then
+		if jitteredElapsed <= bestRefreshRate then
 			-- No need to refresh faster than our best rate
 			-- so make this super low priority
 			objectPriority = (1 - screenSize) * 1e6
@@ -760,10 +762,6 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local worstRefreshRate = self.Config.worstRefreshRate
 	local refreshRateRange = self.Config.refreshRateRange
 	local renderDistance = self.Config.renderDistance
-	-- For smaller FOVs, we increase render distance
-	if CameraCache.FieldOfView < 60 then
-		renderDistance *= 2 - CameraCache.FieldOfView / 60
-	end
 
 	local cameraPos = CameraCache.Position
 	local frustumPlanes, minBound, maxBound = self:_getPlanesAndBounds(renderDistance, voxelSize)
@@ -865,7 +863,7 @@ function CullThrottle._processObjectVisibility(self: CullThrottle)
 	self:_signalVisibilityChanges(start)
 
 	-- Record the time taken
-	self:_addCallTime(start)
+	self:_recordSearchDuration(start)
 
 	self._processedVisibilityThisFrame = true
 	debug.profileend()
@@ -1028,7 +1026,9 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 	local updateStartClock = os.clock()
 	local queue = self._visibleObjectsQueue
 	local updateTimeBudget = self.Config.updateTimeBudget
-	local p0UpdateTimeBudget = updateTimeBudget * 2.0 -- p0s can go over budget
+	-- p0s can go a little over budget.
+	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
+	local p0UpdateTimeBudget = if self.Config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
 
 	return function()
 		if queue:isEmpty() then
