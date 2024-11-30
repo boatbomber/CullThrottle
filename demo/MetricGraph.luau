@@ -15,6 +15,7 @@ type MetricGraphProto = {
 	_minLabel: TextLabel,
 	_maxLabel: TextLabel,
 	_currentLabel: TextLabel,
+	_avgLabel: TextLabel,
 	_titleLabel: TextLabel,
 }
 
@@ -48,6 +49,20 @@ function MetricGraph.new(title: string, data: { number }, min: number, max: numb
 	self._titleLabel.TextStrokeTransparency = 0
 	self._titleLabel.Font = Enum.Font.RobotoMono
 	self._titleLabel.Parent = self.Frame
+
+	self._avgLabel = Instance.new("TextLabel")
+	self._avgLabel.ZIndex = 10
+	self._avgLabel.Name = "avg"
+	self._avgLabel.Text = ""
+	self._avgLabel.Size = UDim2.new(1, 0, 0, 16)
+	self._avgLabel.Position = UDim2.new(0, 0, 0, 20)
+	self._avgLabel.BackgroundTransparency = 1
+	self._avgLabel.TextColor3 = Color3.new(1, 1, 1)
+	self._avgLabel.TextSize = 13
+	self._avgLabel.TextStrokeColor3 = Color3.new()
+	self._avgLabel.TextStrokeTransparency = 0
+	self._avgLabel.Font = Enum.Font.RobotoMono
+	self._avgLabel.Parent = self.Frame
 
 	self._maxLabel = Instance.new("TextLabel")
 	self._maxLabel.ZIndex = 5
@@ -122,7 +137,9 @@ function MetricGraph.refresh(self: MetricGraph)
 	self._currentLabel.Text = string.format(self.FormatStr, self._data[#self._data])
 
 	local range = max - min
+	local sum = 0
 	for i, datapoint in self._data do
+		sum += datapoint
 		local height = if range == 0 then 0.5 else math.map((datapoint - min) / range, 0, 1, 0.05, 0.95)
 		local line = self._lineFrames[i]
 		if line then
@@ -130,6 +147,8 @@ function MetricGraph.refresh(self: MetricGraph)
 			line.BackgroundColor3 = Utility.getHeatmapColor((datapoint - self.Min) / (self.Max - self.Min))
 		end
 	end
+
+	self._avgLabel.Text = string.format(self.FormatStr, sum / #self._data)
 end
 
 function MetricGraph.measure(self: MetricGraph, datapoint: number)
