@@ -276,6 +276,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 		return
 	end
 
+	local cameraPos = CameraCache.Position
 	while os.clock() - now < timeBudget do
 		local object = self._physicsObjects[self._physicsObjectIterIndex]
 		self:_nextPhysicsObject()
@@ -294,6 +295,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 		local cframe = ObjectDimensions._getObjectCFrame(objectData)
 		if cframe then
 			objectData.cframe = cframe
+			objectData.distance = (cframe.Position - cameraPos).Magnitude
 			self:_updateDesiredVoxelKeys(object, objectData)
 		end
 
@@ -403,16 +405,16 @@ function CullThrottle._addVoxelToVisibleObjects(
 		objectData.lastCheckClock = now
 
 		local distance = (objectData.cframe.Position - cameraPos).Magnitude
+		objectData.distance = distance
 		if distance > renderDistance then
 			-- Object is outside what we consider visible
 			continue
 		end
 
+		debug.profilebegin("priorityCalculation")
 		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self._performanceFalloffFactor
 		local elapsed = now - objectData.lastUpdateClock
 		local jitteredElapsed = elapsed + objectData.jitterOffset
-
-		objectData.distance = distance
 
 		local objectPriority = 0
 
@@ -435,14 +437,17 @@ function CullThrottle._addVoxelToVisibleObjects(
 
 			objectPriority = screenSizePriority + refreshPriority + distancePriority
 		end
+		debug.profileend()
 
 		visibleObjectsIndex += 1
 		visibleObjectsItems[visibleObjectsIndex] = object
 		visibleObjectsPriorities[visibleObjectsIndex] = objectPriority
 
 		if objectVisibilityTimestamps[object] == nil then
+			debug.profilebegin("objectEnteredView:Fire")
 			-- This object wasn't visible last frame but it is now
 			self.ObjectEnteredView:Fire(object)
+			debug.profileend()
 		end
 		objectVisibilityTimestamps[object] = now
 	end
@@ -936,6 +941,7 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 	ObjectDimensions._subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
 		-- Update CFrame
 		objectData.cframe = newCFrame
+		objectData.distance = (newCFrame.Position - CameraCache.Position).Magnitude
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end, function(newBoundingBox: Vector3)
 		-- Update bounding box and radius
