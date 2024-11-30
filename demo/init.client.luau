@@ -205,8 +205,8 @@ local p05ObjectRefreshRateGraph = MetricGraph.new(
 	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
 	"%dHz"
 )
-local p50ObjectRefreshRateGraph = MetricGraph.new(
-	"p50 Obj Refresh",
+local avgObjectRefreshRateGraph = MetricGraph.new(
+	"Avg Obj Refresh",
 	table.create(50, 0),
 	1 / FloatingBlocksUpdater.Config.worstRefreshRate,
 	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
@@ -222,12 +222,12 @@ local p95ObjectRefreshRateGraph = MetricGraph.new(
 
 gameRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
 p05ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
-p50ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
+avgObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
 p95ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
 
 gameRefreshRateGraph.Frame.Parent = BottomRightGraphs
 p05ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
-p50ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
+avgObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
 p95ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
 
 ScreenGui.Parent = PlayerGui
@@ -263,10 +263,10 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	skippedIngestGraph:measure(FloatingBlocksUpdater._perfMetrics._skippedIngest)
 	renderDistanceGraph:measure(FloatingBlocksUpdater.Config._renderDistance)
 	objectsVisibleGraph:measure(visibleObjectCount)
-	objectsUpdatedGraph.Max = visibleObjectCount
+	objectsUpdatedGraph.Max = math.max(table.unpack(objectsVisibleGraph._data))
 	objectsUpdatedGraph:measure(updatedObjectCount)
 	p05ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.05)] or math.huge))
-	p50ObjectRefreshRateGraph:measure(1 / (objectDeltas[#objectDeltas // 2] or math.huge))
+	avgObjectRefreshRateGraph:measure(1 / FloatingBlocksUpdater._perfMetrics._averageObjectDeltaTime)
 	p95ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.95)] or math.huge))
 	gameRefreshRateGraph:measure(1 / gameDelta)
 end)

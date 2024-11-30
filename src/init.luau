@@ -59,7 +59,7 @@ type CullThrottleProto = {
 		_skippedIngest: number,
 		_searchDuration: number,
 		_ingestDuration: number,
-		_percentageOfVisibleObjectsUpdated: number,
+		_averageObjectDeltaTime: number,
 	},
 }
 
@@ -68,18 +68,18 @@ export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThro
 function CullThrottle.new(): CullThrottle
 	local self = setmetatable({}, CullThrottle)
 
+	self.Config = Config.new()
+
+	self.ObjectEnteredView = GoodSignal.new()
+	self.ObjectExitedView = GoodSignal.new()
+
 	self._perfMetrics = {
 		_skippedSearch = 0,
 		_skippedIngest = 0,
 		_searchDuration = 0,
 		_ingestDuration = 0,
-		_percentageOfVisibleObjectsUpdated = 1,
+		_averageObjectDeltaTime = self.Config.bestRefreshRate,
 	}
-
-	self.Config = Config.new()
-
-	self.ObjectEnteredView = GoodSignal.new()
-	self.ObjectExitedView = GoodSignal.new()
 
 	self._voxels = {}
 	self._objects = {}
@@ -903,25 +903,23 @@ function CullThrottle.adjustDynamicRenderDistance(self: CullThrottle)
 		return
 	end
 
-	local budgetUsage = (self._perfMetrics._searchDuration + self._perfMetrics._ingestDuration)
-		/ (self.Config.searchTimeBudget + self.Config.ingestTimeBudget)
-
-	local couldHandleMore = budgetUsage < 1
-		and self._perfMetrics._skippedIngest == 0
-		and self._perfMetrics._skippedSearch == 0
-		and self._perfMetrics._percentageOfVisibleObjectsUpdated > 0.8
-
-	local cantHandleCurrent = budgetUsage > 1
-		or self._perfMetrics._skippedIngest > 1
-		or self._perfMetrics._skippedSearch > 2
-		or self._perfMetrics._percentageOfVisibleObjectsUpdated < 0.3
-
-	if cantHandleCurrent then
-		-- We can't handle the current load- reduce the render distance
-		self.Config._renderDistance = math.max(self.Config._renderDistance * 0.98, self.Config._minRenderDistance)
-	elseif couldHandleMore then
-		-- We handled that like a boss- give us more!
-		self.Config._renderDistance = math.min(self.Config._renderDistance * 1.02, self.Config._maxRenderDistance)
+	if
+		self._perfMetrics._skippedIngest ~= 0
+		or self._perfMetrics._skippedSearch ~= 0 -- We're not able to truly process all the voxels
+		or self._perfMetrics._averageObjectDeltaTime >= self.Config._refreshRateMidpoint -- We're not refreshing fast enough
+		or self._perfMetrics._searchDuration / self.Config.searchTimeBudget > 1
+		or self._perfMetrics._ingestDuration / self.Config.ingestTimeBudget > 1 -- We're going over the time budget
+	then
+		self.Config._renderDistance = math.max(
+			self.Config._renderDistance - (self.Config.renderDistanceTarget * 0.03),
+			self.Config._minRenderDistance
+		)
+	elseif self._perfMetrics._averageObjectDeltaTime <= self.Config.bestRefreshRate then
+		-- We're doing amazing, we can take on more
+		self.Config._renderDistance = math.min(
+			self.Config._renderDistance + (self.Config.renderDistanceTarget * 0.015),
+			self.Config._maxRenderDistance
+		)
 	end
 end
 
@@ -969,7 +967,7 @@ end
 function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
 	self.Config.renderDistanceTarget = renderDistance
 	self.Config._renderDistance = renderDistance
-	self.Config._minRenderDistance = renderDistance / 2
+	self.Config._minRenderDistance = renderDistance / 3
 	self.Config._maxRenderDistance = renderDistance * 5
 end
 
@@ -984,6 +982,7 @@ function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: n
 	self.Config.bestRefreshRate = best
 	self.Config.worstRefreshRate = worst
 	self.Config._refreshRateRange = worst - best
+	self.Config._refreshRateMidpoint = (worst + best) / 2
 end
 
 function CullThrottle.addObject(self: CullThrottle, object: Instance)
@@ -1116,14 +1115,14 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
 	local p0UpdateTimeBudget = if self.Config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
 
-	local totalVisibleObjects = queue:len()
-	local updatedVisibleObjects = 0
+	local updatedObjects = 0
+	local sumOfObjectDeltaTimes = 0
 
 	return function()
 		if queue:isEmpty() then
 			debug.profileend()
 
-			self._perfMetrics._percentageOfVisibleObjectsUpdated = 1
+			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
 			return
 		end
 
@@ -1138,7 +1137,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 
 			debug.profileend()
 
-			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
+			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
 			return
 		end
 
@@ -1146,7 +1145,7 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 		if not object then
 			debug.profileend()
 
-			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
+			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
 			return
 		end
 
@@ -1154,14 +1153,15 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 		if not objectData then
 			debug.profileend()
 
-			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
+			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
 			return
 		end
 
 		local objectDeltaTime = updateStartClock - objectData.lastUpdateClock
 		objectData.lastUpdateClock = updateStartClock
 
-		updatedVisibleObjects += 1
+		sumOfObjectDeltaTimes += objectDeltaTime
+		updatedObjects += 1
 
 		return object, objectDeltaTime, objectData.distance
 	end
