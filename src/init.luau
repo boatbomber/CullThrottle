@@ -1160,8 +1160,13 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 		local objectDeltaTime = updateStartClock - objectData.lastUpdateClock
 		objectData.lastUpdateClock = updateStartClock
 
-		sumOfObjectDeltaTimes += objectDeltaTime
-		updatedObjects += 1
+		if objectDeltaTime < 1 then
+			-- If dt is over a second, that's just an object we haven't seen in a while,
+			-- not indicative of the object's actual refresh rate.
+			-- (If we're running at 1Hz fr, then we have bigger problems lol)
+			sumOfObjectDeltaTimes += objectDeltaTime
+			updatedObjects += 1
+		end
 
 		return object, objectDeltaTime, objectData.distance
 	end
