@@ -101,7 +101,7 @@ local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui
 local ScreenGui = Instance.new("ScreenGui")
 
 local TopLeftGraphs = Instance.new("Frame")
-TopLeftGraphs.AutomaticSize = Enum.AutomaticSize.XY
+TopLeftGraphs.Size = UDim2.fromScale(0.2, 0.3)
 TopLeftGraphs.Position = UDim2.fromOffset(5, 5)
 TopLeftGraphs.BackgroundTransparency = 1
 TopLeftGraphs.Parent = ScreenGui
@@ -109,12 +109,12 @@ TopLeftGraphs.Parent = ScreenGui
 local TopLeftListLayout = Instance.new("UIListLayout")
 TopLeftListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 TopLeftListLayout.FillDirection = Enum.FillDirection.Vertical
-TopLeftListLayout.VerticalAlignment = Enum.VerticalAlignment.Top
-TopLeftListLayout.Padding = UDim.new(0, 10)
+TopLeftListLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+TopLeftListLayout.Padding = UDim.new(0, 5)
 TopLeftListLayout.Parent = TopLeftGraphs
 
 local BottomLeftGraphs = Instance.new("Frame")
-BottomLeftGraphs.AutomaticSize = Enum.AutomaticSize.XY
+BottomLeftGraphs.Size = UDim2.fromScale(0.2, 0.2)
 BottomLeftGraphs.Position = UDim2.new(0, 5, 1, -5)
 BottomLeftGraphs.AnchorPoint = Vector2.new(0, 1)
 BottomLeftGraphs.BackgroundTransparency = 1
@@ -124,7 +124,7 @@ local BottomLeftListLayout = TopLeftListLayout:Clone()
 BottomLeftListLayout.Parent = BottomLeftGraphs
 
 local BottomRightGraphs = Instance.new("Frame")
-BottomRightGraphs.AutomaticSize = Enum.AutomaticSize.XY
+BottomRightGraphs.Size = UDim2.fromScale(0.2, 0.4)
 BottomRightGraphs.Position = UDim2.new(1, -5, 1, -5)
 BottomRightGraphs.AnchorPoint = Vector2.new(1, 1)
 BottomRightGraphs.BackgroundTransparency = 1
@@ -149,12 +149,19 @@ local updateTimeGraph = MetricGraph.new(
 )
 local perfFactorGraph = MetricGraph.new("Performance Factor", table.create(50, 0.5), 0.5, 2, "%.3f")
 
+computeTimeGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
+updateTimeGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
+perfFactorGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
+
 computeTimeGraph.Frame.Parent = TopLeftGraphs
 updateTimeGraph.Frame.Parent = TopLeftGraphs
 perfFactorGraph.Frame.Parent = TopLeftGraphs
 
 local objectsVisibleGraph = MetricGraph.new("Objects Visible", table.create(50, 0), 0, 1000)
 local objectsUpdatedGraph = MetricGraph.new("Objects Updated", table.create(50, 0), 0, 600)
+
+objectsVisibleGraph.Frame.Size = UDim2.fromScale(1, 1 / 2)
+objectsUpdatedGraph.Frame.Size = UDim2.fromScale(1, 1 / 2)
 
 objectsVisibleGraph.Frame.Parent = BottomLeftGraphs
 objectsUpdatedGraph.Frame.Parent = BottomLeftGraphs
@@ -181,6 +188,12 @@ local p95ObjectRefreshRateGraph = MetricGraph.new(
 	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
 	"%dHz"
 )
+
+gameRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
+p05ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
+p50ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
+p95ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
+
 gameRefreshRateGraph.Frame.Parent = BottomRightGraphs
 p05ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
 p50ObjectRefreshRateGraph.Frame.Parent = BottomRightGraphs
