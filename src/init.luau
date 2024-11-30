@@ -22,11 +22,11 @@ local NEARBY_DISTANCE_THRESHOLD = 30
 
 -- This weight gives more update priority to larger objects,
 -- focusing on the objects that contribute the most visually
-local SCREEN_SIZE_PRIORITY_WEIGHT = 83
+local SCREEN_SIZE_PRIORITY_WEIGHT = 85
 -- This weight tries to make everything the same refresh rate,
 -- sacrificing some updates to big objects for the little ones
 -- for a smoother overall vibe
-local REFRESH_RATE_PRIORITY_WEIGHT = 15
+local REFRESH_RATE_PRIORITY_WEIGHT = 13
 -- This weight gives more priority to nearby objects regardless of size
 -- which can help prioritize objects that are likely the real focus
 -- in cases where there are many objects of similar screen size
@@ -46,20 +46,35 @@ type CullThrottleProto = {
 	_updateObjectVoxelsBatch: { items: { Instance }, priorities: { number }, index: number },
 	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
 	_visibleObjects: { items: { Instance }, priorities: { number }, index: number },
+	_visibleVoxelKeys: { types.VoxelKey },
 	_objectVisibilityTimestamps: { [Instance]: number },
 	_physicsObjectIterIndex: number,
 	_lastVoxelVisibility: { [types.VoxelKey]: number },
-	_recordedSearchDurations: { number },
-	_recordedSearchDurationIndex: number,
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
-	_performanceFalloffFactor: number,
+	_volumesToCheck: { { number } },
+
+	_perfMetrics: {
+		_skippedSearch: number,
+		_skippedIngest: number,
+		_searchDuration: number,
+		_ingestDuration: number,
+		_percentageOfVisibleObjectsUpdated: number,
+	},
 }
 
 export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThrottle))
 
 function CullThrottle.new(): CullThrottle
 	local self = setmetatable({}, CullThrottle)
+
+	self._perfMetrics = {
+		_skippedSearch = 0,
+		_skippedIngest = 0,
+		_searchDuration = 0,
+		_ingestDuration = 0,
+		_percentageOfVisibleObjectsUpdated = 1,
+	}
 
 	self.Config = Config.new()
 
@@ -73,16 +88,19 @@ function CullThrottle.new(): CullThrottle
 	self._updateObjectVoxelsQueue = PriorityQueue.new()
 	self._updateObjectVoxelsBatch = { items = {}, priorities = {}, index = 0 }
 	self._visibleObjectsQueue = PriorityQueue.new()
-	self._visibleObjects = { items = {}, priorities = {}, index = 0 }
+	self._visibleObjects = { items = table.create(50), priorities = table.create(50), index = 0 }
+	self._visibleVoxelKeys = {}
 	self._objectVisibilityTimestamps = {}
 	self._lastVoxelVisibility = {}
-	self._recordedSearchDurations = table.create(5, 0)
-	self._recordedSearchDurationIndex = 1
 	self._processedVisibilityThisFrame = false
-	self._performanceFalloffFactor = 1
+	self._volumesToCheck = table.create(8)
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
-		if self.ObjectEnteredView._connectionCount == 0 and self.ObjectExitedView._connectionCount == 0 then
+		if
+			self.Config.computeVisibilityOnlyOnDemand
+			and self.ObjectEnteredView._connectionCount == 0
+			and self.ObjectExitedView._connectionCount == 0
+		then
 			-- No listeners, so we might not need to do anything this frame.
 			-- If the user tries to get visible objects or iterate objects to update,
 			-- we'll process them at that time.
@@ -94,34 +112,37 @@ function CullThrottle.new(): CullThrottle
 	return self
 end
 
-function CullThrottle._getAverageSearchDuration(self: CullThrottle): number
-	local sum = 0
-	for _, searchDuration in self._recordedSearchDurations do
-		sum += searchDuration
+function CullThrottle._markVoxelKeyVisible(self: CullThrottle, voxelKey: types.VoxelKey)
+	-- Sort by voxelKeys by manhattan distance to camera in voxel space
+	local voxelSize = self.Config.voxelSize
+	local cameraVoxelKey = CameraCache.Position // voxelSize
+	local difference = voxelKey - cameraVoxelKey
+	local manhattanDist = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+
+	local visibleVoxelKeys = self._visibleVoxelKeys
+	local left = 1
+	local right = #visibleVoxelKeys
+
+	while left <= right do
+		local mid = math.floor((left + right) / 2)
+		local otherVoxelKey = visibleVoxelKeys[mid]
+		if otherVoxelKey == voxelKey then
+			return
+		end
+
+		local otherDifference = otherVoxelKey - cameraVoxelKey
+		local otherManhattanDist = math.abs(otherDifference.X)
+			+ math.abs(otherDifference.Y)
+			+ math.abs(otherDifference.Z)
+
+		if otherManhattanDist < manhattanDist then
+			left = mid + 1
+		else
+			right = mid - 1
+		end
 	end
-	return sum / #self._recordedSearchDurations
-end
 
-function CullThrottle._recordSearchDuration(self: CullThrottle, start: number)
-	local callTime = os.clock() - start
-	self._recordedSearchDurations[self._recordedSearchDurationIndex] = callTime
-	self._recordedSearchDurationIndex = (self._recordedSearchDurationIndex % 5) + 1
-end
-
-function CullThrottle._updatePerformanceFalloffFactor(self: CullThrottle): number
-	local adjustmentFactor = self:_getAverageSearchDuration() / self.Config.searchTimeBudget
-
-	if adjustmentFactor > 1 then
-		-- We're overbudget, increase falloff (max 2)
-		self._performanceFalloffFactor =
-			math.min(self._performanceFalloffFactor * (1 + (adjustmentFactor - 1) * 0.5), 2)
-	else
-		-- We have extra budget, decrease falloff (min 0.5)
-		self._performanceFalloffFactor =
-			math.max(self._performanceFalloffFactor * (1 - (1 - adjustmentFactor) * 0.5), 0.5)
-	end
-
-	return self._performanceFalloffFactor
+	table.insert(visibleVoxelKeys, left, voxelKey)
 end
 
 function CullThrottle._updateDesiredVoxelKeys(
@@ -130,7 +151,7 @@ function CullThrottle._updateDesiredVoxelKeys(
 	objectData: types.ObjectData
 ): { [types.VoxelKey]: boolean }
 	local voxelSize = self.Config.voxelSize
-	local radiusThresholdForCorners = self.Config.radiusThresholdForCorners
+	local radiusThresholdForCorners = self.Config._radiusThresholdForCorners
 	local desiredVoxelKeys = {}
 
 	-- We'll get the voxelKeys for the center and the 8 corners of the object
@@ -369,23 +390,13 @@ function CullThrottle._getScreenSize(_self: CullThrottle, distance: number, radi
 	return (radius / distance) / CameraCache.HalfTanFOV
 end
 
-function CullThrottle._addVoxelToVisibleObjects(
-	self: CullThrottle,
-	now: number,
-	updateLastVoxelVisiblity: boolean,
-	voxelKey: types.VoxelKey,
-	voxel: types.Voxel,
-	cameraPos: Vector3,
-	bestRefreshRate: number,
-	worstRefreshRate: number,
-	refreshRateRange: number,
-	renderDistance: number
-)
+function CullThrottle._addVoxelToVisibleObjects(self: CullThrottle, now: number, voxel: types.Voxel)
 	debug.profilebegin("addVoxelVisible")
-
-	if updateLastVoxelVisiblity then
-		self._lastVoxelVisibility[voxelKey] = now
-	end
+	local cameraPos = CameraCache.Position
+	local renderDistance = self.Config._renderDistance
+	local bestRefreshRate = self.Config.bestRefreshRate
+	local worstRefreshRate = self.Config.worstRefreshRate
+	local refreshRateRange = self.Config._refreshRateRange
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local visibleObjectsItems = self._visibleObjects.items
@@ -411,8 +422,7 @@ function CullThrottle._addVoxelToVisibleObjects(
 			continue
 		end
 
-		debug.profilebegin("priorityCalculation")
-		local screenSize = self:_getScreenSize(distance, objectData.radius) ^ self._performanceFalloffFactor
+		local screenSize = self:_getScreenSize(distance, objectData.radius)
 		local elapsed = now - objectData.lastUpdateClock
 		local jitteredElapsed = elapsed + objectData.jitterOffset
 
@@ -423,8 +433,9 @@ function CullThrottle._addVoxelToVisibleObjects(
 			-- so make this super low priority
 			objectPriority = (1 - screenSize) * 1e6
 		elseif jitteredElapsed >= worstRefreshRate then
-			-- Try to at least maintain the worst refresh rate
-			objectPriority = 1 - (jitteredElapsed - worstRefreshRate) / worstRefreshRate
+			-- To maintain the worst refresh rate, make this p0 priority
+			-- Sort these p0s by screen size
+			objectPriority = P0_THRESHOLD - screenSize
 		elseif distance < NEARBY_DISTANCE_THRESHOLD then
 			-- Objects right by camera should update basically every frame
 			objectPriority = distance / NEARBY_DISTANCE_THRESHOLD
@@ -437,17 +448,14 @@ function CullThrottle._addVoxelToVisibleObjects(
 
 			objectPriority = screenSizePriority + refreshPriority + distancePriority
 		end
-		debug.profileend()
 
 		visibleObjectsIndex += 1
 		visibleObjectsItems[visibleObjectsIndex] = object
 		visibleObjectsPriorities[visibleObjectsIndex] = objectPriority
 
 		if objectVisibilityTimestamps[object] == nil then
-			debug.profilebegin("objectEnteredView:Fire")
 			-- This object wasn't visible last frame but it is now
 			self.ObjectEnteredView:Fire(object)
-			debug.profileend()
 		end
 		objectVisibilityTimestamps[object] = now
 	end
@@ -460,41 +468,17 @@ end
 function CullThrottle._getFrustumVoxelsInVolume(
 	self: CullThrottle,
 	now: number,
-	timeBudget: number,
 	frustumPlanes: { Vector3 },
 	x0: number,
 	y0: number,
 	z0: number,
 	x1: number,
 	y1: number,
-	z1: number,
-	callback: (types.VoxelKey, types.Voxel, boolean) -> ()
+	z1: number
 )
 	local isSingleVoxel = x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1
 	local voxels = self._voxels
 	local lastVoxelVisibility = self._lastVoxelVisibility
-
-	if os.clock() - now >= timeBudget then
-		-- We don't have time to be accurate anymore, just assume they're in view
-		debug.profilebegin("budgetReached_useCachedOnly")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					local voxel = voxels[voxelKey]
-					if not voxel then
-						continue
-					end
-					if lastVoxelVisibility[voxelKey] then
-						callback(voxelKey, voxel, false)
-					end
-				end
-			end
-		end
-
-		debug.profileend()
-		return
-	end
 
 	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
 
@@ -510,7 +494,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 
 		-- If this voxel was visible a moment ago, assume it still is
 		if now - (lastVoxelVisibility[voxelKey] or 0) < JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
-			callback(voxelKey, voxel, false)
+			self:_markVoxelKeyVisible(voxelKey)
 			return
 		end
 
@@ -523,7 +507,8 @@ function CullThrottle._getFrustumVoxelsInVolume(
 		end
 
 		-- This voxel is visible
-		callback(voxelKey, voxel, true)
+		lastVoxelVisibility[voxelKey] = now
+		self:_markVoxelKeyVisible(voxelKey)
 		return
 	end
 
@@ -543,6 +528,13 @@ function CullThrottle._getFrustumVoxelsInVolume(
 					break
 				end
 			end
+			if allVoxelsVisible == false then
+				-- No need to check further if we already know some voxels are not visible
+				break
+			end
+		end
+		if allVoxelsVisible == false then
+			break
 		end
 	end
 	debug.profileend()
@@ -563,7 +555,7 @@ function CullThrottle._getFrustumVoxelsInVolume(
 					if not voxel then
 						continue
 					end
-					callback(voxelKey, voxel, false)
+					self:_markVoxelKeyVisible(voxelKey)
 				end
 			end
 		end
@@ -604,7 +596,8 @@ function CullThrottle._getFrustumVoxelsInVolume(
 					if not voxel then
 						continue
 					end
-					callback(voxelKey, voxel, true)
+					lastVoxelVisibility[voxelKey] = now
+					self:_markVoxelKeyVisible(voxelKey)
 				end
 			end
 		end
@@ -621,34 +614,29 @@ function CullThrottle._getFrustumVoxelsInVolume(
 	local lengthZ = z1 - z0
 
 	-- Split along the axis with the greatest length
-	local randomizeSearchOrder = math.random(0, 1) == 0 -- Search them in random order to avoid bias towards one half
+	local volumeA: { number }, volumeB: { number }
 	if lengthX >= lengthY and lengthX >= lengthZ then
 		local splitCoord = (x0 + x1) // 2
-		if randomizeSearchOrder then
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, splitCoord, y1, z1, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, splitCoord, y0, z0, x1, y1, z1, callback)
-		else
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, splitCoord, y0, z0, x1, y1, z1, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, splitCoord, y1, z1, callback)
-		end
+		volumeA = { x0, y0, z0, splitCoord, y1, z1 }
+		volumeB = { splitCoord, y0, z0, x1, y1, z1 }
 	elseif lengthY >= lengthX and lengthY >= lengthZ then
 		local splitCoord = (y0 + y1) // 2
-		if randomizeSearchOrder then
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, x1, splitCoord, z1, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, splitCoord, z0, x1, y1, z1, callback)
-		else
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, splitCoord, z0, x1, y1, z1, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, x1, splitCoord, z1, callback)
-		end
+		volumeA = { x0, y0, z0, x1, splitCoord, z1 }
+		volumeB = { x0, splitCoord, z0, x1, y1, z1 }
 	else
 		local splitCoord = (z0 + z1) // 2
-		if randomizeSearchOrder then
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, x1, y1, splitCoord, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, splitCoord, x1, y1, z1, callback)
-		else
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, splitCoord, x1, y1, z1, callback)
-			self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, x0, y0, z0, x1, y1, splitCoord, callback)
-		end
+		volumeA = { x0, y0, z0, x1, y1, splitCoord }
+		volumeB = { x0, y0, splitCoord, x1, y1, z1 }
+	end
+
+	-- Randomize order to avoid worst case where only the first volume
+	-- gets checked before the budget is up
+	if math.random(1, 2) == 1 then
+		table.insert(self._volumesToCheck, volumeA)
+		table.insert(self._volumesToCheck, volumeB)
+	else
+		table.insert(self._volumesToCheck, volumeB)
+		table.insert(self._volumesToCheck, volumeA)
 	end
 end
 
@@ -709,6 +697,7 @@ function CullThrottle._getPlanesAndBounds(
 end
 
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
+	table.clear(self._visibleVoxelKeys)
 	if self._visibleObjects.index > 0 then
 		self._visibleObjects.index = 0
 		table.clear(self._visibleObjects.items)
@@ -747,15 +736,14 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 	-- Clear any objects left over from last frame
 	self:_clearVisibleObjects()
+	self._perfMetrics._skippedSearch = 0
+	self._perfMetrics._skippedIngest = 0
 
-	local timeBudget = self.Config.searchTimeBudget
+	local searchTimeBudget = self.Config.searchTimeBudget
+	local ingestTimeBudget = self.Config.ingestTimeBudget
 	local voxelSize = self.Config.voxelSize
-	local bestRefreshRate = self.Config.bestRefreshRate
-	local worstRefreshRate = self.Config.worstRefreshRate
-	local refreshRateRange = self.Config.refreshRateRange
-	local renderDistance = self.Config.renderDistance
+	local renderDistance = self.Config._renderDistance
 
-	local cameraPos = CameraCache.Position
 	local frustumPlanes, minBound, maxBound = self:_getPlanesAndBounds(renderDistance, voxelSize)
 
 	local minX = minBound.X
@@ -765,69 +753,176 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local maxY = maxBound.Y + 1
 	local maxZ = maxBound.Z + 1
 
-	local function callback(voxelKey: Vector3, voxel: { Instance }, updateLastVoxelVisiblity: boolean)
-		self:_addVoxelToVisibleObjects(
-			now,
-			updateLastVoxelVisiblity,
-			voxelKey,
-			voxel,
-			cameraPos,
-			bestRefreshRate,
-			worstRefreshRate,
-			refreshRateRange,
-			renderDistance
-		)
-	end
+	local volumesToCheck = self._volumesToCheck
+	table.clear(volumesToCheck)
 
 	-- Split into smaller boxes to start off since the frustum bounding volume
-	-- obviously intersects the frustum planes
-
-	-- However if the bounds are not divisible then don't split early
+	-- obviously intersects the frustum planes.
 	if minX == maxX or minY == maxY or minZ == maxZ then
-		self:_getFrustumVoxelsInVolume(now, timeBudget, frustumPlanes, minX, minY, minZ, maxX, maxY, maxZ, callback)
-		debug.profileend()
+		-- If the bounds are not divisible then don't split early
+		self._volumesToCheck[1] = { minX, minY, minZ, maxX, maxY, maxZ }
+	else
+		local midBound = (minBound + maxBound) // 2
+		local midX = midBound.X
+		local midY = midBound.Y
+		local midZ = midBound.Z
+
+		volumesToCheck[1] = { minX, minY, minZ, midX, midY, midZ }
+		volumesToCheck[2] = { midX, minY, minZ, maxX, midY, midZ }
+		volumesToCheck[3] = { minX, minY, midZ, midX, midY, maxZ }
+		volumesToCheck[4] = { midX, minY, midZ, maxX, midY, maxZ }
+		volumesToCheck[5] = { minX, midY, minZ, midX, maxY, midZ }
+		volumesToCheck[6] = { midX, midY, minZ, maxX, maxY, midZ }
+		volumesToCheck[7] = { minX, midY, midZ, midX, maxY, maxZ }
+		volumesToCheck[8] = { midX, midY, midZ, maxX, maxY, maxZ }
+
+		-- Shuffle the quandrant volumes to avoid a worst-case where
+		-- only the first volume is checked before budget is up
+		for i = 8, 2, -1 do
+			local j = math.random(1, i)
+			volumesToCheck[i], volumesToCheck[j] = volumesToCheck[j], volumesToCheck[i]
+		end
+	end
+
+	local voxels = self._voxels
+	local lastVoxelVisibility = self._lastVoxelVisibility
+
+	debug.profilebegin("searchVolumes")
+	while #self._volumesToCheck > 0 do
+		if os.clock() - now >= searchTimeBudget then
+			-- We've run out of time!
+			-- We'll use the cached visibility for the remaining volumes
+			debug.profilebegin("timeBudgetHit_useCachedVisibility")
+			for _, volume in self._volumesToCheck do
+				local x0, y0, z0, x1, y1, z1 = table.unpack(volume)
+
+				if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
+					-- This volume is a single voxel
+					local voxelKey = Vector3.new(x0, y0, z0)
+					local voxel = voxels[voxelKey]
+					if voxel and lastVoxelVisibility[voxelKey] then
+						self._perfMetrics._skippedSearch += 1
+						self:_markVoxelKeyVisible(voxelKey)
+					end
+				else
+					-- Run through the voxels contained in this volume
+					for x = x0, x1 - 1 do
+						for y = y0, y1 - 1 do
+							for z = z0, z1 - 1 do
+								local voxelKey = Vector3.new(x, y, z)
+								local voxel = voxels[voxelKey]
+								if voxel and lastVoxelVisibility[voxelKey] then
+									self._perfMetrics._skippedSearch += 1
+									self:_markVoxelKeyVisible(voxelKey)
+								end
+							end
+						end
+					end
+				end
+			end
+			debug.profileend()
+			break
+		end
+
+		local n = #self._volumesToCheck
+		local volume = self._volumesToCheck[n]
+		self._volumesToCheck[n] = nil
+
+		-- Check the volume
+		self:_getFrustumVoxelsInVolume(
+			now,
+			frustumPlanes,
+			volume[1],
+			volume[2],
+			volume[3],
+			volume[4],
+			volume[5],
+			volume[6]
+		)
+	end
+	self._perfMetrics._searchDuration = os.clock() - now
+	debug.profileend()
+
+	debug.profilebegin("ingestFoundVoxels")
+	local visibleVoxelKeys = self._visibleVoxelKeys
+	local startIngestClock = os.clock()
+	for voxelIndex, voxelKey in visibleVoxelKeys do
+		local voxel = voxels[voxelKey]
+		if not voxel then
+			continue
+		end
+
+		self:_addVoxelToVisibleObjects(now, voxel)
+
+		if os.clock() - startIngestClock >= ingestTimeBudget then
+			debug.profilebegin("timeBudgetHit_skipEventsHandling")
+			local objectVisibilityTimestamps = self._objectVisibilityTimestamps
+			for budget_voxelIndex = voxelIndex + 1, #visibleVoxelKeys do
+				-- We've run out of time!
+				-- Just dump all the objects into the visible objects list
+				local budget_voxelKey = visibleVoxelKeys[voxelIndex]
+				local budget_voxel = voxels[budget_voxelKey]
+				if not budget_voxel then
+					continue
+				end
+
+				self._perfMetrics._skippedIngest += 1
+
+				local voxelCount = #budget_voxel
+				table.move(budget_voxel, 1, voxelCount, self._visibleObjects.index + 1, self._visibleObjects.items)
+				table.move(
+					table.create(voxelCount, budget_voxelIndex * 1e4),
+					1,
+					voxelCount,
+					self._visibleObjects.index + 1,
+					self._visibleObjects.priorities
+				)
+				self._visibleObjects.index += voxelCount
+
+				for _, object in budget_voxel do
+					if objectVisibilityTimestamps[object] == nil then
+						-- This object wasn't visible last frame but it is now
+						self.ObjectEnteredView:Fire(object)
+					end
+					objectVisibilityTimestamps[object] = now
+				end
+			end
+			debug.profileend()
+			break
+		end
+	end
+
+	self._perfMetrics._ingestDuration = os.clock() - startIngestClock
+	debug.profileend()
+
+	debug.profileend()
+end
+
+function CullThrottle.adjustDynamicRenderDistance(self: CullThrottle)
+	if not self.Config.dynamicRenderDistance then
 		return
 	end
 
-	local midBound = (minBound + maxBound) // 2
-	local midX = midBound.X
-	local midY = midBound.Y
-	local midZ = midBound.Z
+	local budgetUsage = (self._perfMetrics._searchDuration + self._perfMetrics._ingestDuration)
+		/ (self.Config.searchTimeBudget + self.Config.ingestTimeBudget)
 
-	local quadrants = {
-		{ minX, minY, minZ, midX, midY, midZ },
-		{ midX, minY, minZ, maxX, midY, midZ },
-		{ minX, minY, midZ, midX, midY, maxZ },
-		{ midX, minY, midZ, maxX, midY, maxZ },
-		{ minX, midY, minZ, midX, maxY, midZ },
-		{ midX, midY, minZ, maxX, maxY, midZ },
-		{ minX, midY, midZ, midX, maxY, maxZ },
-		{ midX, midY, midZ, maxX, maxY, maxZ },
-	}
+	local couldHandleMore = budgetUsage < 1
+		and self._perfMetrics._skippedIngest == 0
+		and self._perfMetrics._skippedSearch == 0
+		and self._perfMetrics._percentageOfVisibleObjectsUpdated > 0.8
 
-	-- Shuffle the order in which we search the quadrants to avoid
-	-- bias in object priority
-	for i = #quadrants, 2, -1 do
-		local j = math.random(i)
-		quadrants[i], quadrants[j] = quadrants[j], quadrants[i]
+	local cantHandleCurrent = budgetUsage > 1
+		or self._perfMetrics._skippedIngest > 1
+		or self._perfMetrics._skippedSearch > 2
+		or self._perfMetrics._percentageOfVisibleObjectsUpdated < 0.3
+
+	if cantHandleCurrent then
+		-- We can't handle the current load- reduce the render distance
+		self.Config._renderDistance = math.max(self.Config._renderDistance * 0.98, self.Config._minRenderDistance)
+	elseif couldHandleMore then
+		-- We handled that like a boss- give us more!
+		self.Config._renderDistance = math.min(self.Config._renderDistance * 1.02, self.Config._maxRenderDistance)
 	end
-
-	for _, quadrant in quadrants do
-		self:_getFrustumVoxelsInVolume(
-			now,
-			timeBudget,
-			frustumPlanes,
-			quadrant[1],
-			quadrant[2],
-			quadrant[3],
-			quadrant[4],
-			quadrant[5],
-			quadrant[6],
-			callback
-		)
-	end
-
-	debug.profileend()
 end
 
 function CullThrottle._processObjectVisibility(self: CullThrottle)
@@ -843,19 +938,14 @@ function CullThrottle._processObjectVisibility(self: CullThrottle)
 	self:_pollPhysicsObjects(5e-5, start)
 	self:_updateObjectVoxels(5e-5, os.clock())
 
-	-- Update the performance falloff factor to
-	-- dynamically adjust the priorities based on
-	-- current capabilities
-	self:_updatePerformanceFalloffFactor()
-
 	-- Find the objects that are visible this frame
 	self:_findVisibleObjects(start)
 
 	-- Signal the visibility changes to the event handler
 	self:_signalVisibilityChanges(start)
 
-	-- Record the time taken
-	self:_recordSearchDuration(start)
+	-- Adjust dynamic render distance to hit the budgets
+	self:adjustDynamicRenderDistance()
 
 	self._processedVisibilityThisFrame = true
 	debug.profileend()
@@ -863,8 +953,8 @@ end
 
 function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
 	self.Config.voxelSize = voxelSize
-	self.Config.halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
-	self.Config.radiusThresholdForCorners = voxelSize * (1 / 8)
+	self.Config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
+	self.Config._radiusThresholdForCorners = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
 	table.clear(self._voxels)
@@ -877,7 +967,10 @@ function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
 end
 
 function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
-	self.Config.renderDistance = renderDistance
+	self.Config.renderDistanceTarget = renderDistance
+	self.Config._renderDistance = renderDistance
+	self.Config._minRenderDistance = renderDistance / 2
+	self.Config._maxRenderDistance = renderDistance * 5
 end
 
 function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: number)
@@ -890,7 +983,7 @@ function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: n
 
 	self.Config.bestRefreshRate = best
 	self.Config.worstRefreshRate = worst
-	self.Config.refreshRateRange = worst - best
+	self.Config._refreshRateRange = worst - best
 end
 
 function CullThrottle.addObject(self: CullThrottle, object: Instance)
@@ -1023,9 +1116,14 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
 	local p0UpdateTimeBudget = if self.Config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
 
+	local totalVisibleObjects = queue:len()
+	local updatedVisibleObjects = 0
+
 	return function()
 		if queue:isEmpty() then
 			debug.profileend()
+
+			self._perfMetrics._percentageOfVisibleObjectsUpdated = 1
 			return
 		end
 
@@ -1039,23 +1137,31 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 			self._visibleObjectsQueue:clear()
 
 			debug.profileend()
+
+			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
 			return
 		end
 
 		local object = queue:dequeue()
 		if not object then
 			debug.profileend()
+
+			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
 			return
 		end
 
 		local objectData = self._objects[object]
 		if not objectData then
 			debug.profileend()
+
+			self._perfMetrics._percentageOfVisibleObjectsUpdated = updatedVisibleObjects / totalVisibleObjects
 			return
 		end
 
 		local objectDeltaTime = updateStartClock - objectData.lastUpdateClock
 		objectData.lastUpdateClock = updateStartClock
+
+		updatedVisibleObjects += 1
 
 		return object, objectDeltaTime, objectData.distance
 	end

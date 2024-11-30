@@ -75,8 +75,7 @@ end
 function PriorityQueue.enqueue(self: PriorityQueue, item: any, priority: number): PriorityQueue
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	if indices[item] ~= nil then
-		-- It's already in the queue, so we need to remove it first
-		self:remove(item)
+		return self
 	end
 	local size = self._size + 1
 	self._size = size
@@ -90,8 +89,8 @@ function PriorityQueue.batchEnqueue(self: PriorityQueue, itemsBatch: { any }, pr
 	local size = self._size
 	for i = 1, #itemsBatch do
 		local item, priority = itemsBatch[i], prioritiesBatch[i]
-		if indices[item] ~= nil then
-			error("Item " .. tostring(indices[item]) .. " is already in the heap")
+		if item == nil or indices[item] ~= nil then
+			continue
 		end
 		size = size + 1
 		items[size], priorities[size] = item, priority
