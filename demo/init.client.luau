@@ -37,19 +37,7 @@ BlocksFolder.Parent = workspace
 
 -- We need to tell CullThrottle about all the objects that we want it to manage.
 local FloatingBlocksUpdater = CullThrottle.new()
--- FloatingBlocksUpdater:setRenderDistance(800)
-
-for _, block in CollectionService:GetTagged(TAG) do
-	FloatingBlocksUpdater:addObject(block)
-end
-
-CollectionService:GetInstanceAddedSignal(TAG):Connect(function(block)
-	FloatingBlocksUpdater:addObject(block)
-end)
-
-CollectionService:GetInstanceRemovedSignal(TAG):Connect(function(block)
-	FloatingBlocksUpdater:removeObject(block)
-end)
+FloatingBlocksUpdater:CaptureTag(TAG)
 
 -- Change colors of blocks to indicate visibility
 -- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
@@ -71,7 +59,7 @@ RunService.PreAnimation:Connect(function()
 	table.clear(objectDeltas) -- For the debug graphs
 
 	local now = os.clock()
-	for block, dt in FloatingBlocksUpdater:iterObjectsToUpdate() do
+	for block, dt in FloatingBlocksUpdater:IterateObjectsToUpdate() do
 		table.insert(objectDeltas, dt)
 		dt = math.min(dt, 1 / 15) * 3
 
@@ -253,7 +241,7 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	table.sort(objectDeltas, function(a, b)
 		return a > b
 	end)
-	local visibleObjectCount = #FloatingBlocksUpdater:getObjectsInView()
+	local visibleObjectCount = #FloatingBlocksUpdater:GetVisibleObjects()
 	local updatedObjectCount = #objectDeltas
 
 	searchDurationGraph:measure(FloatingBlocksUpdater._perfMetrics._searchDuration * 1e6)

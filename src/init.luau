@@ -3,6 +3,7 @@
 --!native
 
 local RunService = game:GetService("RunService")
+local CollectionService = game:GetService("CollectionService")
 
 if RunService:IsServer() and not RunService:IsEdit() then
 	error("CullThrottle is a client side effect and cannot be used on the server")
@@ -50,6 +51,7 @@ type CullThrottleProto = {
 	_objectVisibilityTimestamps: { [Instance]: number },
 	_physicsObjectIterIndex: number,
 	_lastVoxelVisibility: { [types.VoxelKey]: number },
+	_tagConnections: { [string]: { RBXScriptConnection } },
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
 	_volumesToCheck: { { number } },
@@ -64,53 +66,6 @@ type CullThrottleProto = {
 }
 
 export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThrottle))
-
-function CullThrottle.new(): CullThrottle
-	local self = setmetatable({}, CullThrottle)
-
-	self.Config = Config.new()
-
-	self.ObjectEnteredView = GoodSignal.new()
-	self.ObjectExitedView = GoodSignal.new()
-
-	self._perfMetrics = {
-		_skippedSearch = 0,
-		_skippedIngest = 0,
-		_searchDuration = 0,
-		_ingestDuration = 0,
-		_averageObjectDeltaTime = self.Config.bestRefreshRate,
-	}
-
-	self._voxels = {}
-	self._objects = {}
-	self._physicsObjects = {}
-	self._physicsObjectIterIndex = 1
-	self._updateObjectVoxelsQueue = PriorityQueue.new()
-	self._updateObjectVoxelsBatch = { items = {}, priorities = {}, index = 0 }
-	self._visibleObjectsQueue = PriorityQueue.new()
-	self._visibleObjects = { items = table.create(50), priorities = table.create(50), index = 0 }
-	self._visibleVoxelKeys = {}
-	self._objectVisibilityTimestamps = {}
-	self._lastVoxelVisibility = {}
-	self._processedVisibilityThisFrame = false
-	self._volumesToCheck = table.create(8)
-	self._renderConnection = RunService.PreRender:Connect(function()
-		self._processedVisibilityThisFrame = false
-		if
-			self.Config.computeVisibilityOnlyOnDemand
-			and self.ObjectEnteredView._connectionCount == 0
-			and self.ObjectExitedView._connectionCount == 0
-		then
-			-- No listeners, so we might not need to do anything this frame.
-			-- If the user tries to get visible objects or iterate objects to update,
-			-- we'll process them at that time.
-			return
-		end
-		self:_processObjectVisibility()
-	end)
-
-	return self
-end
 
 function CullThrottle._markVoxelKeyVisible(self: CullThrottle, voxelKey: types.VoxelKey)
 	-- Sort by voxelKeys by manhattan distance to camera in voxel space
@@ -898,7 +853,7 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	debug.profileend()
 end
 
-function CullThrottle.adjustDynamicRenderDistance(self: CullThrottle)
+function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 	if not self.Config.dynamicRenderDistance then
 		return
 	end
@@ -943,49 +898,65 @@ function CullThrottle._processObjectVisibility(self: CullThrottle)
 	self:_signalVisibilityChanges(start)
 
 	-- Adjust dynamic render distance to hit the budgets
-	self:adjustDynamicRenderDistance()
+	self:_adjustDynamicRenderDistance()
 
 	self._processedVisibilityThisFrame = true
 	debug.profileend()
 end
 
-function CullThrottle.setVoxelSize(self: CullThrottle, voxelSize: number)
-	self.Config.voxelSize = voxelSize
-	self.Config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
-	self.Config._radiusThresholdForCorners = voxelSize * (1 / 8)
+--[[
+	Public APIs
+--]]
 
-	-- We need to move all the objects around to their new voxels
-	table.clear(self._voxels)
+function CullThrottle.new(): CullThrottle
+	local self = setmetatable({}, CullThrottle)
 
-	for object, objectData in self._objects do
-		self:_updateDesiredVoxelKeys(object, objectData)
-	end
+	self.Config = Config.new()
 
-	self:_updateObjectVoxels(5, os.clock())
+	self.ObjectEnteredView = GoodSignal.new()
+	self.ObjectExitedView = GoodSignal.new()
+
+	self._perfMetrics = {
+		_skippedSearch = 0,
+		_skippedIngest = 0,
+		_searchDuration = 0,
+		_ingestDuration = 0,
+		_averageObjectDeltaTime = self.Config.bestRefreshRate,
+	}
+
+	self._voxels = {}
+	self._objects = {}
+	self._physicsObjects = {}
+	self._physicsObjectIterIndex = 1
+	self._updateObjectVoxelsQueue = PriorityQueue.new()
+	self._updateObjectVoxelsBatch = { items = {}, priorities = {}, index = 0 }
+	self._visibleObjectsQueue = PriorityQueue.new()
+	self._visibleObjects = { items = table.create(50), priorities = table.create(50), index = 0 }
+	self._visibleVoxelKeys = {}
+	self._objectVisibilityTimestamps = {}
+	self._lastVoxelVisibility = {}
+	self._processedVisibilityThisFrame = false
+	self._volumesToCheck = table.create(8)
+	self._tagConnections = {}
+	self._renderConnection = RunService.PreRender:Connect(function()
+		self._processedVisibilityThisFrame = false
+		if
+			self.Config.computeVisibilityOnlyOnDemand
+			and self.ObjectEnteredView._connectionCount == 0
+			and self.ObjectExitedView._connectionCount == 0
+		then
+			-- No listeners, so we might not need to do anything this frame.
+			-- If the user tries to get visible objects or iterate objects to update,
+			-- we'll process them at that time.
+			return
+		end
+		self:_processObjectVisibility()
+	end)
+
+	return self
 end
 
-function CullThrottle.setRenderDistance(self: CullThrottle, renderDistance: number)
-	self.Config.renderDistanceTarget = renderDistance
-	self.Config._renderDistance = renderDistance
-	self.Config._minRenderDistance = renderDistance / 3
-	self.Config._maxRenderDistance = renderDistance * 5
-end
-
-function CullThrottle.setRefreshRates(self: CullThrottle, best: number, worst: number)
-	if best > 2 then
-		best = 1 / best
-	end
-	if worst > 2 then
-		worst = 1 / worst
-	end
-
-	self.Config.bestRefreshRate = best
-	self.Config.worstRefreshRate = worst
-	self.Config._refreshRateRange = worst - best
-	self.Config._refreshRateMidpoint = (worst + best) / 2
-end
-
-function CullThrottle.addObject(self: CullThrottle, object: Instance)
+function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	local cframeSource, cframeType = ObjectDimensions._getObjectCFrameSource(object)
 	local boundingBoxSource, boundingBoxType = ObjectDimensions._getObjectBoundingBoxSource(object)
 
@@ -1057,15 +1028,15 @@ function CullThrottle.addObject(self: CullThrottle, object: Instance)
 	return objectData
 end
 
-function CullThrottle.addPhysicsObject(self: CullThrottle, object: BasePart)
-	self:addObject(object)
+function CullThrottle.AddPhysicsObject(self: CullThrottle, object: BasePart)
+	self:AddObject(object)
 
 	-- Also add it to the physics objects table for polling position changes
 	-- (physics based movement doesn't trigger the normal connection)
 	table.insert(self._physicsObjects, object)
 end
 
-function CullThrottle.removeObject(self: CullThrottle, object: Instance)
+function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 	local objectData = self._objects[object]
 	if not objectData then
 		return
@@ -1091,14 +1062,48 @@ function CullThrottle.removeObject(self: CullThrottle, object: Instance)
 	end
 end
 
-function CullThrottle.getObjectsInView(self: CullThrottle): { Instance }
+function CullThrottle.CaptureTag(self: CullThrottle, tag: string)
+	self._tagConnections[tag] = {
+		CollectionService:GetInstanceAddedSignal(tag):Connect(function(object: Instance)
+			if object:IsA("BasePart") and object.Anchored == false then
+				self:AddPhysicsObject(object)
+			else
+				self:AddObject(object)
+			end
+		end),
+		CollectionService:GetInstanceRemovedSignal(tag):Connect(function(object: Instance)
+			self:RemoveObject(object)
+		end),
+	}
+
+	for _, object in CollectionService:GetTagged(tag) do
+		if object:IsA("BasePart") and object.Anchored == false then
+			self:AddPhysicsObject(object)
+		else
+			self:AddObject(object)
+		end
+	end
+end
+
+function CullThrottle.ReleaseTag(self: CullThrottle, tag: string)
+	local tagConnections = self._tagConnections[tag]
+	if not tagConnections then
+		return
+	end
+
+	for _, connection in tagConnections do
+		connection:Disconnect()
+	end
+end
+
+function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	-- Process visibility if we haven't already processed this frame yet
 	self:_processObjectVisibility()
 
 	return self._visibleObjects.items
 end
 
-function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?)
+function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?)
 	debug.profilebegin("CullThrottle.iterObjects")
 
 	-- Process visibility if we haven't already processed this frame yet
@@ -1170,6 +1175,65 @@ function CullThrottle.iterObjectsToUpdate(self: CullThrottle): () -> (Instance?,
 
 		return object, objectDeltaTime, objectData.distance
 	end
+end
+
+function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
+	self.Config.voxelSize = voxelSize
+	self.Config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
+	self.Config._radiusThresholdForCorners = voxelSize * (1 / 8)
+
+	-- We need to move all the objects around to their new voxels
+	table.clear(self._voxels)
+
+	for object, objectData in self._objects do
+		self:_updateDesiredVoxelKeys(object, objectData)
+	end
+
+	self:_updateObjectVoxels(5, os.clock())
+end
+
+function CullThrottle.SetRenderDistanceTarget(self: CullThrottle, renderDistanceTarget: number)
+	self.Config.renderDistanceTarget = renderDistanceTarget
+	self.Config._renderDistance = renderDistanceTarget
+	self.Config._minRenderDistance = renderDistanceTarget / 3
+	self.Config._maxRenderDistance = renderDistanceTarget * 5
+end
+
+function CullThrottle.SetTimeBudgets(
+	self: CullThrottle,
+	searchTimeBudget: number,
+	ingestTimeBudget: number,
+	updateTimeBudget: number
+)
+	self.Config.searchTimeBudget = searchTimeBudget
+	self.Config.ingestTimeBudget = ingestTimeBudget
+	self.Config.updateTimeBudget = updateTimeBudget
+end
+
+function CullThrottle.SetRefreshRates(self: CullThrottle, best: number, worst: number)
+	if best > 2 then
+		best = 1 / best
+	end
+	if worst > 2 then
+		worst = 1 / worst
+	end
+
+	self.Config.bestRefreshRate = best
+	self.Config.worstRefreshRate = worst
+	self.Config._refreshRateRange = worst - best
+	self.Config._refreshRateMidpoint = (worst + best) / 2
+end
+
+function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, computeVisibilityOnlyOnDemand: boolean)
+	self.Config.computeVisibilityOnlyOnDemand = computeVisibilityOnlyOnDemand
+end
+
+function CullThrottle.SetStrictlyEnforcedWorstRefreshRate(self: CullThrottle, strictlyEnforceWorstRefreshRate: boolean)
+	self.Config.strictlyEnforceWorstRefreshRate = strictlyEnforceWorstRefreshRate
+end
+
+function CullThrottle.SetDynamicRenderDistance(self: CullThrottle, dynamicRenderDistance: boolean)
+	self.Config.dynamicRenderDistance = dynamicRenderDistance
 end
 
 return CullThrottle

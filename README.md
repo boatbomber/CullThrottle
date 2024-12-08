@@ -48,11 +48,11 @@ CullThrottle:RemoveObject(object: Instance)
 ```
 
 ```Luau
-CullThrottle:CaptureTagged(tag: string)
+CullThrottle:CaptureTag(tag: string)
 ```
 
 ```Luau
-CullThrottle:ReleaseTagged(tag: string)
+CullThrottle:ReleaseTag(tag: string)
 ```
 
 ### Primary Functionality
@@ -65,6 +65,14 @@ CullThrottle:GetVisibleObjects(): { Instance }
 CullThrottle:IterateObjectsToUpdate(): () -> (Instance?, number?, number?)
 ```
 
+```Luau
+CullThrottle.ObjectEnteredView: Signal
+```
+
+```Luau
+CullThrottle.ObjectExitedView: Signal
+```
+
 ### Configuration
 
 ```Luau
@@ -72,7 +80,7 @@ CullThrottle:SetVoxelSize(voxelSize: number)
 ```
 
 ```Luau
-CullThrottle:SetTargetRenderDistance(renderDistanceTarget: number)
+CullThrottle:SetRenderDistanceTarget(renderDistanceTarget: number)
 ```
 
 ```Luau
@@ -97,5 +105,5 @@ CullThrottle:SetDynamicRenderDistance(dynamicRenderDistance: boolean)
 
 ## Roadmap
 
-- Parallel computation of visible voxels. The search algorithm has been built with this future optimization in mind, so it should be relatively straightforward.
+- Parallel computation of visible voxels. I built the search algorithm with this future optimization in mind, so it should be relatively straightforward.
 - Reduced memory footprint. CullThrottle inherently trades CPU time for memory, but we want to minimize this tradeoff as much as possible.
