@@ -18,7 +18,50 @@ Alternatively, grab the `.rbxm` standalone model from the latest [release.](http
 ## Example Usage
 
 ```Luau
---TODO
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CullThrottle = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("CullThrottle"))
+
+-- Create 20,000 parts
+for i = 1, 20_000 do
+    local block = Instance.new("Part")
+    block.Name = "SpinningBlock" .. i
+    block.Size = Vector3.one * math.random(1, 10)
+    block.Color = Color3.fromHSV(math.random(), 0.5, 0.8)
+    block.CFrame = CFrame.new(math.random(-1000, 1000), math.random(-1000, 1000), math.random(-1000, 1000))
+        * CFrame.Angles(math.random(-math.pi, math.pi), math.random(-math.pi, math.pi), math.random(-math.pi, math.pi))
+    block.Anchored = true
+    block.CanCollide = false
+    block.CastShadow = false
+    block:AddTag("SpinningBlock")
+
+    block.Parent = workspace
+end
+
+-- Create a CullThrottle instance
+local SpinningBlocks = CullThrottle.new()
+-- Register all the tagged parts with CullThrottle
+SpinningBlocks:CaptureTag("SpinningBlock")
+
+-- Every frame, animate the blocks that CullThrottle provides
+local blocks, cframes, blockIndex = {}, {}, 0
+RunService.Heartbeat:Connect(function()
+    blockIndex = 0
+    table.clear(blocks)
+    table.clear(cframes)
+
+    for block, dt in SpinningBlocks:IterateObjectsToUpdate() do
+        dt = math.min(dt, 1 / 15)
+
+        local angularForce = CFrame.Angles(0, math.rad(90) * dt, 0)
+
+        blockIndex += 1
+        blocks[blockIndex] = block
+        cframes[blockIndex] = block.CFrame * angularForce
+    end
+
+    workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
+end)
 ```
 
 ## Best Practices
