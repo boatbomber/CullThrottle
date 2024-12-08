@@ -64,9 +64,19 @@ RunService.Heartbeat:Connect(function()
 end)
 ```
 
+## How it works
+
+Magic! (jk, I'll write a nice explanation soon tm)
+
 ## Best Practices
 
-TODO
+1. **Use IterateObjectsToUpdate for per-frame update logic.** This method is designed to be called every frame and will return objects in order of importance. This ensures that the most important objects are updated first, and that all visible objects are eventually updated.
+
+2. **Prefer BaseParts.** While CullThrottle *can* accept any instance, it is designed for BaseParts. If you provide an entire model, the bounding box of the model will be used for visibility checks and prioritization. if you're only really updating one part of that model, prefer to add that part as the object instead.
+
+3. **Anchor your BaseParts.** If your part is moved by Roblox's physics engine, it will not fire the cframe changed event when it moves. This means that you'll need to add it with AddPhysicsObject to have CullThrottle poll the object for its position. This has a noticeable performance impact, and can even lead to incorrect visibilities if the object moves too quickly.
+
+4. **Use tags.** CollectionService tags are a powerful way to group objects together and manage them with CullThrottle. You can add and remove tags at runtime, and CullThrottle will automatically track the objects with those tags. It will automatically add BaseParts as physics objects if they are not anchored, so don't forget #3!
 
 ## API
 
