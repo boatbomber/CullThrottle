@@ -194,11 +194,11 @@ Sets the time budgets for the search, ingest, and update phases of CullThrottle.
 
 The search phase finds the voxels that are considered visible. If the budget runs out, CullThrottle will use the last known visibilities of each voxel it did not have time to search. This can lead to incorrect visibilities.
 
-The ingest phase processes the objects that are in the visible voxels. If the budget runs out, CullThrottle will simply dump all remaining objects into the visible list at a low priority. This can lead to incorrect visibilities.
+The ingest phase processes the objects that are in the visible voxels. If the budget runs out, CullThrottle will simply dump all remaining objects into the visible list at a low priority. This can lead to bad update prioritization and reduced visual quality.
 
-The update phase is the time spent by `IterateObjectsToUpdate`. If the budget runs out, the iterator will simply stop returning any more objects. The objects are returned in order of importance, so the most important objects should still be updated. Objects that were not updated this frame increase in priority for the next frame, ensuring all visible objects are eventually updated.
+The update phase is the time spent by `IterateObjectsToUpdate`. If the budget runs out, the iterator will simply stop returning any more objects. The objects are returned in order of importance, so the most important objects should still be updated. (Objects that were not updated this frame increase in priority for the next frame, ensuring all visible objects are eventually updated.)
 
-Note that dynamic render distance will adjust the render distance as needed in order to remain within these budgets. A lower budget will result in a lower render distance.
+Note that dynamic render distance will adjust the render distance as needed in order to remain within these budgets. A lower budget will result in a lower render distance and vice versa.
 
 ```Luau
 CullThrottle:SetRefreshRates(bestRefreshRate: number, worstRefreshRate: number)
