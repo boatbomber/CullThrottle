@@ -17,6 +17,8 @@ type PriorityQueueProto = {
 	_priorities: { number },
 	_indices: { [any]: number },
 	_size: number,
+
+	_incomingBatch: { items: { any }, priorities: { number }, size: number },
 }
 
 export type PriorityQueue = typeof(setmetatable({} :: PriorityQueueProto, PriorityQueue))
@@ -27,9 +29,39 @@ function PriorityQueue.new(): PriorityQueue
 		_priorities = {},
 		_indices = {},
 		_size = 0,
+		_incomingBatch = { items = {}, priorities = {}, size = 0 },
 	}, PriorityQueue)
 
 	return self
+end
+
+function PriorityQueue.addToIncomingBatch(self: PriorityQueue, item: any, priority: number): ()
+	local incomingBatch = self._incomingBatch
+	incomingBatch.size += 1
+	incomingBatch.items[incomingBatch.size] = item
+	incomingBatch.priorities[incomingBatch.size] = priority
+end
+
+function PriorityQueue.addMultipleToIncomingBatch(self: PriorityQueue, items: { any }, priorities: { number }): ()
+	local incomingBatch = self._incomingBatch
+	local itemsCount = #items
+	table.move(items, 1, itemsCount, incomingBatch.size + 1, incomingBatch.items)
+	table.move(priorities, 1, itemsCount, incomingBatch.size + 1, incomingBatch.priorities)
+	incomingBatch.size += itemsCount
+end
+
+function PriorityQueue.enqueueIncomingBatch(self: PriorityQueue): ()
+	local incomingBatch = self._incomingBatch
+	if incomingBatch.size > 0 then
+		self:batchEnqueue(incomingBatch.items, incomingBatch.priorities)
+	end
+end
+
+function PriorityQueue.clearIncomingBatch(self: PriorityQueue): ()
+	local incomingBatch = self._incomingBatch
+	incomingBatch.size = 0
+	incomingBatch.items = {}
+	incomingBatch.priorities = {}
 end
 
 function PriorityQueue.siftup(self: PriorityQueue, from: number)

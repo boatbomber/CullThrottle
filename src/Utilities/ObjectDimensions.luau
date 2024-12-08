@@ -6,15 +6,21 @@
 ]]
 
 local types = require(script.Parent.Parent.types)
+local CameraCache = require(script.Parent.CameraCache)
 
 local ObjectDimensions = {}
+
+function ObjectDimensions.getScreenSize(distance: number, radius: number): number
+	-- Calculate the screen size using the precomputed tan(FoV/2)
+	return (radius / distance) / CameraCache.HalfTanFOV
+end
 
 --[[
     Get the source and sourceType for the object's CFrame.
     This allows us to cache the way we get the object's CFrame
     and avoid having to check the object's type every time.
 ]]
-function ObjectDimensions._getObjectCFrameSource(object: Instance): (Instance?, string?)
+function ObjectDimensions.getObjectCFrameSource(object: Instance): (Instance?, string?)
 	if object == workspace then
 		-- Workspace technically inherits Model,
 		-- but the origin vector isn't useful here
@@ -34,11 +40,11 @@ function ObjectDimensions._getObjectCFrameSource(object: Instance): (Instance?, 
 	elseif not object.Parent then
 		return nil, nil
 	else
-		return ObjectDimensions._getObjectCFrameSource(object.Parent)
+		return ObjectDimensions.getObjectCFrameSource(object.Parent)
 	end
 end
 
-function ObjectDimensions._getObjectBoundingBoxSource(object: Instance): (Instance?, string?)
+function ObjectDimensions.getObjectBoundingBoxSource(object: Instance): (Instance?, string?)
 	if object == workspace then
 		-- Workspace technically inherits Model,
 		-- but the origin vector isn't useful here
@@ -58,11 +64,11 @@ function ObjectDimensions._getObjectBoundingBoxSource(object: Instance): (Instan
 	elseif not object.Parent then
 		return nil, nil
 	else
-		return ObjectDimensions._getObjectBoundingBoxSource(object.Parent)
+		return ObjectDimensions.getObjectBoundingBoxSource(object.Parent)
 	end
 end
 
-function ObjectDimensions._getObjectCFrame(objectData: types.ObjectData): CFrame?
+function ObjectDimensions.getObjectCFrame(objectData: types.ObjectData): CFrame?
 	local object = objectData.cframeSource
 	local sourceType = objectData.cframeType
 
@@ -86,7 +92,7 @@ function ObjectDimensions._getObjectCFrame(objectData: types.ObjectData): CFrame
 	return nil
 end
 
-function ObjectDimensions._getObjectBoundingBox(objectData: types.ObjectData): Vector3?
+function ObjectDimensions.getObjectBoundingBox(objectData: types.ObjectData): Vector3?
 	local object = objectData.boundingBoxSource
 	local sourceType = objectData.boundingBoxType
 
@@ -114,7 +120,7 @@ function ObjectDimensions._getObjectBoundingBox(objectData: types.ObjectData): V
 	return nil
 end
 
-function ObjectDimensions._connectCFrameChangeEvent(
+function ObjectDimensions.connectCFrameChangeEvent(
 	objectData: types.ObjectData,
 	callback: (CFrame) -> ()
 ): { RBXScriptConnection }
@@ -179,13 +185,13 @@ function ObjectDimensions._connectCFrameChangeEvent(
 		table.insert(
 			connections,
 			attachment0:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(ObjectDimensions._getObjectCFrame(objectData) or CFrame.identity)
+				callback(ObjectDimensions.getObjectCFrame(objectData) or CFrame.identity)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment1:GetPropertyChangedSignal("WorldCFrame"):Connect(function()
-				callback(ObjectDimensions._getObjectCFrame(objectData) or CFrame.identity)
+				callback(ObjectDimensions.getObjectCFrame(objectData) or CFrame.identity)
 			end)
 		)
 	end
@@ -193,7 +199,7 @@ function ObjectDimensions._connectCFrameChangeEvent(
 	return connections
 end
 
-function ObjectDimensions._connectBoundingBoxChangeEvent(
+function ObjectDimensions.connectBoundingBoxChangeEvent(
 	objectData: types.ObjectData,
 	callback: (Vector3) -> ()
 ): { RBXScriptConnection }
@@ -244,25 +250,25 @@ function ObjectDimensions._connectBoundingBoxChangeEvent(
 		table.insert(
 			connections,
 			typedObject:GetPropertyChangedSignal("Width0"):Connect(function()
-				callback(ObjectDimensions._getObjectBoundingBox(objectData) or Vector3.one)
+				callback(ObjectDimensions.getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
 			typedObject:GetPropertyChangedSignal("Width1"):Connect(function()
-				callback(ObjectDimensions._getObjectBoundingBox(objectData) or Vector3.one)
+				callback(ObjectDimensions.getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment0:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(ObjectDimensions._getObjectBoundingBox(objectData) or Vector3.one)
+				callback(ObjectDimensions.getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 		table.insert(
 			connections,
 			attachment1:GetPropertyChangedSignal("WorldPosition"):Connect(function()
-				callback(ObjectDimensions._getObjectBoundingBox(objectData) or Vector3.one)
+				callback(ObjectDimensions.getObjectBoundingBox(objectData) or Vector3.one)
 			end)
 		)
 	elseif sourceType == "Light" then
@@ -286,14 +292,13 @@ function ObjectDimensions._connectBoundingBoxChangeEvent(
 	return connections
 end
 
-function ObjectDimensions._subscribeToDimensionChanges(
+function ObjectDimensions.subscribeToDimensionChanges(
 	objectData: types.ObjectData,
 	onCFrameChange: (cframe: CFrame) -> (),
 	onBoundingBoxChange: (boundingBox: Vector3) -> ()
 )
-	local cframeChangeConnections = ObjectDimensions._connectCFrameChangeEvent(objectData, onCFrameChange)
-	local boundingBoxChangeConnections =
-		ObjectDimensions._connectBoundingBoxChangeEvent(objectData, onBoundingBoxChange)
+	local cframeChangeConnections = ObjectDimensions.connectCFrameChangeEvent(objectData, onCFrameChange)
+	local boundingBoxChangeConnections = ObjectDimensions.connectBoundingBoxChangeEvent(objectData, onBoundingBoxChange)
 
 	for _, connection in cframeChangeConnections do
 		table.insert(objectData.changeConnections, connection)
