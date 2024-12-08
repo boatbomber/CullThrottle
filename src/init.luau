@@ -37,7 +37,7 @@ local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
 type CullThrottleProto = {
-	Config: Config.Config,
+	_config: Config.Config,
 	ObjectEnteredView: any, -- TODO: Anyone got strict typing for GoodSignal?
 	ObjectExitedView: any,
 	_voxels: { [types.VoxelKey]: types.Voxel },
@@ -69,7 +69,7 @@ export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThro
 
 function CullThrottle._markVoxelKeyVisible(self: CullThrottle, voxelKey: types.VoxelKey)
 	-- Sort by voxelKeys by manhattan distance to camera in voxel space
-	local voxelSize = self.Config.voxelSize
+	local voxelSize = self._config.voxelSize
 	local cameraVoxelKey = CameraCache.Position // voxelSize
 	local difference = voxelKey - cameraVoxelKey
 	local manhattanDist = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
@@ -105,8 +105,8 @@ function CullThrottle._updateDesiredVoxelKeys(
 	object: Instance,
 	objectData: types.ObjectData
 ): { [types.VoxelKey]: boolean }
-	local voxelSize = self.Config.voxelSize
-	local radiusThresholdForCorners = self.Config._radiusThresholdForCorners
+	local voxelSize = self._config.voxelSize
+	local radiusThresholdForCorners = self._config._radiusThresholdForCorners
 	local desiredVoxelKeys = {}
 
 	-- We'll get the voxelKeys for the center and the 8 corners of the object
@@ -295,7 +295,7 @@ function CullThrottle._isBoxInFrustum(
 	z1: number
 ): (boolean, boolean) -- Returns (intersects, completelyInside)
 	debug.profilebegin("isBoxInFrustum")
-	local voxelSize = self.Config.voxelSize
+	local voxelSize = self._config.voxelSize
 	-- Ensure x0 <= x1, y0 <= y1, z0 <= z1
 	local x0W, x1W = x0 * voxelSize, x1 * voxelSize
 	local y0W, y1W = y0 * voxelSize, y1 * voxelSize
@@ -348,10 +348,10 @@ end
 function CullThrottle._addVoxelToVisibleObjects(self: CullThrottle, now: number, voxel: types.Voxel)
 	debug.profilebegin("addVoxelVisible")
 	local cameraPos = CameraCache.Position
-	local renderDistance = self.Config._renderDistance
-	local bestRefreshRate = self.Config.bestRefreshRate
-	local worstRefreshRate = self.Config.worstRefreshRate
-	local refreshRateRange = self.Config._refreshRateRange
+	local renderDistance = self._config._renderDistance
+	local bestRefreshRate = self._config.bestRefreshRate
+	local worstRefreshRate = self._config.worstRefreshRate
+	local refreshRateRange = self._config._refreshRateRange
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local visibleObjectsItems = self._visibleObjects.items
@@ -694,10 +694,10 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	self._perfMetrics._skippedSearch = 0
 	self._perfMetrics._skippedIngest = 0
 
-	local searchTimeBudget = self.Config.searchTimeBudget
-	local ingestTimeBudget = self.Config.ingestTimeBudget
-	local voxelSize = self.Config.voxelSize
-	local renderDistance = self.Config._renderDistance
+	local searchTimeBudget = self._config.searchTimeBudget
+	local ingestTimeBudget = self._config.ingestTimeBudget
+	local voxelSize = self._config.voxelSize
+	local renderDistance = self._config._renderDistance
 
 	local frustumPlanes, minBound, maxBound = self:_getPlanesAndBounds(renderDistance, voxelSize)
 
@@ -854,26 +854,26 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 end
 
 function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
-	if not self.Config.dynamicRenderDistance then
+	if not self._config.dynamicRenderDistance then
 		return
 	end
 
 	if
 		self._perfMetrics._skippedIngest ~= 0
 		or self._perfMetrics._skippedSearch ~= 0 -- We're not able to truly process all the voxels
-		or self._perfMetrics._averageObjectDeltaTime >= self.Config._refreshRateMidpoint -- We're not refreshing fast enough
-		or self._perfMetrics._searchDuration / self.Config.searchTimeBudget > 1
-		or self._perfMetrics._ingestDuration / self.Config.ingestTimeBudget > 1 -- We're going over the time budget
+		or self._perfMetrics._averageObjectDeltaTime >= self._config._refreshRateMidpoint -- We're not refreshing fast enough
+		or self._perfMetrics._searchDuration / self._config.searchTimeBudget > 1
+		or self._perfMetrics._ingestDuration / self._config.ingestTimeBudget > 1 -- We're going over the time budget
 	then
-		self.Config._renderDistance = math.max(
-			self.Config._renderDistance - (self.Config.renderDistanceTarget * 0.03),
-			self.Config._minRenderDistance
+		self._config._renderDistance = math.max(
+			self._config._renderDistance - (self._config.renderDistanceTarget * 0.03),
+			self._config._minRenderDistance
 		)
-	elseif self._perfMetrics._averageObjectDeltaTime <= self.Config.bestRefreshRate then
+	elseif self._perfMetrics._averageObjectDeltaTime <= self._config.bestRefreshRate then
 		-- We're doing amazing, we can take on more
-		self.Config._renderDistance = math.min(
-			self.Config._renderDistance + (self.Config.renderDistanceTarget * 0.015),
-			self.Config._maxRenderDistance
+		self._config._renderDistance = math.min(
+			self._config._renderDistance + (self._config.renderDistanceTarget * 0.015),
+			self._config._maxRenderDistance
 		)
 	end
 end
@@ -911,7 +911,7 @@ end
 function CullThrottle.new(): CullThrottle
 	local self = setmetatable({}, CullThrottle)
 
-	self.Config = Config.new()
+	self._config = Config.new()
 
 	self.ObjectEnteredView = GoodSignal.new()
 	self.ObjectExitedView = GoodSignal.new()
@@ -921,7 +921,7 @@ function CullThrottle.new(): CullThrottle
 		_skippedIngest = 0,
 		_searchDuration = 0,
 		_ingestDuration = 0,
-		_averageObjectDeltaTime = self.Config.bestRefreshRate,
+		_averageObjectDeltaTime = self._config.bestRefreshRate,
 	}
 
 	self._voxels = {}
@@ -941,7 +941,7 @@ function CullThrottle.new(): CullThrottle
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
 		if
-			self.Config.computeVisibilityOnlyOnDemand
+			self._config.computeVisibilityOnlyOnDemand
 			and self.ObjectEnteredView._connectionCount == 0
 			and self.ObjectExitedView._connectionCount == 0
 		then
@@ -1115,10 +1115,10 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 
 	local updateStartClock = os.clock()
 	local queue = self._visibleObjectsQueue
-	local updateTimeBudget = self.Config.updateTimeBudget
+	local updateTimeBudget = self._config.updateTimeBudget
 	-- p0s can go a little over budget.
 	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
-	local p0UpdateTimeBudget = if self.Config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
+	local p0UpdateTimeBudget = if self._config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
 
 	local updatedObjects = 0
 	local sumOfObjectDeltaTimes = 0
@@ -1178,9 +1178,9 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 end
 
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
-	self.Config.voxelSize = voxelSize
-	self.Config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
-	self.Config._radiusThresholdForCorners = voxelSize * (1 / 8)
+	self._config.voxelSize = voxelSize
+	self._config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
+	self._config._radiusThresholdForCorners = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
 	table.clear(self._voxels)
@@ -1193,10 +1193,10 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 end
 
 function CullThrottle.SetRenderDistanceTarget(self: CullThrottle, renderDistanceTarget: number)
-	self.Config.renderDistanceTarget = renderDistanceTarget
-	self.Config._renderDistance = renderDistanceTarget
-	self.Config._minRenderDistance = renderDistanceTarget / 3
-	self.Config._maxRenderDistance = renderDistanceTarget * 5
+	self._config.renderDistanceTarget = renderDistanceTarget
+	self._config._renderDistance = renderDistanceTarget
+	self._config._minRenderDistance = renderDistanceTarget / 3
+	self._config._maxRenderDistance = renderDistanceTarget * 5
 end
 
 function CullThrottle.SetTimeBudgets(
@@ -1205,9 +1205,9 @@ function CullThrottle.SetTimeBudgets(
 	ingestTimeBudget: number,
 	updateTimeBudget: number
 )
-	self.Config.searchTimeBudget = searchTimeBudget
-	self.Config.ingestTimeBudget = ingestTimeBudget
-	self.Config.updateTimeBudget = updateTimeBudget
+	self._config.searchTimeBudget = searchTimeBudget
+	self._config.ingestTimeBudget = ingestTimeBudget
+	self._config.updateTimeBudget = updateTimeBudget
 end
 
 function CullThrottle.SetRefreshRates(self: CullThrottle, best: number, worst: number)
@@ -1218,22 +1218,22 @@ function CullThrottle.SetRefreshRates(self: CullThrottle, best: number, worst: n
 		worst = 1 / worst
 	end
 
-	self.Config.bestRefreshRate = best
-	self.Config.worstRefreshRate = worst
-	self.Config._refreshRateRange = worst - best
-	self.Config._refreshRateMidpoint = (worst + best) / 2
+	self._config.bestRefreshRate = best
+	self._config.worstRefreshRate = worst
+	self._config._refreshRateRange = worst - best
+	self._config._refreshRateMidpoint = (worst + best) / 2
 end
 
 function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, computeVisibilityOnlyOnDemand: boolean)
-	self.Config.computeVisibilityOnlyOnDemand = computeVisibilityOnlyOnDemand
+	self._config.computeVisibilityOnlyOnDemand = computeVisibilityOnlyOnDemand
 end
 
 function CullThrottle.SetStrictlyEnforcedWorstRefreshRate(self: CullThrottle, strictlyEnforceWorstRefreshRate: boolean)
-	self.Config.strictlyEnforceWorstRefreshRate = strictlyEnforceWorstRefreshRate
+	self._config.strictlyEnforceWorstRefreshRate = strictlyEnforceWorstRefreshRate
 end
 
 function CullThrottle.SetDynamicRenderDistance(self: CullThrottle, dynamicRenderDistance: boolean)
-	self.Config.dynamicRenderDistance = dynamicRenderDistance
+	self._config.dynamicRenderDistance = dynamicRenderDistance
 end
 
 return CullThrottle

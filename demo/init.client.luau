@@ -135,21 +135,21 @@ local searchDurationGraph = MetricGraph.new(
 	"Search Duration",
 	table.create(50, 0),
 	0,
-	FloatingBlocksUpdater.Config.searchTimeBudget * 1e6 * 1.25,
+	FloatingBlocksUpdater._config.searchTimeBudget * 1e6 * 1.25,
 	"%dμs"
 )
 local ingestDurationGraph = MetricGraph.new(
 	"Ingest Duration",
 	table.create(50, 0),
 	0,
-	FloatingBlocksUpdater.Config.ingestTimeBudget * 1e6 * 1.25,
+	FloatingBlocksUpdater._config.ingestTimeBudget * 1e6 * 1.25,
 	"%dμs"
 )
 local updateDurationGraph = MetricGraph.new(
 	"Update Duration",
 	table.create(50, 0),
 	0,
-	FloatingBlocksUpdater.Config.updateTimeBudget * 1e6 * 1.25,
+	FloatingBlocksUpdater._config.updateTimeBudget * 1e6 * 1.25,
 	"%dμs"
 )
 
@@ -165,8 +165,8 @@ local skippedIngestGraph = MetricGraph.new("Skipped Ingest", table.create(50, 0)
 local renderDistanceGraph = MetricGraph.new(
 	"Render Distance",
 	table.create(50, 0),
-	FloatingBlocksUpdater.Config._minRenderDistance,
-	FloatingBlocksUpdater.Config._maxRenderDistance,
+	FloatingBlocksUpdater._config._minRenderDistance,
+	FloatingBlocksUpdater._config._maxRenderDistance,
 	"%d"
 )
 
@@ -189,22 +189,22 @@ local gameRefreshRateGraph = MetricGraph.new("Game Refresh Rate", table.create(5
 local p05ObjectRefreshRateGraph = MetricGraph.new(
 	"p05 Obj Refresh",
 	table.create(50, 0),
-	1 / FloatingBlocksUpdater.Config.worstRefreshRate,
-	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
+	1 / FloatingBlocksUpdater._config.worstRefreshRate,
+	1 / FloatingBlocksUpdater._config.bestRefreshRate,
 	"%dHz"
 )
 local avgObjectRefreshRateGraph = MetricGraph.new(
 	"Avg Obj Refresh",
 	table.create(50, 0),
-	1 / FloatingBlocksUpdater.Config.worstRefreshRate,
-	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
+	1 / FloatingBlocksUpdater._config.worstRefreshRate,
+	1 / FloatingBlocksUpdater._config.bestRefreshRate,
 	"%dHz"
 )
 local p95ObjectRefreshRateGraph = MetricGraph.new(
 	"p95 Obj Refresh",
 	table.create(50, 0),
-	1 / FloatingBlocksUpdater.Config.worstRefreshRate,
-	1 / FloatingBlocksUpdater.Config.bestRefreshRate,
+	1 / FloatingBlocksUpdater._config.worstRefreshRate,
+	1 / FloatingBlocksUpdater._config.bestRefreshRate,
 	"%dHz"
 )
 
@@ -249,7 +249,7 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	updateDurationGraph:measure(updateDuration * 1e6)
 	skippedSearchGraph:measure(FloatingBlocksUpdater._perfMetrics._skippedSearch)
 	skippedIngestGraph:measure(FloatingBlocksUpdater._perfMetrics._skippedIngest)
-	renderDistanceGraph:measure(FloatingBlocksUpdater.Config._renderDistance)
+	renderDistanceGraph:measure(FloatingBlocksUpdater._config._renderDistance)
 	objectsVisibleGraph:measure(visibleObjectCount)
 	objectsUpdatedGraph.Max = math.max(table.unpack(objectsVisibleGraph._data))
 	objectsUpdatedGraph:measure(updatedObjectCount)
