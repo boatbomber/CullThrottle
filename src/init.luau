@@ -744,6 +744,8 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 	debug.profilebegin("searchVolumes")
 	while #self._volumesToCheck > 0 do
+		-- TODO: Workers pop volumes from the list and check them in parallel
+
 		if os.clock() - now >= searchTimeBudget then
 			-- We've run out of time!
 			-- We'll use the cached visibility for the remaining volumes
