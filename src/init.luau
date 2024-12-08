@@ -1032,6 +1032,14 @@ function CullThrottle.ReleaseTag(self: CullThrottle, tag: string)
 	end
 end
 
+function CullThrottle.RemoveObjectsWithTag(self: CullThrottle, tag: string)
+	for object in self._objects do
+		if object:HasTag(tag) then
+			self:RemoveObject(object)
+		end
+	end
+end
+
 function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	-- Process visibility if we haven't already processed this frame yet
 	self:_processObjectVisibility(os.clock())
