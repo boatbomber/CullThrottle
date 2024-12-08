@@ -37,9 +37,10 @@ local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
 type CullThrottleProto = {
-	_config: Config.Config,
 	ObjectEnteredView: any, -- TODO: Anyone got strict typing for GoodSignal?
 	ObjectExitedView: any,
+
+	_config: Config.Config,
 	_voxels: { [types.VoxelKey]: types.Voxel },
 	_objects: { [Instance]: types.ObjectData },
 	_physicsObjects: { Instance },
