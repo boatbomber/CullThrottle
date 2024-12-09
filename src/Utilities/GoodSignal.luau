@@ -140,7 +140,7 @@ function Signal:Fire(...)
 				-- Get the freeRunnerThread to the first yield
 				coroutine.resume(freeRunnerThread)
 			end
-			task.spawn(freeRunnerThread, item._fn, ...)
+			task.defer(freeRunnerThread, item._fn, ...)
 		end
 		item = item._next
 	end
