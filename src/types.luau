@@ -4,6 +4,8 @@ export type VoxelKey = Vector3
 
 export type Voxel = { Instance }
 
+export type Volume = { any }
+
 export type ObjectData = {
 	cframe: CFrame,
 	distance: number,

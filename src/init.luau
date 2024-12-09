@@ -56,7 +56,8 @@ type CullThrottleProto = {
 	_tagConnections: { [string]: { RBXScriptConnection } },
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
-	_volumesToCheck: { { number } },
+	_volumesToCheck: { types.Volume },
+	_numberOfVolumesToCheck: number,
 
 	_perfMetrics: {
 		_skippedSearch: { number },
@@ -282,7 +283,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 	debug.profileend()
 end
 
-function CullThrottle._isBoxInFrustum(
+function CullThrottle._areBoundsInFrustum(
 	self: CullThrottle,
 	checkForCompletelyInside: boolean,
 	frustumPlanes: { Vector3 }, -- {pos, normal, pos, normal, ...}
@@ -293,20 +294,19 @@ function CullThrottle._isBoxInFrustum(
 	y1: number,
 	z1: number
 ): (boolean, boolean) -- Returns (intersects, completelyInside)
-	debug.profilebegin("isBoxInFrustum")
+	debug.profilebegin("areBoundsInFrustum")
+
+	-- IMPORTANT: Ensure x0 <= x1, y0 <= y1, z0 <= z1 or this math is gonna be wrong
+
+	-- Convert volume to world coordinates
 	local voxelSize = self._config.voxelSize
-	-- Ensure x0 <= x1, y0 <= y1, z0 <= z1
 	local x0W, x1W = x0 * voxelSize, x1 * voxelSize
 	local y0W, y1W = y0 * voxelSize, y1 * voxelSize
 	local z0W, z1W = z0 * voxelSize, z1 * voxelSize
 
-	local minX, maxX = math.min(x0W, x1W), math.max(x0W, x1W)
-	local minY, maxY = math.min(y0W, y1W), math.max(y0W, y1W)
-	local minZ, maxZ = math.min(z0W, z1W), math.max(z0W, z1W)
-
-	-- Define the box center and half-extents
-	local center = Vector3.new((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2)
-	local extents = Vector3.new((maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2)
+	-- Define the volume center and half-extents
+	local center = Vector3.new((x0W + x1W) / 2, (y0W + y1W) / 2, (z0W + z1W) / 2)
+	local extentsX, extentsY, extentsZ = (x1W - x0W) / 2, (y1W - y0W) / 2, (z1W - z0W) / 2
 
 	local completelyInside = true
 
@@ -314,21 +314,21 @@ function CullThrottle._isBoxInFrustum(
 	for i = 1, #frustumPlanes, 2 do
 		local planePos, planeNormal = frustumPlanes[i], frustumPlanes[i + 1]
 
-		-- Compute the distance from box center to the plane
+		-- Compute the distance from volume center to the plane
 		local dist = (center - planePos):Dot(planeNormal)
 
-		-- Compute the projection interval radius of box onto the plane normal
-		local radius = math.abs(extents.X * planeNormal.X)
-			+ math.abs(extents.Y * planeNormal.Y)
-			+ math.abs(extents.Z * planeNormal.Z)
+		-- Compute the projection interval radius of volume onto the plane normal
+		local radius = math.abs(extentsX * planeNormal.X)
+			+ math.abs(extentsY * planeNormal.Y)
+			+ math.abs(extentsZ * planeNormal.Z)
 
-		-- If the distance is greater than the radius, the box is outside the frustum
+		-- If the distance is greater than the radius, the volume is outside the frustum
 		if dist > radius + EPSILON then
 			debug.profileend()
 			return false, false
 		end
 
-		-- If the distance plus the radius is positive, the box is not completely inside this plane
+		-- If the distance plus the radius is positive, the volume is not completely inside this plane
 		if checkForCompletelyInside and dist + radius > EPSILON then
 			completelyInside = false
 		end
@@ -340,7 +340,6 @@ function CullThrottle._isBoxInFrustum(
 end
 
 function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types.Voxel)
-	debug.profilebegin("ingestVoxel")
 	local cameraPos = CameraCache.Position
 	local renderDistance = self._config._renderDistance
 	local bestRefreshRate = self._config.bestRefreshRate
@@ -403,8 +402,6 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 		end
 		objectVisibilityTimestamps[object] = now
 	end
-
-	debug.profileend()
 end
 
 function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: number, startIndex: number)
@@ -434,10 +431,110 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 	self._perfMetrics._skippedIngest[1] = 1 + #visibleVoxelKeys - startIndex
 end
 
-function CullThrottle._searchVolume(
+function CullThrottle._createVolumeFromBounds(
+	self: CullThrottle,
+	x0: number,
+	y0: number,
+	z0: number,
+	x1: number,
+	y1: number,
+	z1: number
+): types.Volume
+	return {
+		x0,
+		y0,
+		z0,
+		x1,
+		y1,
+		z1,
+		self:_getVoxelKeysContainedInBounds(x0, y0, z0, x1, y1, z1),
+	}
+end
+
+function CullThrottle._splitContainedVoxelKeysByBounds(
+	_self: CullThrottle,
+	containedVoxelKeys: { Vector3 },
+	x0A: number, -- Parameter spam is gross, but makes a real perf difference in this hot path
+	y0A: number,
+	z0A: number,
+	x1A: number,
+	y1A: number,
+	z1A: number,
+	x0B: number,
+	y0B: number,
+	z0B: number,
+	x1B: number,
+	y1B: number,
+	z1B: number
+): ({ Vector3 }, { Vector3 })
+	debug.profilebegin("splitContainedVoxelKeysByBounds")
+	local containsA, containsAIndex = {}, 0
+	local containsB, containsBIndex = {}, 0
+
+	for _, voxelKey in containedVoxelKeys do
+		local x, y, z = voxelKey.X, voxelKey.Y, voxelKey.Z
+		if x >= x0A and x < x1A and y >= y0A and y < y1A and z >= z0A and z < z1A then
+			containsAIndex += 1
+			containsA[containsAIndex] = voxelKey
+		elseif x >= x0B and x < x1B and y >= y0B and y < y1B and z >= z0B and z < z1B then
+			containsBIndex += 1
+			containsB[containsBIndex] = voxelKey
+		end
+	end
+
+	debug.profileend()
+	return containsA, containsB
+end
+
+function CullThrottle._getVoxelKeysContainedInBounds(
+	self: CullThrottle,
+	x0: number,
+	y0: number,
+	z0: number,
+	x1: number,
+	y1: number,
+	z1: number
+): { Vector3 }
+	debug.profilebegin("getVoxelKeysContainedInBounds")
+
+	-- I've tried using octrees & kdtrees to get all voxelKeys contained in the volume,
+	-- but somehow just iterating through all the voxels is faster.
+	local voxels = self._voxels
+
+	local totalPossibleVoxels = (x1 - x0) * (y1 - y0) * (z1 - z0)
+	local containedVoxelKeys = table.create(totalPossibleVoxels // 10)
+	for x = x0, x1 - 1 do
+		for y = y0, y1 - 1 do
+			for z = z0, z1 - 1 do
+				local voxelKey = Vector3.new(x, y, z)
+				if not voxels[voxelKey] then
+					continue
+				end
+
+				table.insert(containedVoxelKeys, Vector3.new(x, y, z))
+			end
+		end
+	end
+
+	debug.profileend()
+	return containedVoxelKeys
+end
+
+function CullThrottle._insertVolumeToCheck(self: CullThrottle, volume: types.Volume)
+	if #volume[7] == 0 then
+		-- No voxels in this volume, no need to check it
+		return
+	end
+
+	self._numberOfVolumesToCheck += 1
+	self._volumesToCheck[self._numberOfVolumesToCheck] = volume
+end
+
+function CullThrottle._searchBounds(
 	self: CullThrottle,
 	now: number,
 	frustumPlanes: { Vector3 },
+	containedVoxelKeys: { types.VoxelKey },
 	x0: number,
 	y0: number,
 	z0: number,
@@ -446,203 +543,139 @@ function CullThrottle._searchVolume(
 	z1: number
 )
 	local isSingleVoxel = x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1
-	local voxels = self._voxels
 	local lastVoxelVisibility = self._lastVoxelVisibility
 
 	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
 
 	-- Special case for volumes of a single voxel
 	if isSingleVoxel then
-		local voxelKey = Vector3.new(x0, y0, z0)
-		local voxel = voxels[voxelKey]
+		local voxelKey = containedVoxelKeys[1]
 
-		-- No need to check an empty voxel
-		if not voxel then
-			return
-		end
-
-		-- If this voxel was visible a moment ago, assume it still is
 		if now - (lastVoxelVisibility[voxelKey] or 0) < JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
+			-- If this voxel was visible a moment ago, assume it still is
 			self:_addVoxelKeyToVisible(voxelKey)
 			return
 		end
 
-		-- Alright, we actually do need to check if this voxel is visible
-		local isInside = self:_isBoxInFrustum(false, frustumPlanes, x0, y0, z0, x1, y1, z1)
-		if not isInside then
-			-- Remove voxel visibility
+		if self:_areBoundsInFrustum(false, frustumPlanes, x0, y0, z0, x1, y1, z1) then
+			-- Voxel is currently visible
+			lastVoxelVisibility[voxelKey] = now
+			self:_addVoxelKeyToVisible(voxelKey)
+		else
+			-- Not visible anymore, clear the cache
 			lastVoxelVisibility[voxelKey] = nil
-			return
 		end
 
-		-- This voxel is visible
-		lastVoxelVisibility[voxelKey] = now
-		self:_addVoxelKeyToVisible(voxelKey)
 		return
 	end
 
 	debug.profilebegin("checkBoxVisibilityCache")
 	local allVoxelsVisible = true
-	local containsVoxels = false
-	for x = x0, x1 - 1 do
-		for y = y0, y1 - 1 do
-			for z = z0, z1 - 1 do
-				local voxelKey = Vector3.new(x, y, z)
-				if not voxels[voxelKey] then
-					continue
-				end
-				containsVoxels = true
-				if now - (lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
-					allVoxelsVisible = false
-					break
-				end
-			end
-			if allVoxelsVisible == false then
-				-- No need to check further if we already know some voxels are not visible
-				break
-			end
-		end
-		if allVoxelsVisible == false then
+	for _, voxelKey in containedVoxelKeys do
+		if now - (lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
+			allVoxelsVisible = false
 			break
 		end
 	end
 	debug.profileend()
 
-	-- Don't bother checking further if this box doesn't contain any voxels
-	if not containsVoxels then
-		return
-	end
-
-	-- If all voxels in this box were visible a moment ago, just assume they still are
+	-- If all voxels in this volume were visible a moment ago, just assume they still are
 	if allVoxelsVisible then
 		debug.profilebegin("allVoxelsVisible")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					local voxel = voxels[voxelKey]
-					if not voxel then
-						continue
-					end
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
+		for _, voxelKey in containedVoxelKeys do
+			self:_addVoxelKeyToVisible(voxelKey)
 		end
 		debug.profileend()
 		return
 	end
 
-	-- Alright, we actually do need to check if this box is visible
-	local isInside, isCompletelyInside = self:_isBoxInFrustum(true, frustumPlanes, x0, y0, z0, x1, y1, z1)
+	-- Alright, we actually do need to check if this volume is visible
+	local isInside, isCompletelyInside = self:_areBoundsInFrustum(true, frustumPlanes, x0, y0, z0, x1, y1, z1)
 
-	-- If the box is outside the frustum, stop checking now
 	if not isInside then
-		-- All voxels within this box are not visible and should clear their cache
+		-- This volume is completely outside, so we can stop checking now
 		debug.profilebegin("clearBoxVisibilityCache")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					if lastVoxelVisibility[voxelKey] then
-						lastVoxelVisibility[voxelKey] = nil
-					end
-				end
-			end
+		for _, voxelKey in containedVoxelKeys do
+			lastVoxelVisibility[voxelKey] = nil
 		end
 		debug.profileend()
-		return
-	end
-
-	-- If the box is entirely inside, then we know all voxels contained inside are in the frustum
-	-- and we can process them now and not split further
-	if isCompletelyInside then
+	elseif isCompletelyInside then
+		-- This volume is completely inside, so all contained voxels are visible
 		debug.profilebegin("isCompletelyInside")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					local voxel = voxels[voxelKey]
-					if not voxel then
-						continue
-					end
-					lastVoxelVisibility[voxelKey] = now
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
+		for _, voxelKey in containedVoxelKeys do
+			lastVoxelVisibility[voxelKey] = now
+			self:_addVoxelKeyToVisible(voxelKey)
 		end
 		debug.profileend()
-		return
-	end
-
-	-- We are partially inside, so we need to split this box up further
-	-- to figure out which voxels within it are the ones inside
-
-	-- Calculate the lengths of each axis
-	local lengthX = x1 - x0
-	local lengthY = y1 - y0
-	local lengthZ = z1 - z0
-
-	-- Split along the axis with the greatest length
-	local volumeA: { number }, volumeB: { number }
-	if lengthX >= lengthY and lengthX >= lengthZ then
-		local splitCoord = (x0 + x1) // 2
-		volumeA = { x0, y0, z0, splitCoord, y1, z1 }
-		volumeB = { splitCoord, y0, z0, x1, y1, z1 }
-	elseif lengthY >= lengthX and lengthY >= lengthZ then
-		local splitCoord = (y0 + y1) // 2
-		volumeA = { x0, y0, z0, x1, splitCoord, z1 }
-		volumeB = { x0, splitCoord, z0, x1, y1, z1 }
 	else
-		local splitCoord = (z0 + z1) // 2
-		volumeA = { x0, y0, z0, x1, y1, splitCoord }
-		volumeB = { x0, y0, splitCoord, x1, y1, z1 }
-	end
+		-- This volume is partially inside, so we need to split it up further
+		-- to determine which voxels within it are the ones inside
+		-- Calculate the lengths of each axis
+		local lengthX = x1 - x0
+		local lengthY = y1 - y0
+		local lengthZ = z1 - z0
 
-	-- Randomize order to avoid worst case where only the first volume
-	-- gets checked before the budget is up
-	if math.random(1, 2) == 1 then
-		table.insert(self._volumesToCheck, volumeA)
-		table.insert(self._volumesToCheck, volumeB)
-	else
-		table.insert(self._volumesToCheck, volumeB)
-		table.insert(self._volumesToCheck, volumeA)
+		-- Split along the axis with the greatest length
+		local volumeA: types.Volume, volumeB: types.Volume
+		if lengthX >= lengthY and lengthX >= lengthZ then
+			local splitCoord = (x0 + x1) // 2
+
+			volumeA = { x0, y0, z0, splitCoord, y1, z1 }
+			volumeB = { splitCoord, y0, z0, x1, y1, z1 }
+		elseif lengthY >= lengthX and lengthY >= lengthZ then
+			local splitCoord = (y0 + y1) // 2
+			volumeA = { x0, y0, z0, x1, splitCoord, z1 }
+			volumeB = { x0, splitCoord, z0, x1, y1, z1 }
+		else
+			local splitCoord = (z0 + z1) // 2
+			volumeA = { x0, y0, z0, x1, y1, splitCoord }
+			volumeB = { x0, y0, splitCoord, x1, y1, z1 }
+		end
+
+		-- Divy up the contained voxel keys into the two new volumes
+		-- (Cheaper than recalculating all the voxel keys contained in each volume)
+		local containedA, containedB = self:_splitContainedVoxelKeysByBounds(
+			containedVoxelKeys,
+			volumeA[1],
+			volumeA[2],
+			volumeA[3],
+			volumeA[4],
+			volumeA[5],
+			volumeA[6],
+			volumeB[1],
+			volumeB[2],
+			volumeB[3],
+			volumeB[4],
+			volumeB[5],
+			volumeB[6]
+		)
+
+		volumeA[7] = containedA
+		volumeB[7] = containedB
+
+		-- Randomize order to avoid worst case where only the first volume
+		-- gets checked before the budget is up
+		if math.random(1, 2) == 1 then
+			self:_insertVolumeToCheck(volumeA)
+			self:_insertVolumeToCheck(volumeB)
+		else
+			self:_insertVolumeToCheck(volumeB)
+			self:_insertVolumeToCheck(volumeA)
+		end
 	end
 end
 
 function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrottle)
-	local voxels = self._voxels
 	local lastVoxelVisibility = self._lastVoxelVisibility
 
 	local skipped = 0
 
 	for _, volume in self._volumesToCheck do
-		local x0, y0, z0, x1, y1, z1 = table.unpack(volume)
-
-		if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
-			-- This volume is a single voxel
-			local voxelKey = Vector3.new(x0, y0, z0)
-			local voxel = voxels[voxelKey]
-			if voxel then
-				skipped += 1
-				if lastVoxelVisibility[voxelKey] then
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
-		else
-			-- Run through the voxels contained in this volume
-			for x = x0, x1 - 1 do
-				for y = y0, y1 - 1 do
-					for z = z0, z1 - 1 do
-						local voxelKey = Vector3.new(x, y, z)
-						local voxel = voxels[voxelKey]
-						if voxel then
-							skipped += 1
-							if lastVoxelVisibility[voxelKey] then
-								self:_addVoxelKeyToVisible(voxelKey)
-							end
-						end
-					end
-				end
+		-- Run through the voxels contained in this volume
+		for _, voxelKey in volume[7] do
+			skipped += 1
+			if lastVoxelVisibility[voxelKey] then
+				self:_addVoxelKeyToVisible(voxelKey)
 			end
 		end
 	end
@@ -679,6 +712,7 @@ end
 
 function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	debug.profilebegin("findVisibleObjects")
+	debug.profilebegin("setup")
 
 	-- Clear any objects left over from last frame
 	self:_clearVisibleObjects()
@@ -704,30 +738,31 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 	local volumesToCheck = self._volumesToCheck
 	table.clear(volumesToCheck)
+	self._numberOfVolumesToCheck = 0
 
 	-- Split into smaller boxes to start off since the frustum bounding volume
 	-- obviously intersects the frustum planes.
 	if minX == maxX or minY == maxY or minZ == maxZ then
 		-- If the bounds are not divisible then don't split early
-		self._volumesToCheck[1] = { minX, minY, minZ, maxX, maxY, maxZ }
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(minX, minY, minZ, maxX, maxY, maxZ))
 	else
 		local midBound = (minBound + maxBound) // 2
 		local midX = midBound.X
 		local midY = midBound.Y
 		local midZ = midBound.Z
 
-		volumesToCheck[1] = { minX, minY, minZ, midX, midY, midZ }
-		volumesToCheck[2] = { midX, minY, minZ, maxX, midY, midZ }
-		volumesToCheck[3] = { minX, minY, midZ, midX, midY, maxZ }
-		volumesToCheck[4] = { midX, minY, midZ, maxX, midY, maxZ }
-		volumesToCheck[5] = { minX, midY, minZ, midX, maxY, midZ }
-		volumesToCheck[6] = { midX, midY, minZ, maxX, maxY, midZ }
-		volumesToCheck[7] = { minX, midY, midZ, midX, maxY, maxZ }
-		volumesToCheck[8] = { midX, midY, midZ, maxX, maxY, maxZ }
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(minX, minY, minZ, midX, midY, midZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(midX, minY, minZ, maxX, midY, midZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(minX, minY, midZ, midX, midY, maxZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(midX, minY, midZ, maxX, midY, maxZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(minX, midY, minZ, midX, maxY, midZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(midX, midY, minZ, maxX, maxY, midZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(minX, midY, midZ, midX, maxY, maxZ))
+		self:_insertVolumeToCheck(self:_createVolumeFromBounds(midX, midY, midZ, maxX, maxY, maxZ))
 
 		-- Shuffle the quandrant volumes to avoid a worst-case where
 		-- only the first volume is checked before budget is up
-		for i = 8, 2, -1 do
+		for i = self._numberOfVolumesToCheck, 2, -1 do
 			local j = math.random(1, i)
 			volumesToCheck[i], volumesToCheck[j] = volumesToCheck[j], volumesToCheck[i]
 		end
@@ -735,20 +770,34 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 	local voxels = self._voxels
 
+	debug.profileend()
 	debug.profilebegin("searchVolumes")
-	while #self._volumesToCheck > 0 do
+	while self._numberOfVolumesToCheck > 0 do
 		-- TODO: Workers pop volumes from the list and check them in parallel
 
-		local n = #self._volumesToCheck
+		local n = self._numberOfVolumesToCheck
 		local volume = self._volumesToCheck[n]
 		self._volumesToCheck[n] = nil
+		self._numberOfVolumesToCheck -= 1
 
 		-- Search the volume for visible voxels
-		self:_searchVolume(now, frustumPlanes, volume[1], volume[2], volume[3], volume[4], volume[5], volume[6])
+		self:_searchBounds(
+			now,
+			frustumPlanes,
+			volume[7],
+			volume[1],
+			volume[2],
+			volume[3],
+			volume[4],
+			volume[5],
+			volume[6]
+		)
 
 		if os.clock() - now >= searchTimeBudget then
 			-- We've run out of time!
+			debug.profilebegin("reuseCachedVisibilityForRemainingVolumes")
 			self:_reuseCachedVisibilityForRemainingVolumes()
+			debug.profileend()
 			break
 		end
 	end
@@ -768,7 +817,9 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 		if os.clock() - startIngestClock >= ingestTimeBudget then
 			-- We've run out of time!
+			debug.profilebegin("fastApproxIngestRemainingVoxels")
 			self:_fastApproxIngestRemainingVoxels(now, voxelIndex + 1)
+			debug.profileend()
 			break
 		end
 	end
@@ -868,6 +919,7 @@ function CullThrottle.new(): CullThrottle
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
 	self._volumesToCheck = table.create(8)
+	self._numberOfVolumesToCheck = 0
 	self._tagConnections = {}
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
