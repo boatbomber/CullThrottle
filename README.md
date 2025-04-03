@@ -10,7 +10,7 @@ Via [wally](https://wally.run):
 
 ```toml
 [dependencies]
-CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.3"
+CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.4"
 ```
 
 Alternatively, grab the `.rbxm` standalone model from the latest [release.](https://github.com/boatbomber/CullThrottle/releases/latest)
@@ -50,14 +50,14 @@ RunService.Heartbeat:Connect(function()
     table.clear(blocks)
     table.clear(cframes)
 
-    for block, dt in SpinningBlocks:IterateObjectsToUpdate() do
+    for block, dt, distance, cframe in SpinningBlocks:IterateObjectsToUpdate() do
         dt = math.min(dt, 1 / 15)
 
         local angularForce = CFrame.Angles(0, math.rad(90) * dt, 0)
 
         blockIndex += 1
         blocks[blockIndex] = block
-        cframes[blockIndex] = block.CFrame * angularForce
+        cframes[blockIndex] = cframe * angularForce
     end
 
     workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
@@ -155,16 +155,16 @@ Returns all objects that CullThrottle believes to be visible this frame.
 **IMPORTANT:** CullThrottle does not guarantee that all returned objects are actually visible. CullThrottle errs on the side of caution and will possibly return objects that are not visible. Additionally, in performance constrained scenarios, CullThrottle is forced to make approximations that may impact accuracy.
 
 ```Luau
-CullThrottle:IterateObjectsToUpdate(): () -> (Instance?, number?, number?)
+CullThrottle:IterateObjectsToUpdate(): () -> (Instance?, number?, number?, CFrame?)
 ```
 
-Returns an iterator that will iterate over objects that should be updated this frame based on the current configuration. Iterator returns the object, the time since the object was last updated, and the distance between the object and the camera.
+Returns an iterator that will iterate over objects that should be updated this frame based on the current configuration. Iterator returns the object, the time since the object was last updated, the distance between the object and the camera, and the object's cframe.
 
 Example:
 
 > ```Luau
 > RunService.Heartbeat:Connect(function()
->     for object, dt, distance in CullThrottle:IterateObjectsToUpdate() do
+>     for object, dt, distance, cframe in CullThrottle:IterateObjectsToUpdate() do
 >         -- Update object
 >     end
 > end)

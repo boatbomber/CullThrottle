@@ -1059,7 +1059,7 @@ function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	return table.clone(self._visibleObjectsQueue._incomingBatch.items)
 end
 
-function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?)
+function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?, CFrame?)
 	debug.profilebegin("CullThrottle.iterObjects")
 
 	-- Process visibility if we haven't already processed this frame yet
@@ -1129,7 +1129,7 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			updatedObjects += 1
 		end
 
-		return object, objectDeltaTime, objectData.distance
+		return object, objectDeltaTime, objectData.distance, objectData.cframe
 	end
 end
 
