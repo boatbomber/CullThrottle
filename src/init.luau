@@ -897,6 +897,10 @@ function CullThrottle.new(): CullThrottle
 end
 
 function CullThrottle.AddObject(self: CullThrottle, object: Instance)
+	if self._objects[object] then
+		return self._objects[object]
+	end
+
 	local cframeSource, cframeType = ObjectDimensions.getObjectCFrameSource(object)
 	local boundingBoxSource, boundingBoxType = ObjectDimensions.getObjectBoundingBoxSource(object)
 
