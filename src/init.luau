@@ -41,6 +41,8 @@ CullThrottle.__index = CullThrottle
 type CullThrottleProto = {
 	ObjectEnteredView: any, -- TODO: Anyone got strict typing for GoodSignal?
 	ObjectExitedView: any,
+	ObjectAdded: any,
+	ObjectRemoved: any,
 
 	_config: Config.Config,
 	_voxels: { [types.VoxelKey]: types.Voxel },
@@ -840,6 +842,8 @@ function CullThrottle.new(): CullThrottle
 
 	self.ObjectEnteredView = GoodSignal.new()
 	self.ObjectExitedView = GoodSignal.new()
+	self.ObjectAdded = GoodSignal.new()
+	self.ObjectRemoved = GoodSignal.new()
 
 	self._perfMetrics = {
 		_skippedSearch = table.create(SKIPPED_FRAMES_LOOKBACK, 0),
@@ -961,6 +965,8 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 		end
 	end
 
+	self.ObjectAdded:Fire(object)
+
 	return objectData
 end
 
@@ -996,6 +1002,8 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 	for voxelKey in objectData.voxelKeys do
 		self:_removeFromVoxel(voxelKey, object)
 	end
+
+	self.ObjectRemoved:Fire(object)
 end
 
 function CullThrottle.CaptureTag(self: CullThrottle, tag: string)

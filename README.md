@@ -10,7 +10,7 @@ Via [wally](https://wally.run):
 
 ```toml
 [dependencies]
-CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.1"
+CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.2"
 ```
 
 Alternatively, grab the `.rbxm` standalone model from the latest [release.](https://github.com/boatbomber/CullThrottle/releases/latest)
@@ -72,7 +72,7 @@ Magic! (jk, I'll write a nice explanation soon tm)
 
 1. **Use IterateObjectsToUpdate for per-frame update logic.** This method is designed to be called every frame and will return objects in order of importance. This ensures that the most important objects are updated first, and that all visible objects are eventually updated.
 
-2. **Prefer BaseParts.** While CullThrottle *can* accept any instance, it is designed for BaseParts. If you provide an entire model, the bounding box of the model will be used for visibility checks and prioritization. If you're only really updating one part of that model, prefer to add that part as the object instead.
+2. **Prefer BaseParts.** While CullThrottle _can_ accept any instance, it is designed for BaseParts. If you provide an entire model, the bounding box of the model will be used for visibility checks and prioritization. If you're only really updating one part of that model, prefer to add that part as the object instead.
 
 3. **Anchor your BaseParts.** If your part is moved by Roblox's physics engine, it will not fire the cframe changed event when it moves. This means that you'll need to add it with AddPhysicsObject to have CullThrottle poll the object for its position. This has a noticeable performance impact, and can even lead to incorrect visibilities if the object moves too quickly.
 
@@ -132,6 +132,18 @@ CullThrottle:RemoveObjectsWithTag(tag: string)
 
 Removes all objects with a given tag from CullThrottle's tracking.
 
+```Luau
+CullThrottl.ObjectAdded: Signal
+```
+
+Fires when an object is added to CullThrottle's tracking. The object is passed as the first argument. Comes in handy when using CaptureTag.
+
+```Luau
+CullThrottle.ObjectRemoved: Signal
+```
+
+Fires when an object is removed from CullThrottle's tracking. The object is passed as the first argument. Comes in handy when using CaptureTag.
+
 ### Primary Functionality
 
 ```Luau
@@ -165,7 +177,7 @@ CullThrottle.ObjectEnteredView: Signal
 Signal that fires when an object is added to the list of visible objects. The object is passed as the first argument.
 
 Example:
->
+
 > ```Luau
 > CullThrottle.ObjectEnteredView:Connect(function(object: Instance)
 >     -- Object is now visible
@@ -194,7 +206,7 @@ CullThrottle:SetRenderDistanceTarget(renderDistanceTarget: number)
 
 Sets the target render distance for CullThrottle. Objects that are further away than this distance will not be considered for visibility checks.
 
-**IMPORTANT:** By default, dynamic render distance is enabled. CullThrottle will automatically adjust the render distance from your target by up to a 66% reduction or +500% extension in order to maintain an ideal  balance of performance and quality. If you disable dynamic render distance, you should manually set the render distance target to a reasonable value for your use case.
+**IMPORTANT:** By default, dynamic render distance is enabled. CullThrottle will automatically adjust the render distance from your target by up to a 66% reduction or +500% extension in order to maintain an ideal balance of performance and quality. If you disable dynamic render distance, you should manually set the render distance target to a reasonable value for your use case.
 
 ```Luau
 CullThrottle:SetTimeBudgets(searchTimeBudget: number, ingestTimeBudget: number, updateTimeBudget: number)
@@ -240,7 +252,7 @@ CullThrottle:SetDynamicRenderDistance(dynamicRenderDistance: boolean)
 
 If enabled, CullThrottle will automatically adjust the render distance to maintain an ideal balance of performance and quality for the current scenario and hardware. If disabled, you should manually set the render distance target to a reasonable value for your use case.
 
-It is *highly recommended* to leave dynamic render distance enabled unless you have a specific reason to disable it. It will get you the best performance and quality within your time budget, and most importantly it will result in more consistent and correct visibilities by avoiding going over budget and using the approximate visibilities.
+It is _highly recommended_ to leave dynamic render distance enabled unless you have a specific reason to disable it. It will get you the best performance and quality within your time budget, and most importantly it will result in more consistent and correct visibilities by avoiding going over budget and using the approximate visibilities.
 
 ## Roadmap
 
