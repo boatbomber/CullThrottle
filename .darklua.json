@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "rule": "inject_global_value",
+      "identifier": "NOCOLOR",
+      "env": "NOCOLOR"
+    },
+    {
+      "rule": "inject_global_value",
+      "identifier": "__DEV__",
+      "env": "DEV"
+    },
+    {
+      "rule": "append_text_comment",
+      "text": "Created by boatbomber - Licensed under Mozilla Public License Version 2.0\nCode is processed by Darklua and may be difficult to read. Check the original source on GitHub if needed."
+    },
+    "compute_expression",
+    "remove_debug_profiling",
+    "remove_empty_do",
+    "remove_unused_if_branch",
+    "remove_unused_variable",
+    "remove_unused_while"
+  ]
+}

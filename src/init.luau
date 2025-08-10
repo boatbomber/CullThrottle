@@ -5,8 +5,12 @@
 local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
 
-if RunService:IsServer() and not RunService:IsEdit() then
-	error("CullThrottle is a client side effect and cannot be used on the server")
+if _G.__DEV__ then
+	print("Allowing CullThrottle on server during dev for unit test purposes")
+else
+	if RunService:IsServer() and not RunService:IsEdit() then
+		error("CullThrottle is a client side effect and cannot be used on the server")
+	end
 end
 
 local types = require(script.types)

@@ -1,11 +1,13 @@
-# Project build files
+# Build artifacts
 /*.rbxl
 /*.rbxlx
 /*.rbxm
 /*.rbxmx
+dist/
 
 # Wally managed packages
-Packages
+Packages/
+DevPackages/
 
 # Roblox Studio lock files
 /*.rbxlx.lock

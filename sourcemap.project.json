@@ -1,10 +1,14 @@
 {
-  "name": "CullThrottleDemo",
+  "name": "CullThrottle",
   "tree": {
     "$className": "DataModel",
 
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
+
+      "DevPackages": {
+        "$path": "DevPackages"
+      },
 
       "Packages": {
         "$className": "Folder",
@@ -12,6 +16,14 @@
         "CullThrottle": {
           "$path": "src"
         }
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+
+      "run-tests": {
+        "$path": "scripts/run-tests.server.luau"
       }
     },
 

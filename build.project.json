@@ -1,6 +1,6 @@
 {
   "name": "CullThrottle",
   "tree": {
-    "$path": "src"
+    "$path": "dist/src"
   }
 }

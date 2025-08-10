@@ -1,0 +1,42 @@
+{
+  "name": "CullThrottle",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+
+      "DevPackages": {
+        "$path": "DevPackages"
+      },
+
+      "Packages": {
+        "$className": "Folder",
+
+        "CullThrottle": {
+          "$path": "dist/src"
+        }
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+
+      "run-tests": {
+        "$path": "dist/run-tests.server.luau"
+      }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+
+        "CullThrottleDemo": {
+          "$path": "demo"
+        }
+      }
+    }
+  }
+}
