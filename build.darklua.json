@@ -3,12 +3,12 @@
     {
       "rule": "inject_global_value",
       "identifier": "NOCOLOR",
-      "env": "NOCOLOR"
+      "value": 0
     },
     {
       "rule": "inject_global_value",
       "identifier": "__DEV__",
-      "env": "DEV"
+      "value": false
     },
     {
       "rule": "append_text_comment",

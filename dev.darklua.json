@@ -1,0 +1,15 @@
+{
+  "rules": [
+    {
+      "rule": "inject_global_value",
+      "identifier": "NOCOLOR",
+      "value": 2
+    },
+    {
+      "rule": "inject_global_value",
+      "identifier": "__DEV__",
+      "value": true
+    },
+    "compute_expression"
+  ]
+}

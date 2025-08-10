@@ -9,7 +9,7 @@ if [ ! -d "DevPackages" ]; then
     sh scripts/install-packages.sh
 fi
 
-DEV=1 NOCOLOR=2 darklua process --config .darklua.json src/ dist/src \
-    && DEV=1 NOCOLOR=2 darklua process --config .darklua.json scripts/run-tests.server.luau dist/run-tests.server.luau \
+darklua process --config dev.darklua.json src/ dist/src \
+    && darklua process --config dev.darklua.json scripts/run-tests.server.luau dist/run-tests.server.luau \
     && rojo build dev.project.json --output $OUTPUT \
     && run-in-roblox --place $OUTPUT --script dist/run-tests.server.luau
