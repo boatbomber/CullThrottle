@@ -59,6 +59,7 @@ type CullThrottleProto = {
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
 	_volumesToCheck: { { number } },
+	_volumeRotationCounter: number,
 
 	_perfMetrics: {
 		_skippedSearch: { number },
@@ -600,9 +601,8 @@ function CullThrottle._searchVolume(
 		volumeB = { x0, y0, splitCoord, x1, y1, z1 }
 	end
 
-	-- Randomize order to avoid worst case where only the first volume
-	-- gets checked before the budget is up
-	if math.random(1, 2) == 1 then
+	-- Alternate the order to ensure each volume gets its turn being processed first
+	if self._volumeRotationCounter % 2 == 0 then
 		table.insert(self._volumesToCheck, volumeA)
 		table.insert(self._volumesToCheck, volumeB)
 	else
@@ -727,23 +727,28 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 		volumesToCheck[7] = { minX, midY, midZ, midX, maxY, maxZ }
 		volumesToCheck[8] = { midX, midY, midZ, maxX, maxY, maxZ }
 
-		-- Shuffle the quandrant volumes to avoid a worst-case where
-		-- only the first volume is checked before budget is up
-		for i = 8, 2, -1 do
-			local j = math.random(1, i)
-			volumesToCheck[i], volumesToCheck[j] = volumesToCheck[j], volumesToCheck[i]
+		-- Ensures each octant gets its turn being processed first
+		local firstVolumeIndex = self._volumeRotationCounter % 8 + 1
+		if firstVolumeIndex == 8 then
+			-- It's already first, no need to swap
+			-- Just reset the counter
+			self._volumeRotationCounter = 1
+		else
+			local replacedVolume, chosenVolume = volumesToCheck[8], volumesToCheck[firstVolumeIndex]
+			volumesToCheck[firstVolumeIndex], volumesToCheck[8] = replacedVolume, chosenVolume
+			self._volumeRotationCounter += 1
 		end
 	end
 
 	local voxels = self._voxels
 
 	debug.profilebegin("searchVolumes")
-	while #self._volumesToCheck > 0 do
+	while #volumesToCheck > 0 do
 		-- TODO: Workers pop volumes from the list and check them in parallel
 
-		local n = #self._volumesToCheck
-		local volume = self._volumesToCheck[n]
-		self._volumesToCheck[n] = nil
+		local n = #volumesToCheck
+		local volume = volumesToCheck[n]
+		volumesToCheck[n] = nil
 
 		-- Search the volume for visible voxels
 		self:_searchVolume(now, frustumPlanes, volume[1], volume[2], volume[3], volume[4], volume[5], volume[6])
@@ -872,6 +877,7 @@ function CullThrottle.new(): CullThrottle
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
 	self._volumesToCheck = table.create(8)
+	self._volumeRotationCounter = 1
 	self._tagConnections = {}
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
