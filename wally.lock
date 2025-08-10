@@ -4,7 +4,7 @@ registry = "test"
 
 [[package]]
 name = "boatbomber/cullthrottle"
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.8"
 dependencies = [["Jest", "jsdotlua/jest@3.10.0"], ["JestGlobals", "jsdotlua/jest-globals@3.10.0"]]
 
 [[package]]

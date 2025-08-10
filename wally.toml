@@ -1,19 +1,33 @@
 [package]
 name = "boatbomber/cullthrottle"
 description = "Manage effects for tens of thousands of objects, performantly."
-version = "0.1.0-rc.4"
+version = "0.1.0-rc.8"
 license = "MPL 2.0"
 authors = ["boatbomber (https://boatbomber.com)"]
 registry = "https://github.com/upliftgames/wally-index"
 realm = "shared"
 include = [
     "dist/src",
-    "dist/src/**",
     "wally.toml",
     "wally.lock",
     "build.project.json",
+    "LICENSE",
+    "README.md",
 ]
-exclude = ["**", "dist/src/__tests__", "dist/src/jest.config.luau"]
+# Wally has a bug when including gitignored files (dist, in our case)
+# So we need to define our excludes manually
+# See https://github.com/UpliftGames/wally/issues/70
+exclude = [
+    "*.json",
+    "scripts",
+    "src",
+    "demo",
+    "dist/run-tests.server.luau",
+    "*.rbxm",
+    "*.rbxl",
+    "rokit.toml",
+    "selene.toml",
+]
 
 [dev-dependencies]
 Jest = "jsdotlua/jest@3.10.0"
