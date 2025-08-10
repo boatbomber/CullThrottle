@@ -16,6 +16,15 @@ local GoodSignal = require(script.Utilities.GoodSignal)
 local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
 
+local vectorDot: (any, any) -> number = vector.dot
+local vectorMagnitude: (any) -> number = vector.magnitude
+local tableInsert = table.insert
+local tableFind = table.find
+local tableMove = table.move
+local tableCreate = table.create
+local tableClear = table.clear
+local tableClone = table.clone
+
 local EPSILON = 1e-4
 local P0_THRESHOLD = 0.90
 local RESIZE_TABLES_RATE = 5
@@ -76,12 +85,12 @@ export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThro
 function CullThrottle._resizeTables(self: CullThrottle)
 	-- We've got a couple arrays that we clear without shrinking their size
 	-- so we occasionally resize them to avoid wasting space
-	local visibleVoxelKeys = table.create(#self._visibleVoxelKeys)
-	table.move(self._visibleVoxelKeys, 1, #self._visibleVoxelKeys, 1, visibleVoxelKeys)
+	local visibleVoxelKeys = tableCreate(#self._visibleVoxelKeys)
+	tableMove(self._visibleVoxelKeys, 1, #self._visibleVoxelKeys, 1, visibleVoxelKeys)
 	self._visibleVoxelKeys = visibleVoxelKeys
 
-	local volumesToCheck = table.create(#self._volumesToCheck)
-	table.move(self._volumesToCheck, 1, #self._volumesToCheck, 1, volumesToCheck)
+	local volumesToCheck = tableCreate(#self._volumesToCheck)
+	tableMove(self._volumesToCheck, 1, #self._volumesToCheck, 1, volumesToCheck)
 	self._volumesToCheck = volumesToCheck
 end
 
@@ -97,7 +106,7 @@ function CullThrottle._addVoxelKeyToVisible(self: CullThrottle, voxelKey: types.
 	local right = #visibleVoxelKeys
 
 	while left <= right do
-		local mid = math.floor((left + right) / 2)
+		local mid = (left + right) // 2
 		local otherVoxelKey = visibleVoxelKeys[mid]
 		if otherVoxelKey == voxelKey then
 			return
@@ -115,7 +124,7 @@ function CullThrottle._addVoxelKeyToVisible(self: CullThrottle, voxelKey: types.
 		end
 	end
 
-	table.insert(visibleVoxelKeys, left, voxelKey)
+	tableInsert(visibleVoxelKeys, left, voxelKey)
 end
 
 function CullThrottle._updateDesiredVoxelKeys(
@@ -183,7 +192,7 @@ function CullThrottle._insertToVoxel(self: CullThrottle, voxelKey: types.VoxelKe
 		self._voxels[voxelKey] = { object }
 	else
 		-- Existing voxel, add this object to its list
-		table.insert(voxel, object)
+		tableInsert(voxel, object)
 	end
 end
 
@@ -193,7 +202,7 @@ function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: types.Voxel
 		return
 	end
 
-	local objectIndex = table.find(voxel, object)
+	local objectIndex = tableFind(voxel, object)
 	if not objectIndex then
 		return
 	end
@@ -273,7 +282,7 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 		local cframe = ObjectDimensions.getObjectCFrame(objectData)
 		if cframe then
 			objectData.cframe = cframe
-			objectData.distance = (cframe.Position - cameraPos).Magnitude
+			objectData.distance = vectorMagnitude(cframe.Position - cameraPos)
 			self:_updateDesiredVoxelKeys(object, objectData)
 		end
 
@@ -318,7 +327,7 @@ function CullThrottle._isBoxInFrustum(
 		local planePos, planeNormal = frustumPlanes[i], frustumPlanes[i + 1]
 
 		-- Compute the distance from box center to the plane
-		local dist = (center - planePos):Dot(planeNormal)
+		local dist = vectorDot(center - planePos, planeNormal)
 
 		-- Compute the projection interval radius of box onto the plane normal
 		local radius = math.abs(extents.X * planeNormal.X)
@@ -351,9 +360,11 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 	local refreshRateRange = self._config._refreshRateRange
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
+	local visibleObjectsQueue = self._visibleObjectsQueue
+	local objects = self._objects
 
 	for _, object in voxel do
-		local objectData = self._objects[object]
+		local objectData = objects[object]
 		if not objectData then
 			continue
 		end
@@ -364,7 +375,7 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 		end
 		objectData.lastCheckClock = now
 
-		local distance = (objectData.cframe.Position - cameraPos).Magnitude
+		local distance = vectorMagnitude(objectData.cframe.Position - cameraPos)
 		objectData.distance = distance
 		if distance > renderDistance then
 			-- Object is outside what we consider visible
@@ -398,7 +409,7 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 			objectPriority = screenSizePriority + refreshPriority + distancePriority
 		end
 
-		self._visibleObjectsQueue:addToIncomingBatch(object, objectPriority)
+		visibleObjectsQueue:addToIncomingBatch(object, objectPriority)
 
 		if objectVisibilityTimestamps[object] == nil then
 			-- This object wasn't visible last frame but it is now
@@ -423,7 +434,7 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 			continue
 		end
 
-		self._visibleObjectsQueue:addMultipleToIncomingBatch(voxel, table.create(#voxel, voxelIndex * 1e4))
+		self._visibleObjectsQueue:addMultipleToIncomingBatch(voxel, tableCreate(#voxel, voxelIndex * 1e4))
 
 		for _, object in voxel do
 			if objectVisibilityTimestamps[object] == nil then
@@ -452,6 +463,7 @@ function CullThrottle._searchVolume(
 	local voxels = self._voxels
 	local lastVoxelVisibility = self._lastVoxelVisibility
 
+	-- We add jitter so that we don't end up with every voxel ending grace on the same frame
 	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
 
 	-- Special case for volumes of a single voxel
@@ -603,11 +615,11 @@ function CullThrottle._searchVolume(
 
 	-- Alternate the order to ensure each volume gets its turn being processed first
 	if self._volumeRotationCounter % 2 == 0 then
-		table.insert(self._volumesToCheck, volumeA)
-		table.insert(self._volumesToCheck, volumeB)
+		tableInsert(self._volumesToCheck, volumeA)
+		tableInsert(self._volumesToCheck, volumeB)
 	else
-		table.insert(self._volumesToCheck, volumeB)
-		table.insert(self._volumesToCheck, volumeA)
+		tableInsert(self._volumesToCheck, volumeB)
+		tableInsert(self._volumesToCheck, volumeA)
 	end
 end
 
@@ -618,7 +630,7 @@ function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrott
 	local skipped = 0
 
 	for _, volume in self._volumesToCheck do
-		local x0, y0, z0, x1, y1, z1 = table.unpack(volume)
+		local x0, y0, z0, x1, y1, z1 = volume[1], volume[2], volume[3], volume[4], volume[5], volume[6]
 
 		if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
 			-- This volume is a single voxel
@@ -653,7 +665,7 @@ function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrott
 end
 
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
-	table.clear(self._visibleVoxelKeys)
+	tableClear(self._visibleVoxelKeys)
 	self._visibleObjectsQueue:clearIncomingBatch()
 	self._visibleObjectsQueue:clear()
 end
@@ -687,8 +699,8 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 
 	self._perfMetrics._skippedIngest[SKIPPED_FRAMES_LOOKBACK] = nil
 	self._perfMetrics._skippedSearch[SKIPPED_FRAMES_LOOKBACK] = nil
-	table.insert(self._perfMetrics._skippedIngest, 1, 0)
-	table.insert(self._perfMetrics._skippedSearch, 1, 0)
+	tableInsert(self._perfMetrics._skippedIngest, 1, 0)
+	tableInsert(self._perfMetrics._skippedSearch, 1, 0)
 
 	local searchTimeBudget = self._config.searchTimeBudget
 	local ingestTimeBudget = self._config.ingestTimeBudget
@@ -705,7 +717,7 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local maxZ = maxBound.Z + 1
 
 	local volumesToCheck = self._volumesToCheck
-	table.clear(volumesToCheck)
+	tableClear(volumesToCheck)
 
 	-- Split into smaller boxes to start off since the frustum bounding volume
 	-- obviously intersects the frustum planes.
@@ -851,8 +863,8 @@ function CullThrottle.new(): CullThrottle
 	self.ObjectRemoved = GoodSignal.new()
 
 	self._perfMetrics = {
-		_skippedSearch = table.create(SKIPPED_FRAMES_LOOKBACK, 0),
-		_skippedIngest = table.create(SKIPPED_FRAMES_LOOKBACK, 0),
+		_skippedSearch = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
+		_skippedIngest = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
 		_searchDuration = 0,
 		_ingestDuration = 0,
 		_averageObjectDeltaTime = self._config.bestRefreshRate,
@@ -876,7 +888,7 @@ function CullThrottle.new(): CullThrottle
 	self._lastVoxelVisibility = {}
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
-	self._volumesToCheck = table.create(8)
+	self._volumesToCheck = tableCreate(8)
 	self._volumeRotationCounter = 1
 	self._tagConnections = {}
 	self._renderConnection = RunService.PreRender:Connect(function()
@@ -941,7 +953,7 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	end
 
 	objectData.cframe = cframe
-	objectData.distance = (CameraCache.Position - cframe.Position).Magnitude
+	objectData.distance = vectorMagnitude(CameraCache.Position - cframe.Position)
 
 	local boundingBox = ObjectDimensions.getObjectBoundingBox(objectData)
 	if not boundingBox then
@@ -954,7 +966,7 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	ObjectDimensions.subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
 		-- Update CFrame
 		objectData.cframe = newCFrame
-		objectData.distance = (newCFrame.Position - CameraCache.Position).Magnitude
+		objectData.distance = vectorMagnitude(newCFrame.Position - CameraCache.Position)
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end, function(newBoundingBox: Vector3)
 		-- Update bounding box and radius
@@ -985,7 +997,7 @@ function CullThrottle.AddPhysicsObject(self: CullThrottle, object: BasePart)
 
 	-- Also add it to the physics objects table for polling position changes
 	-- (physics based movement doesn't trigger the normal connection)
-	table.insert(self._physicsObjects, object)
+	tableInsert(self._physicsObjects, object)
 end
 
 function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
@@ -996,7 +1008,7 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 
 	self._objects[object] = nil
 
-	local physicsObjectIndex = table.find(self._physicsObjects, object)
+	local physicsObjectIndex = tableFind(self._physicsObjects, object)
 	if physicsObjectIndex then
 		-- Fast unordered remove
 		local n = #self._physicsObjects
@@ -1062,7 +1074,7 @@ function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	-- Process visibility if we haven't already processed this frame yet
 	self:_processObjectVisibility(os.clock())
 
-	return table.clone(self._visibleObjectsQueue._incomingBatch.items)
+	return tableClone(self._visibleObjectsQueue._incomingBatch.items)
 end
 
 function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?, CFrame?)
@@ -1100,7 +1112,7 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 
 			-- Just in case the user iterates multiple times in a single frame,
 			-- lets clear out the leftovers so they don't spill into the second iter
-			self._visibleObjectsQueue:clear()
+			queue:clear()
 
 			debug.profileend()
 

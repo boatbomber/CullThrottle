@@ -33,8 +33,8 @@ function Config.new(): Config
 	self.voxelSize = 100
 	self.renderDistanceTarget = 600
 	self.searchTimeBudget = 0.8 / 1000
-	self.ingestTimeBudget = 1.4 / 1000
-	self.updateTimeBudget = 0.35 / 1000
+	self.ingestTimeBudget = 1.2 / 1000
+	self.updateTimeBudget = 0.4 / 1000
 	self.bestRefreshRate = 1 / 60
 	self.worstRefreshRate = 1 / 15
 	self.computeVisibilityOnlyOnDemand = false
