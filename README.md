@@ -10,7 +10,7 @@ Via [wally](https://wally.run):
 
 ```toml
 [dependencies]
-CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.8"
+CullThrottle = "boatbomber/cullthrottle@0.1.0-rc.9"
 ```
 
 Alternatively, grab the `.rbxm` standalone model from the latest [release.](https://github.com/boatbomber/CullThrottle/releases/latest)

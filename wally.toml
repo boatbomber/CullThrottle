@@ -1,7 +1,7 @@
 [package]
 name = "boatbomber/cullthrottle"
 description = "Manage effects for tens of thousands of objects, performantly."
-version = "0.1.0-rc.8"
+version = "0.1.0-rc.9"
 license = "MPL 2.0"
 authors = ["boatbomber (https://boatbomber.com)"]
 registry = "https://github.com/upliftgames/wally-index"
@@ -10,7 +10,7 @@ include = [
     "dist/src",
     "wally.toml",
     "wally.lock",
-    "build.project.json",
+    "default.project.json",
     "LICENSE",
     "README.md",
 ]
