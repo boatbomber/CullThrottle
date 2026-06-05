@@ -514,6 +514,55 @@ describe("CullThrottle", function()
 			cullThrottle:ReleaseTag(tag)
 			part:Destroy()
 		end)
+
+		it("should skip an un-addable tagged instance without aborting the rest of the capture", function()
+			local tag = "MixedCaptureTag"
+			local part1 = createMockPart()
+			-- A Folder has no resolvable CFrame/bounding box, so AddObject errors on it.
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+			local part2 = createMockPart()
+
+			CollectionService:AddTag(part1, tag)
+			CollectionService:AddTag(folder, tag)
+			CollectionService:AddTag(part2, tag)
+
+			-- The un-addable folder must not throw out of CaptureTag. If it did, it
+			-- would abort the GetTagged loop and leave whichever parts come after it
+			-- (iteration order is unspecified) untracked.
+			expect(function()
+				cullThrottle:CaptureTag(tag)
+			end).never.toThrow()
+
+			-- Both valid parts are captured regardless of order; the folder is skipped.
+			expect(cullThrottle._objects[part1]).toBeDefined()
+			expect(cullThrottle._objects[part2]).toBeDefined()
+			expect(cullThrottle._objects[folder]).toBeNil()
+
+			cullThrottle:ReleaseTag(tag)
+			CollectionService:RemoveTag(part1, tag)
+			CollectionService:RemoveTag(folder, tag)
+			CollectionService:RemoveTag(part2, tag)
+			part1:Destroy()
+			folder:Destroy()
+			part2:Destroy()
+		end)
+
+		it("should not throw when every tagged instance is un-addable", function()
+			local tag = "UnaddableCaptureTag"
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+			CollectionService:AddTag(folder, tag)
+
+			expect(function()
+				cullThrottle:CaptureTag(tag)
+			end).never.toThrow()
+			expect(cullThrottle._objects[folder]).toBeNil()
+
+			cullThrottle:ReleaseTag(tag)
+			CollectionService:RemoveTag(folder, tag)
+			folder:Destroy()
+		end)
 	end)
 
 	describe("ReleaseTag", function()

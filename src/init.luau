@@ -1199,25 +1199,36 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 end
 
 function CullThrottle.CaptureTag(self: CullThrottle, tag: string)
-	self._tagConnections[tag] = {
-		CollectionService:GetInstanceAddedSignal(tag):Connect(function(object: Instance)
+	-- Capturing a tag is a bulk, declarative operation: the caller tags a set of
+	-- instances and expects CullThrottle to track whatever it can. But a tagged
+	-- instance may be something we can't size or position (a Folder, a
+	-- Configuration, a Beam without attachments, ...), and AddObject/AddPhysicsObject
+	-- error() on those. We pcall each add so one un-addable instance can't abort
+	-- capture of the rest, nor throw out of a CollectionService signal handler.
+	-- Direct AddObject calls still error() for fail-fast misuse detection; only this
+	-- tag-driven path is made tolerant.
+	local function tryAddTaggedObject(object: Instance)
+		local ok, err = pcall(function()
 			if object:IsA("BasePart") and object.Anchored == false then
 				self:AddPhysicsObject(object)
 			else
 				self:AddObject(object)
 			end
-		end),
+		end)
+		if not ok then
+			warn(`[CullThrottle] Skipping tagged instance {object:GetFullName()}: {err}`)
+		end
+	end
+
+	self._tagConnections[tag] = {
+		CollectionService:GetInstanceAddedSignal(tag):Connect(tryAddTaggedObject),
 		CollectionService:GetInstanceRemovedSignal(tag):Connect(function(object: Instance)
 			self:RemoveObject(object)
 		end),
 	}
 
 	for _, object in CollectionService:GetTagged(tag) do
-		if object:IsA("BasePart") and object.Anchored == false then
-			self:AddPhysicsObject(object)
-		else
-			self:AddObject(object)
-		end
+		tryAddTaggedObject(object)
 	end
 end
 
