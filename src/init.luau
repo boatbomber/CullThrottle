@@ -1259,12 +1259,19 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 	local updatedObjects = 0
 	local sumOfObjectDeltaTimes = 0
 
+	local function finish()
+		debug.profileend()
+
+		if updatedObjects > 0 then
+			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
+		end
+
+		return nil
+	end
+
 	return function()
 		if queue:isEmpty() then
-			debug.profileend()
-
-			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
-			return
+			return finish()
 		end
 
 		local budget = if queue:peekPriority() < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
@@ -1276,26 +1283,17 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			-- lets clear out the leftovers so they don't spill into the second iter
 			queue:clear()
 
-			debug.profileend()
-
-			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
-			return
+			return finish()
 		end
 
 		local object = queue:dequeue()
 		if not object then
-			debug.profileend()
-
-			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
-			return
+			return finish()
 		end
 
 		local objectData = self._objects[object]
 		if not objectData then
-			debug.profileend()
-
-			self._perfMetrics._averageObjectDeltaTime = sumOfObjectDeltaTimes / updatedObjects
-			return
+			return finish()
 		end
 
 		local objectDeltaTime = updateStartClock - objectData.lastUpdateClock
