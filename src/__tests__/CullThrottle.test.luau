@@ -299,6 +299,55 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("should not register duplicates when added twice", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			cullThrottle:AddPhysicsObject(part)
+			cullThrottle:AddPhysicsObject(part)
+
+			-- The second call must not insert a second entry.
+			local count = 0
+			for _, candidate in cullThrottle._physicsObjects do
+				if candidate == part then
+					count += 1
+				end
+			end
+			expect(count).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("should upgrade an already-added static object to a physics object", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			-- AddObject first (static), then AddPhysicsObject (upgrade). The dedup
+			-- guard keys off _physicsObjects, not _objects, so the upgrade still works.
+			cullThrottle:AddObject(part)
+			expect(table.find(cullThrottle._physicsObjects, part)).toBeNil()
+
+			cullThrottle:AddPhysicsObject(part)
+			expect(table.find(cullThrottle._physicsObjects, part)).toBeDefined()
+
+			part:Destroy()
+		end)
+
+		it("should leave no dangling entry after removing a doubly-added object", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			cullThrottle:AddPhysicsObject(part)
+			cullThrottle:AddPhysicsObject(part)
+
+			cullThrottle:RemoveObject(part)
+
+			-- Before the fix a duplicate survived RemoveObject's single swap-remove,
+			-- leaving an entry whose objectData is gone. _pollPhysicsObjects would then
+			-- warn about it every cycle. There must be no trace of the object left.
+			expect(table.find(cullThrottle._physicsObjects, part)).toBeNil()
+			expect(#cullThrottle._physicsObjects).toBe(0)
+
+			-- Polling the now-empty list must not warn or error.
+			cullThrottle:_pollPhysicsObjects(1, os.clock())
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("RemoveObject", function()

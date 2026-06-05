@@ -1158,8 +1158,16 @@ function CullThrottle.AddPhysicsObject(self: CullThrottle, object: BasePart)
 	self:AddObject(object)
 
 	-- Also add it to the physics objects table for polling position changes
-	-- (physics based movement doesn't trigger the normal connection)
-	tableInsert(self._physicsObjects, object)
+	-- (physics based movement doesn't trigger the normal connection).
+	--
+	-- Guard against duplicate registration. AddObject above is idempotent, but
+	-- without this check a second AddPhysicsObject call would insert the same
+	-- object into _physicsObjects again.
+	-- Using tableFind (rather than an early-return on self._objects[object])
+	-- still lets an already-added static object be upgraded to a physics object.
+	if not tableFind(self._physicsObjects, object) then
+		tableInsert(self._physicsObjects, object)
+	end
 end
 
 function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
