@@ -223,6 +223,56 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("should register a large object in all occupied voxels", function()
+			cullThrottle:SetVoxelSize(100)
+
+			-- A 500-long part centered at the origin spans voxels -3..2 on X.
+			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
+			local objectData = cullThrottle:AddObject(part)
+
+			-- Interior voxels along the length
+			expect(objectData.voxelKeys[Vector3.new(-2, 0, 0)]).toBe(true)
+			expect(objectData.voxelKeys[Vector3.new(-1, 0, 0)]).toBe(true)
+			expect(objectData.voxelKeys[Vector3.new(1, 0, 0)]).toBe(true)
+
+			-- And the object is actually inserted into one of those interior voxels
+			local interiorVoxel = cullThrottle._voxels[Vector3.new(1, 0, 0)]
+			expect(interiorVoxel).toBeDefined()
+			expect(table.find(interiorVoxel, part)).toBeDefined()
+
+			part:Destroy()
+		end)
+
+		it("should not register a rotated object in the empty corners of its bounding box", function()
+			cullThrottle:SetVoxelSize(100)
+
+			-- A long part laid diagonally across the XZ plane. Its world-space
+			-- AABB is a big square, but the box only occupies the diagonal band,
+			-- so the AABB corners that the box doesn't reach must stay empty.
+			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(600, 20, 20))
+			part.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, math.rad(45), 0)
+			local objectData = cullThrottle:AddObject(part)
+
+			-- Voxels in the empty corners of the AABB are not registered...
+			expect(objectData.voxelKeys[Vector3.new(2, 0, 2)]).toBeNil()
+			expect(objectData.voxelKeys[Vector3.new(-2, 0, -2)]).toBeNil()
+
+			-- ...but the occupied diagonal voxels still are.
+			expect(objectData.voxelKeys[Vector3.new(2, 0, -2)]).toBe(true)
+			expect(objectData.voxelKeys[Vector3.new(-2, 0, 2)]).toBe(true)
+
+			-- Sanity check: we register fewer voxels than the full AABB volume
+			-- (x:-3..2, y:-1..0, z:-3..2 = 72), proving we don't just fill the box.
+			local count = 0
+			for _ in objectData.voxelKeys do
+				count += 1
+			end
+			expect(count).toBeLessThan(72)
+			expect(count).toBeGreaterThan(0)
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("AddPhysicsObject", function()

@@ -136,8 +136,9 @@ function CullThrottle._updateDesiredVoxelKeys(
 	object: Instance,
 	objectData: types.ObjectData
 ): { [types.VoxelKey]: boolean }
+	debug.profilebegin("_updateDesiredVoxelKeys")
 	local voxelSize = self._config.voxelSize
-	local radiusThresholdForCorners = self._config._radiusThresholdForCorners
+	local multiVoxelRadiusThreshold = self._config._multiVoxelRadiusThreshold
 	local desiredVoxelKeys = {}
 
 	-- We'll get the voxelKeys for the center and the 8 corners of the object
@@ -147,22 +148,128 @@ function CullThrottle._updateDesiredVoxelKeys(
 	local desiredVoxelKey = position // voxelSize
 	desiredVoxelKeys[desiredVoxelKey] = true
 
-	if objectData.radius > radiusThresholdForCorners then
-		-- Object is large enough that we need to consider the corners as well
-		local corners = {
-			(cframe * CFrame.new(halfBoundingBox.X, halfBoundingBox.Y, halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(-halfBoundingBox.X, -halfBoundingBox.Y, -halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(-halfBoundingBox.X, halfBoundingBox.Y, halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(-halfBoundingBox.X, -halfBoundingBox.Y, halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(-halfBoundingBox.X, halfBoundingBox.Y, -halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(halfBoundingBox.X, halfBoundingBox.Y, -halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(halfBoundingBox.X, -halfBoundingBox.Y, -halfBoundingBox.Z)).Position,
-			(cframe * CFrame.new(halfBoundingBox.X, -halfBoundingBox.Y, halfBoundingBox.Z)).Position,
-		}
+	if objectData.radius > multiVoxelRadiusThreshold then
+		-- Object is large enough that it may span more than its center voxel.
+		--
+		-- The bounding box is oriented, so we can't just fill its world-space
+		-- AABB: for a rotated object that AABB bulges past the box and its corner
+		-- voxels would be empty. Instead the AABB only bounds which voxels are
+		-- worth checking, and we keep a voxel only if it truly overlaps the box.
+		--
+		-- Overlap is a separating-axis test against the box's own 3 face axes.
+		-- (The 3 world axes are already covered by the AABB candidate range, so
+		-- no candidate can be separated along them.) We skip the 9 edge-edge
+		-- cross-product axes; omitting them can only ever over-include, never
+		-- wrongly cull, and leaves at most a thin sliver of corner voxels.
+		local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cframe:GetComponents()
+		local hx, hy, hz = halfBoundingBox.X, halfBoundingBox.Y, halfBoundingBox.Z
+		local halfVoxel = voxelSize / 2
 
-		for _, corner in corners do
-			local voxelKey = corner // voxelSize
-			desiredVoxelKeys[voxelKey] = true
+		-- The box axes in world space are the columns of the rotation matrix:
+		-- axisX = (r00, r10, r20), axisY = (r01, r11, r21), axisZ = (r02, r12, r22).
+		-- A voxel (an axis-aligned cube) projected onto a box axis reaches
+		-- halfVoxel * (|axis.X| + |axis.Y| + |axis.Z|); add the box's own extent
+		-- to get the separation threshold along that axis.
+		local reachX = hx + halfVoxel * (math.abs(r00) + math.abs(r10) + math.abs(r20))
+		local reachY = hy + halfVoxel * (math.abs(r01) + math.abs(r11) + math.abs(r21))
+		local reachZ = hz + halfVoxel * (math.abs(r02) + math.abs(r12) + math.abs(r22))
+
+		-- World-space AABB of the oriented box bounds the candidate voxels.
+		local worldHalf = Vector3.new(
+			math.abs(r00) * hx + math.abs(r01) * hy + math.abs(r02) * hz,
+			math.abs(r10) * hx + math.abs(r11) * hy + math.abs(r12) * hz,
+			math.abs(r20) * hx + math.abs(r21) * hy + math.abs(r22) * hz
+		)
+		local minVoxelKey = (position - worldHalf) // voxelSize
+		local maxVoxelKey = (position + worldHalf) // voxelSize
+
+		-- Two properties keep this loop cheap despite scanning the AABB:
+		--
+		-- 1. The region that passes the test (the box, inflated by half a voxel on
+		--    each axis) is convex. So along any axis-aligned line the voxels that
+		--    pass form a single contiguous run (· · ■ ■ ■ · ·, never ■ · ■). Once a
+		--    line has started hitting and then misses, every later voxel on it must
+		--    also miss, so we break. This holds per-row (z), per-slice (y) and
+		--    per-volume (x), letting us skip the empty margins of the AABB.
+		--
+		-- 2. A voxel center's box-local coordinate is linear in its grid index, so
+		--    within a row we advance it by a constant step rather than recomputing
+		--    the three dot products for every voxel.
+		local zStepX, zStepY, zStepZ = voxelSize * r20, voxelSize * r21, voxelSize * r22
+		local dzMin = (minVoxelKey.Z + 0.5) * voxelSize - position.Z
+
+		local xEntered = false
+		for x = minVoxelKey.X, maxVoxelKey.X do
+			local dx = (x + 0.5) * voxelSize - position.X
+			local dxR00, dxR01, dxR02 = dx * r00, dx * r01, dx * r02
+
+			local xHit = false
+			local yEntered = false
+			for y = minVoxelKey.Y, maxVoxelKey.Y do
+				local dy = (y + 0.5) * voxelSize - position.Y
+
+				-- Box-local coordinates of the first voxel center in this row.
+				local lx = dxR00 + dy * r10 + dzMin * r20
+				local ly = dxR01 + dy * r11 + dzMin * r21
+				local lz = dxR02 + dy * r12 + dzMin * r22
+
+				-- The cells that pass form one contiguous run. Scan for the first hit.
+				local rowLen = maxVoxelKey.Z - minVoxelKey.Z
+				local rowHit = false
+
+				local firstHit = -1
+				local sx, sy, sz = lx, ly, lz
+				for i = 0, rowLen do
+					if math.abs(sx) <= reachX and math.abs(sy) <= reachY and math.abs(sz) <= reachZ then
+						firstHit = i
+						break
+					end
+					sx += zStepX
+					sy += zStepY
+					sz += zStepZ
+				end
+
+				if firstHit >= 0 then
+					rowHit = true
+
+					-- From the first hit rightward the row reads filled...empty
+					-- (convex => the run is contiguous), which IS monotonic, so we can
+					-- binary search the last filled cell rather than walking to it.
+					local lo, hi = firstHit, rowLen
+					while lo < hi do
+						local mid = (lo + hi + 1) // 2
+						if
+							math.abs(lx + mid * zStepX) <= reachX
+							and math.abs(ly + mid * zStepY) <= reachY
+							and math.abs(lz + mid * zStepZ) <= reachZ
+						then
+							lo = mid
+						else
+							hi = mid - 1
+						end
+					end
+
+					-- Fill the contiguous run [firstHit, lo] with no further tests.
+					for z = minVoxelKey.Z + firstHit, minVoxelKey.Z + lo do
+						desiredVoxelKeys[Vector3.new(x, y, z)] = true
+					end
+				end
+
+				if rowHit then
+					xHit = true
+					yEntered = true
+				elseif yEntered then
+					-- Convex slice: no later row in this x-slice can hit.
+					break
+				end
+			end
+
+			if xHit then
+				xEntered = true
+			elseif xEntered then
+				-- Convex volume: no later x-slice can hit.
+				break
+			end
 		end
 	end
 
@@ -186,6 +293,7 @@ function CullThrottle._updateDesiredVoxelKeys(
 		self._updateObjectVoxelsQueue:addToIncomingBatch(object, priority)
 	end
 
+	debug.profileend()
 	return desiredVoxelKeys
 end
 
@@ -1207,7 +1315,7 @@ end
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	self._config.voxelSize = voxelSize
 	self._config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
-	self._config._radiusThresholdForCorners = voxelSize * (1 / 8)
+	self._config._multiVoxelRadiusThreshold = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
 	self._voxels = {}
