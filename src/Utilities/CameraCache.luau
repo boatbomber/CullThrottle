@@ -8,20 +8,32 @@ local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
 
 local CameraCache = {
 	_connections = {},
+	Object = nil :: Camera?,
+	CFrame = Vector3.zero,
+	Position = Vector3.zero,
+	FieldOfView = 0,
+	HalfTanFOV = 0,
+	ViewportSize = Vector2.zero,
+	AspectRatio = 0,
 }
 
 export type CameraCache = typeof(CameraCache)
 
-function CameraCache.init(self: CameraCache, camera: Camera)
+function CameraCache.init(self: CameraCache, camera: Camera?)
 	self:cleanup()
 
 	self.Object = camera
+	if not camera then
+		-- The CurrentCamera change handler will re-init once one exists
+		return
+	end
+
 	self.CFrame = self.Object.CFrame
 	self.Position = self.CFrame.Position
 	self.FieldOfView = self.Object.FieldOfView
 	self.HalfTanFOV = math.tan(math.rad(self.FieldOfView / 2))
 	self.ViewportSize = self.Object.ViewportSize
-	self.AspectRatio = self.ViewportSize.X / self.ViewportSize.Y
+	self.AspectRatio = CameraCache.computeAspectRatio(self.ViewportSize)
 
 	self._connections.CFrameChanged = CameraCache.Object:GetPropertyChangedSignal("CFrame"):Connect(function()
 		CameraCache.CFrame = CameraCache.Object.CFrame
@@ -35,7 +47,7 @@ function CameraCache.init(self: CameraCache, camera: Camera)
 		:GetPropertyChangedSignal("ViewportSize")
 		:Connect(function()
 			CameraCache.ViewportSize = CameraCache.Object.ViewportSize
-			CameraCache.AspectRatio = CameraCache.ViewportSize.X / CameraCache.ViewportSize.Y
+			CameraCache.AspectRatio = CameraCache.computeAspectRatio(CameraCache.ViewportSize)
 		end)
 end
 
@@ -44,6 +56,15 @@ function CameraCache.cleanup(self: CameraCache)
 		connection:Disconnect()
 	end
 	self._connections = {}
+end
+
+function CameraCache.computeAspectRatio(viewportSize: Vector2): number
+	-- A zero-height viewport would make X/Y inf or NaN and poison the frustum
+	-- bounds, so fall back to a zero aspect ratio instead of dividing by zero.
+	if viewportSize.Y <= 0 then
+		return 0
+	end
+	return viewportSize.X / viewportSize.Y
 end
 
 function CameraCache.getPlanesAndBounds(renderDistance: number, voxelSize: number): ({ Vector3 }, Vector3, Vector3)
