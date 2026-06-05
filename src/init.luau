@@ -366,6 +366,7 @@ function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: types.Voxel
 	if n == 1 then
 		-- Lets just cleanup this now empty voxel instead
 		self._voxels[voxelKey] = nil
+		self._lastVoxelVisibility[voxelKey] = nil
 	elseif n == objectIndex then
 		-- This object is at the end, so we can remove it without needing
 		-- to shift anything or fill gaps
@@ -1252,6 +1253,12 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 
 	self._objects[object] = nil
 
+	-- Drop the visibility timestamp so the next _signalVisibilityChanges pass
+	-- doesn't fire a spurious ObjectExitedView for an object we've already removed
+	-- (and already fired ObjectRemoved for). Removal is signalled by
+	-- ObjectRemoved, not ObjectExitedView.
+	self._objectVisibilityTimestamps[object] = nil
+
 	local physicsObjectIndex = tableFind(self._physicsObjects, object)
 	if physicsObjectIndex then
 		-- Fast unordered remove
@@ -1273,6 +1280,9 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 end
 
 function CullThrottle.CaptureTag(self: CullThrottle, tag: string)
+	-- Release prior capture to avoid leaking connections
+	self:ReleaseTag(tag)
+
 	-- Capturing a tag is a bulk, declarative operation: the caller tags a set of
 	-- instances and expects CullThrottle to track whatever it can. But a tagged
 	-- instance may be something we can't size or position (a Folder, a
@@ -1315,6 +1325,8 @@ function CullThrottle.ReleaseTag(self: CullThrottle, tag: string)
 	for _, connection in tagConnections do
 		connection:Disconnect()
 	end
+
+	self._tagConnections[tag] = nil
 end
 
 function CullThrottle.RemoveObjectsWithTag(self: CullThrottle, tag: string)

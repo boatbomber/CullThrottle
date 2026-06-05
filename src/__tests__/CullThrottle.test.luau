@@ -461,6 +461,35 @@ describe("CullThrottle", function()
 			expect(cullThrottle._objects[part]).toBeNil()
 			expect(table.find(cullThrottle._physicsObjects, part)).toBeNil()
 		end)
+
+		it("should not fire ObjectExitedView for an object that was removed while visible", function()
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part)
+
+			-- Mark the object as having been visible.
+			local now = os.clock()
+			cullThrottle._objectVisibilityTimestamps[part] = now
+
+			cullThrottle:RemoveObject(part)
+
+			-- The visibility timestamp must be cleared so the next pass doesn't see a
+			-- stale "was visible last frame, gone this frame" entry and fire a stray
+			-- ObjectExitedView for an object we've already removed.
+			expect(cullThrottle._objectVisibilityTimestamps[part]).toBeNil()
+
+			local exited = false
+			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
+				if obj == part then
+					exited = true
+				end
+			end)
+
+			cullThrottle:_signalVisibilityChanges(now + 1)
+			expect(exited).toBe(false)
+
+			connection:Disconnect()
+			part:Destroy()
+		end)
 	end)
 
 	describe("CaptureTag", function()
@@ -563,6 +592,31 @@ describe("CullThrottle", function()
 			CollectionService:RemoveTag(folder, tag)
 			folder:Destroy()
 		end)
+
+		it("should disconnect the previous connections when a tag is re-captured", function()
+			local tag = "RecaptureTag"
+			cullThrottle:CaptureTag(tag)
+
+			-- Hold a reference to the first capture's connections before re-capturing.
+			local firstConnections = cullThrottle._tagConnections[tag]
+			expect(firstConnections).toBeDefined()
+
+			cullThrottle:CaptureTag(tag)
+
+			-- The first capture's connections must be disconnected, not left dangling.
+			-- Leaked connections stay live and double-handle every tagged add/remove.
+			for _, connection in firstConnections do
+				expect(connection.Connected).toBe(false)
+			end
+
+			-- The live entry is a fresh, fully-connected set.
+			expect(cullThrottle._tagConnections[tag]).never.toBe(firstConnections)
+			for _, connection in cullThrottle._tagConnections[tag] do
+				expect(connection.Connected).toBe(true)
+			end
+
+			cullThrottle:ReleaseTag(tag)
+		end)
 	end)
 
 	describe("ReleaseTag", function()
@@ -582,6 +636,19 @@ describe("CullThrottle", function()
 
 			CollectionService:RemoveTag(part, tag)
 			part:Destroy()
+		end)
+
+		it("should clear the tag connection entry", function()
+			local tag = "ClearedTag"
+			cullThrottle:CaptureTag(tag)
+			expect(cullThrottle._tagConnections[tag]).toBeDefined()
+
+			cullThrottle:ReleaseTag(tag)
+
+			-- The entry (and its now-dead connection objects) must be dropped, not
+			-- left as a stale truthy "captured" marker referencing disconnected
+			-- connections.
+			expect(cullThrottle._tagConnections[tag]).toBeNil()
 		end)
 	end)
 
@@ -834,6 +901,45 @@ describe("CullThrottle", function()
 			expect(cullThrottle._voxels[voxelKey]).toBeNil()
 
 			part:Destroy()
+		end)
+
+		it("should clear cached voxel visibility when a voxel empties", function()
+			local voxelKey = Vector3.new(1, 1, 1)
+			local part = createMockPart()
+
+			cullThrottle:_insertToVoxel(voxelKey, part)
+			-- Simulate the search loop having marked this voxel visible this frame.
+			cullThrottle._lastVoxelVisibility[voxelKey] = os.clock()
+
+			cullThrottle:_removeFromVoxel(voxelKey, part)
+
+			-- The voxel is gone, so its cached timestamp must not linger. The search
+			-- loops only clear timestamps for voxels they find out of frustum, so an
+			-- emptied voxel's entry would otherwise leak forever.
+			expect(cullThrottle._lastVoxelVisibility[voxelKey]).toBeNil()
+
+			part:Destroy()
+		end)
+
+		it("should keep cached voxel visibility while the voxel still holds objects", function()
+			local voxelKey = Vector3.new(1, 1, 1)
+			local part1 = createMockPart()
+			local part2 = createMockPart()
+
+			cullThrottle:_insertToVoxel(voxelKey, part1)
+			cullThrottle:_insertToVoxel(voxelKey, part2)
+			local now = os.clock()
+			cullThrottle._lastVoxelVisibility[voxelKey] = now
+
+			-- Removing one of two objects leaves the voxel occupied, so its cached
+			-- visibility is still valid and must be preserved.
+			cullThrottle:_removeFromVoxel(voxelKey, part1)
+
+			expect(cullThrottle._voxels[voxelKey]).toBeDefined()
+			expect(cullThrottle._lastVoxelVisibility[voxelKey]).toBe(now)
+
+			part1:Destroy()
+			part2:Destroy()
 		end)
 	end)
 
