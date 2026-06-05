@@ -4,6 +4,8 @@
 	especially valuable for the properties that don't update often.
 --]]
 
+local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
+
 local CameraCache = {
 	_connections = {},
 }
@@ -92,6 +94,26 @@ function CameraCache.getPlanesAndBounds(renderDistance: number, voxelSize: numbe
 		math.max(cameraPos.Z, farPlaneTopLeft.Z, farPlaneBottomLeft.Z, farPlaneTopRight.Z, farPlaneBottomRight.Z)
 			// voxelSize
 	)
+
+	if _G.__DEV__ and _G.__VISUALIZE__ then
+		Gizmo.setColor3(Color3.fromRGB(168, 87, 219))
+		Gizmo.setTransparency(0)
+		Gizmo.drawLine(cameraPos, farPlaneTopLeft)
+		Gizmo.drawLine(cameraPos, farPlaneTopRight)
+		Gizmo.drawLine(cameraPos, farPlaneBottomLeft)
+		Gizmo.drawLine(cameraPos, farPlaneBottomRight)
+		Gizmo.drawLine(farPlaneTopLeft, farPlaneTopRight)
+		Gizmo.drawLine(farPlaneTopRight, farPlaneBottomRight)
+		Gizmo.drawLine(farPlaneBottomLeft, farPlaneBottomRight)
+		Gizmo.drawLine(farPlaneTopLeft, farPlaneBottomLeft)
+		Gizmo.setTransparency(0.5)
+		Gizmo.drawBox(farPlaneCFrame, Vector3.new(farPlaneWidth2 * 2, farPlaneHeight2 * 2, 1))
+		Gizmo.setTransparency(0.7)
+		Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneBottomLeft)
+		Gizmo.drawTriangle(cameraPos, farPlaneTopRight, farPlaneBottomRight)
+		Gizmo.drawTriangle(cameraPos, farPlaneTopLeft, farPlaneTopRight)
+		Gizmo.drawTriangle(cameraPos, farPlaneBottomLeft, farPlaneBottomRight)
+	end
 
 	return frustumPlanes, minBound, maxBound
 end

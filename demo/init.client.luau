@@ -7,12 +7,13 @@ local UserInputService = game:GetService("UserInputService")
 local Packages = ReplicatedStorage:WaitForChild("Packages")
 
 local CullThrottle = require(Packages:WaitForChild("CullThrottle"))
+local CameraCache = require(Packages:WaitForChild("CullThrottle").Utilities.CameraCache)
 
 local Blocks = require(script.Blocks)
 local MetricGraph = require(script.MetricGraph)
 
-local VISIBLE_COLOR = Color3.fromRGB(245, 179, 226)
-local INVISIBLE_COLOR = Color3.fromRGB(60, 84, 101)
+local VISIBLE_COLOR = Color3.fromRGB(225, 75, 183)
+local INVISIBLE_COLOR = Color3.fromRGB(16, 27, 35)
 local TAG = "FloatingBlock"
 
 -- Let's make some blocks to run effects on
@@ -23,7 +24,7 @@ local blockMetadata = {}
 
 for _, block in Blocks.generateBlockClusters(60, 200) do
 	block:AddTag(TAG)
-	block.Color = Color3.fromHSV(math.random(), 0.6, 1) --INVISIBLE_COLOR
+	block.Color = INVISIBLE_COLOR
 	block.Parent = BlocksFolder
 
 	blockMetadata[block] = {
@@ -39,13 +40,13 @@ local FloatingBlocksUpdater = CullThrottle.new()
 FloatingBlocksUpdater:CaptureTag(TAG)
 
 -- Change colors of blocks to indicate visibility
--- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
--- 	block.Color = VISIBLE_COLOR
--- end)
+FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
+	block.Color = VISIBLE_COLOR
+end)
 
--- FloatingBlocksUpdater.ObjectExitedView:Connect(function(block)
--- 	block.Color = INVISIBLE_COLOR
--- end)
+FloatingBlocksUpdater.ObjectExitedView:Connect(function(block)
+	block.Color = INVISIBLE_COLOR
+end)
 
 local updateDuration = 0
 local objectDeltas = {}
@@ -82,7 +83,7 @@ end)
 ----------------------------------------------------------------------------------
 -- The rest of this is debug/dev stuff
 
-local DEBUG = false
+_G.__VISUALIZE__ = false
 
 local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 local ScreenGui = Instance.new("ScreenGui")
@@ -259,7 +260,7 @@ RunService.PostSimulation:Connect(function(gameDelta)
 end)
 
 -- Use a fake camera to get a third person view
-if DEBUG then
+if _G.__VISUALIZE__ then
 	local testCam = Instance.new("Part")
 	testCam.Name = "_CullThrottleTestCam"
 	testCam.Size = Vector3.new(16, 9, 3)
@@ -283,10 +284,16 @@ if DEBUG then
 		end
 	end)
 
+	CameraCache:cleanup()
+	CameraCache.ViewportSize = Vector2.new(1920, 1080)
+	CameraCache.AspectRatio = CameraCache.ViewportSize.X / CameraCache.ViewportSize.Y
+
 	task.spawn(function()
 		while task.wait() do
 			local distanceToTarget = (testCam.CFrame.Position - targetCF.Position).Magnitude
 			testCam.CFrame = testCam.CFrame:Lerp(targetCF, math.min(1 / distanceToTarget, 1))
+			CameraCache.CFrame = testCam.CFrame
+			CameraCache.Position = testCam.CFrame.Position
 		end
 	end)
 end

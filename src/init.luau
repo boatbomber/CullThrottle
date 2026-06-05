@@ -19,6 +19,7 @@ local Config = require(script.Config)
 local GoodSignal = require(script.Utilities.GoodSignal)
 local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
+local Gizmo = if _G.__DEV__ then require(script.Utilities.Gizmo) else nil :: any
 
 local vectorDot: (any, any) -> number = vector.dot
 local vectorMagnitude: (any) -> number = vector.magnitude
@@ -85,6 +86,35 @@ type CullThrottleProto = {
 }
 
 export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThrottle))
+
+if _G.__DEV__ then
+	function CullThrottle._drawBox(
+		self: CullThrottle,
+		color: Color3,
+		transparency: number,
+		x0: number,
+		y0: number,
+		z0: number,
+		x1: number,
+		y1: number,
+		z1: number
+	)
+		if not _G.__VISUALIZE__ then
+			return
+		end
+		local voxelSize = self._config.voxelSize
+		local x0World, y0World, z0World = x0 * voxelSize, y0 * voxelSize, z0 * voxelSize
+		local x1World, y1World, z1World = x1 * voxelSize, y1 * voxelSize, z1 * voxelSize
+
+		local cf = CFrame.new((x0World + x1World) / 2, (y0World + y1World) / 2, (z0World + z1World) / 2)
+		local size = Vector3.new(math.abs(x0World - x1World), math.abs(y0World - y1World), math.abs(z0World - z1World))
+			- (Vector3.one * 2)
+
+		Gizmo.setColor3(color)
+		Gizmo.setTransparency(transparency)
+		Gizmo.drawWireBox(cf, size)
+	end
+end
 
 function CullThrottle._resizeTables(self: CullThrottle)
 	-- We've got a couple arrays that we clear without shrinking their size
@@ -587,6 +617,9 @@ function CullThrottle._searchVolume(
 		-- If this voxel was visible a moment ago, assume it still is
 		if now - (lastVoxelVisibility[voxelKey] or 0) < JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
 			self:_addVoxelKeyToVisible(voxelKey)
+			if _G.__DEV__ then
+				self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
+			end
 			return
 		end
 
@@ -601,6 +634,11 @@ function CullThrottle._searchVolume(
 		-- This voxel is visible
 		lastVoxelVisibility[voxelKey] = now
 		self:_addVoxelKeyToVisible(voxelKey)
+
+		if _G.__DEV__ then
+			self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
+		end
+
 		return
 	end
 
@@ -652,6 +690,9 @@ function CullThrottle._searchVolume(
 			end
 		end
 		debug.profileend()
+		if _G.__DEV__ then
+			self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
+		end
 		return
 	end
 
@@ -694,6 +735,9 @@ function CullThrottle._searchVolume(
 			end
 		end
 		debug.profileend()
+		if _G.__DEV__ then
+			self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
+		end
 		return
 	end
 
