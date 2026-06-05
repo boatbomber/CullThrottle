@@ -17,6 +17,8 @@ type ConfigurationProto = {
 	dynamicRenderDistance: boolean,
 
 	_renderDistance: number,
+	_renderDistanceStep: number,
+	_renderDistanceDirection: number,
 	_minRenderDistance: number,
 	_maxRenderDistance: number,
 	_halfVoxelSizeVec: Vector3,
@@ -43,6 +45,9 @@ function Config.new(): Config
 
 	-- These are computed values, not meant to be directly set
 	self._renderDistance = self.renderDistanceTarget
+	-- Adaptive controller state for dynamic render distance (see _adjustDynamicRenderDistance)
+	self._renderDistanceStep = 0.03
+	self._renderDistanceDirection = 0
 	self._minRenderDistance = self.renderDistanceTarget / 3
 	self._maxRenderDistance = self.renderDistanceTarget * 5
 	self._halfVoxelSizeVec = Vector3.one * (self.voxelSize / 2)

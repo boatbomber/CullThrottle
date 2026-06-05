@@ -37,6 +37,19 @@ local SKIPPED_FRAMES_LOOKBACK = 4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.2
 local NEARBY_DISTANCE_THRESHOLD = 30
 
+-- Dynamic render distance is an adaptive controller to avoid bouncing up and down.
+local DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT = 1.3
+local DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT = 1.0
+local DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT = 0.8
+-- Grow only when the worst weighted load is below this fraction of budget.
+local DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM = 0.6
+-- Step size as a fraction of renderDistanceTarget, adapted each frame.
+local DYNAMIC_RENDER_DISTANCE_MIN_STEP = 0.0002
+local DYNAMIC_RENDER_DISTANCE_MAX_STEP = 0.025
+-- Shrink the step when we reverse/settle, grow it when the scene really changed.
+local DYNAMIC_RENDER_DISTANCE_STEP_DAMPING = 0.35
+local DYNAMIC_RENDER_DISTANCE_STEP_GAIN = 1.2
+
 -- This weight gives more update priority to larger objects,
 -- focusing on the objects that contribute the most visually
 local SCREEN_SIZE_PRIORITY_WEIGHT = 85
@@ -955,25 +968,46 @@ function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 		return
 	end
 
-	-- If skipping/below target refresh/over time budget, reduce the render distance
-	-- But if we have headroom, increase the render distance
-	local newTargetRenderDistance = if self._perfMetrics._getAverage(self._perfMetrics._skippedIngest) ~= 0
-			or self._perfMetrics._getAverage(self._perfMetrics._skippedSearch) ~= 0
-			or self._perfMetrics._averageObjectDeltaTime >= self._config._refreshRateMidpoint
-			or self._perfMetrics._searchDuration / self._config.searchTimeBudget > 1
-			or self._perfMetrics._ingestDuration / self._config.ingestTimeBudget > 1
-		then math.max(
-			self._config._renderDistance - (self._config.renderDistanceTarget * 0.03),
-			self._config._minRenderDistance
-		)
-		elseif self._perfMetrics._averageObjectDeltaTime <= self._config.bestRefreshRate then math.min(
-			self._config._renderDistance + (self._config.renderDistanceTarget * 0.01),
-			self._config._maxRenderDistance
-		)
-		else self._config._renderDistance
+	local config = self._config
+	local perfMetrics = self._perfMetrics
 
-	-- Lerping avoids jitters or oscillations
-	self._config._renderDistance = math.lerp(self._config._renderDistance, newTargetRenderDistance, 0.12)
+	-- Skipped frames mean we couldn't even keep up, regardless of budget load.
+	local isSkipping = perfMetrics._getAverage(perfMetrics._skippedIngest) ~= 0
+		or perfMetrics._getAverage(perfMetrics._skippedSearch) ~= 0
+
+	-- Normalize each constraint to where 1 means at budget, weighted by how costly
+	-- an overrun is, and let the worst one drive the decision.
+	local load = math.max(
+		(perfMetrics._searchDuration / config.searchTimeBudget) * DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT,
+		(perfMetrics._ingestDuration / config.ingestTimeBudget) * DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT,
+		(perfMetrics._averageObjectDeltaTime / config._refreshRateMidpoint) * DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT
+	)
+
+	-- -1 shrink, 0 hold (within the deadband), 1 grow
+	local direction = if isSkipping or load > 1 then -1 elseif load < DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM then 1 else 0
+
+	-- Adapt the step rather than slamming on any signal.
+	local step = config._renderDistanceStep
+	local lastDirection = config._renderDistanceDirection
+	if direction == 0 or (lastDirection ~= 0 and direction ~= lastDirection) then
+		-- Settled in the deadband, or reversed past the sustainable edge: damp to settle.
+		step *= DYNAMIC_RENDER_DISTANCE_STEP_DAMPING
+	else
+		-- Consistent direction (or first move from rest): accelerate to catch up.
+		step *= DYNAMIC_RENDER_DISTANCE_STEP_GAIN
+	end
+	step = math.clamp(step, DYNAMIC_RENDER_DISTANCE_MIN_STEP, DYNAMIC_RENDER_DISTANCE_MAX_STEP)
+
+	config._renderDistanceStep = step
+	config._renderDistanceDirection = direction
+
+	if direction ~= 0 then
+		config._renderDistance = math.clamp(
+			config._renderDistance + direction * step * config.renderDistanceTarget,
+			config._minRenderDistance,
+			config._maxRenderDistance
+		)
+	end
 end
 
 function CullThrottle._processObjectVisibility(self: CullThrottle, start: number)
