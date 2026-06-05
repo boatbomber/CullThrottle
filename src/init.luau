@@ -915,24 +915,25 @@ function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 		return
 	end
 
-	if
-		self._perfMetrics._getAverage(self._perfMetrics._skippedIngest) ~= 0
-		or self._perfMetrics._getAverage(self._perfMetrics._skippedSearch) ~= 0 -- We're not able to truly process all the voxels
-		or self._perfMetrics._averageObjectDeltaTime >= self._config._refreshRateMidpoint -- We're not refreshing fast enough
-		or self._perfMetrics._searchDuration / self._config.searchTimeBudget > 1
-		or self._perfMetrics._ingestDuration / self._config.ingestTimeBudget > 1 -- We're going over the time budget
-	then
-		self._config._renderDistance = math.max(
+	-- If skipping/below target refresh/over time budget, reduce the render distance
+	-- But if we have headroom, increase the render distance
+	local newTargetRenderDistance = if self._perfMetrics._getAverage(self._perfMetrics._skippedIngest) ~= 0
+			or self._perfMetrics._getAverage(self._perfMetrics._skippedSearch) ~= 0
+			or self._perfMetrics._averageObjectDeltaTime >= self._config._refreshRateMidpoint
+			or self._perfMetrics._searchDuration / self._config.searchTimeBudget > 1
+			or self._perfMetrics._ingestDuration / self._config.ingestTimeBudget > 1
+		then math.max(
 			self._config._renderDistance - (self._config.renderDistanceTarget * 0.03),
 			self._config._minRenderDistance
 		)
-	elseif self._perfMetrics._averageObjectDeltaTime <= self._config.bestRefreshRate then
-		-- We're doing amazing, we can take on more
-		self._config._renderDistance = math.min(
-			self._config._renderDistance + (self._config.renderDistanceTarget * 0.015),
+		elseif self._perfMetrics._averageObjectDeltaTime <= self._config.bestRefreshRate then math.min(
+			self._config._renderDistance + (self._config.renderDistanceTarget * 0.01),
 			self._config._maxRenderDistance
 		)
-	end
+		else self._config._renderDistance
+
+	-- Lerping avoids jitters or oscillations
+	self._config._renderDistance = math.lerp(self._config._renderDistance, newTargetRenderDistance, 0.12)
 end
 
 function CullThrottle._processObjectVisibility(self: CullThrottle, start: number)
