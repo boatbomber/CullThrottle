@@ -308,6 +308,60 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("should release the object when it is destroyed externally", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+			expect(cullThrottle._objects[part]).toBeDefined()
+
+			-- Idiomatic Roblox cleanup is object:Destroy(), without ever calling
+			-- RemoveObject. CullThrottle should still let go of it.
+			part:Destroy()
+			task.wait()
+
+			expect(cullThrottle._objects[part]).toBeNil()
+		end)
+
+		it("should remove the object from voxels when it is destroyed externally", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			part:Destroy()
+			task.wait()
+
+			for _, voxel in cullThrottle._voxels do
+				expect(table.find(voxel, part)).toBeNil()
+			end
+		end)
+
+		it("should fire ObjectRemoved when the object is destroyed externally", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			local fired = false
+			local connection = cullThrottle.ObjectRemoved:Connect(function(obj)
+				fired = obj == part
+			end)
+
+			part:Destroy()
+			task.wait()
+
+			expect(fired).toBe(true)
+
+			connection:Disconnect()
+		end)
+
+		it("should release a physics object when it is destroyed externally", function()
+			local part = createMockPart(nil, nil, false)
+			cullThrottle:AddPhysicsObject(part)
+			expect(table.find(cullThrottle._physicsObjects, part)).toBeDefined()
+
+			part:Destroy()
+			task.wait()
+
+			expect(cullThrottle._objects[part]).toBeNil()
+			expect(table.find(cullThrottle._physicsObjects, part)).toBeNil()
+		end)
 	end)
 
 	describe("CaptureTag", function()

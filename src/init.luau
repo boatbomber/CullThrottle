@@ -1020,6 +1020,14 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end)
+
+	tableInsert(
+		objectData.changeConnections,
+		object.Destroying:Connect(function()
+			self:RemoveObject(object)
+		end)
+	)
+
 	self:_updateDesiredVoxelKeys(object, objectData)
 
 	self._objects[object] = objectData
