@@ -368,34 +368,30 @@ end
 
 function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number, now: number)
 	debug.profilebegin("pollPhysicsObjects")
-	local startIndex = self._physicsObjectIterIndex
-
-	if #self._physicsObjects == 0 then
+	local numPhysicsObjects = #self._physicsObjects
+	if numPhysicsObjects == 0 then
 		debug.profileend()
 		return
 	end
+
+	local startIndex = math.clamp(self._physicsObjectIterIndex, 1, numPhysicsObjects)
 
 	local cameraPos = CameraCache.Position
 	while os.clock() - now < timeBudget do
 		local object = self._physicsObjects[self._physicsObjectIterIndex]
 		self._physicsObjectIterIndex = self._physicsObjectIterIndex % #self._physicsObjects + 1
 
-		if not object then
-			continue
-		end
-
-		local objectData = self._objects[object]
-		if not objectData then
-			warn("Physics object", object, "is missing objectData, this shouldn't happen!")
-			continue
-		end
-
-		-- Update the object's cframe
-		local cframe = ObjectDimensions.getObjectCFrame(objectData)
-		if cframe then
-			objectData.cframe = cframe
-			objectData.distance = vectorMagnitude(cframe.Position - cameraPos)
-			self:_updateDesiredVoxelKeys(object, objectData)
+		if object then
+			local objectData = self._objects[object]
+			if objectData then
+				-- Update the object's cframe
+				local cframe = ObjectDimensions.getObjectCFrame(objectData)
+				if cframe then
+					objectData.cframe = cframe
+					objectData.distance = vectorMagnitude(cframe.Position - cameraPos)
+					self:_updateDesiredVoxelKeys(object, objectData)
+				end
+			end
 		end
 
 		if startIndex == self._physicsObjectIterIndex then
