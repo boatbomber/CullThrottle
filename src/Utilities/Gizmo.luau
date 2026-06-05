@@ -19,7 +19,8 @@ local POINT_SCALE = 5
 
 local RunService = game:GetService("RunService")
 local Event = RunService:IsServer() and RunService.Heartbeat or RunService.RenderStepped
-local Gizmos = Instance.new("Folder", workspace)
+local Gizmos = Instance.new("Folder")
+Gizmos.Parent = workspace
 
 local thickness = 2
 local globalScale = 1
@@ -71,7 +72,12 @@ local function get(class)
 		classCache = {}
 		cache[class] = classCache
 	end
-	return table.remove(classCache) or Instance.new(class, Gizmos)
+	local instance = table.remove(classCache)
+	if not instance then
+		instance = Instance.new(class)
+		instance.Parent = Gizmos
+	end
+	return instance
 end
 
 local function release(instance)
@@ -82,10 +88,6 @@ local function release(instance)
 		cache[class] = classCache
 	end
 	table.insert(classCache, instance)
-end
-
-local function empty()
-	-- at some point I'll switch each method out with empty so there's no overhead when gizmos are disabled
 end
 
 ------------------------------------------------------------------------------------------------------------------------
@@ -394,6 +396,8 @@ end
 
 if _G.__DEV__ then
 	enableGizmos()
+else
+	disableGizmos()
 end
 
 ------------------------------------------------------------------------------------------------------------------------
