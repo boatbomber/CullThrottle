@@ -741,25 +741,51 @@ describe("CullThrottle", function()
 	end)
 
 	describe("SetRefreshRates", function()
-		it("should update refresh rate configurations with decimal values", function()
-			local bestRate = 0.033
-			local worstRate = 0.5
+		it("should convert Hz rates to seconds-between-refreshes periods", function()
+			local bestHz = 30
+			local worstHz = 5
 
-			cullThrottle:SetRefreshRates(bestRate, worstRate)
+			cullThrottle:SetRefreshRates(bestHz, worstHz)
 
-			expect(cullThrottle._config.bestRefreshRate).toBe(bestRate)
-			expect(cullThrottle._config.worstRefreshRate).toBe(worstRate)
-			expect(cullThrottle._config._refreshRateRange).toBeCloseTo(worstRate - bestRate)
+			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / bestHz)
+			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / worstHz)
 		end)
 
-		it("should convert FPS values to time values", function()
-			local bestFPS = 30
-			local worstFPS = 5
+		it("should derive a positive range and midpoint from the periods", function()
+			local bestHz = 60
+			local worstHz = 15
 
-			cullThrottle:SetRefreshRates(bestFPS, worstFPS)
+			cullThrottle:SetRefreshRates(bestHz, worstHz)
 
-			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / bestFPS)
-			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / worstFPS)
+			local bestPeriod = 1 / bestHz
+			local worstPeriod = 1 / worstHz
+
+			expect(cullThrottle._config._refreshRateRange).toBeCloseTo(worstPeriod - bestPeriod)
+			expect(cullThrottle._config._refreshRateRange > 0).toBe(true)
+			expect(cullThrottle._config._refreshRateMidpoint).toBeCloseTo((bestPeriod + worstPeriod) / 2)
+		end)
+
+		it("should accept equal best and worst rates", function()
+			cullThrottle:SetRefreshRates(20, 20)
+
+			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / 20)
+			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / 20)
+			expect(cullThrottle._config._refreshRateRange).toBeCloseTo(0)
+		end)
+
+		it("should reject a best rate slower than the worst rate", function()
+			expect(function()
+				cullThrottle:SetRefreshRates(5, 30)
+			end).toThrow()
+		end)
+
+		it("should reject non-positive rates", function()
+			expect(function()
+				cullThrottle:SetRefreshRates(0, 15)
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetRefreshRates(60, -1)
+			end).toThrow()
 		end)
 	end)
 

@@ -233,10 +233,12 @@ The update phase is the time spent by `IterateObjectsToUpdate`. If the budget ru
 Note that dynamic render distance will adjust the render distance as needed in order to remain within these budgets. A lower budget will result in a lower render distance and vice versa.
 
 ```Luau
-CullThrottle:SetRefreshRates(bestRefreshRate: number, worstRefreshRate: number)
+CullThrottle:SetRefreshRates(bestHz: number, worstHz: number)
 ```
 
-Sets the desired refresh rates for CullThrottle. The best refresh rate is the maximum rate at which CullThrottle will update objects. The worst refresh rate is the minimum rate at which CullThrottle will update objects.
+Sets the desired refresh rates for CullThrottle, in Hz (updates per second). The best refresh rate is the maximum rate at which CullThrottle will update objects, and the worst refresh rate is the minimum rate at which CullThrottle will update objects. Both must be greater than zero, and `bestHz` must be at least `worstHz` (the best rate is the more frequent one); otherwise this throws.
+
+For example, `SetRefreshRates(60, 15)` updates the most important objects up to 60 times per second and the least important ones at least 15 times per second.
 
 **IMPORTANT:** In some scenarios, these rates may be violated. If there is surplus update budget, objects may be updated more frequently than the best refresh rate. If there is not enough update budget, objects may be updated less frequently than the worst refresh rate. If you want to guarantee that objects do not go below the worst rate, even at the cost of game performance, you can use `SetStrictlyEnforceWorstRefreshRate`.
 

@@ -1449,18 +1449,21 @@ function CullThrottle.SetTimeBudgets(
 	self._config.updateTimeBudget = updateTimeBudget
 end
 
-function CullThrottle.SetRefreshRates(self: CullThrottle, best: number, worst: number)
-	if best > 2 then
-		best = 1 / best
+function CullThrottle.SetRefreshRates(self: CullThrottle, bestHz: number, worstHz: number)
+	if bestHz <= 0 or worstHz <= 0 then
+		error("SetRefreshRates expects refresh rates in Hz greater than zero")
 	end
-	if worst > 2 then
-		worst = 1 / worst
+	if bestHz < worstHz then
+		error("SetRefreshRates expects the best (most frequent) rate to be at least the worst rate, both in Hz")
 	end
 
-	self._config.bestRefreshRate = best
-	self._config.worstRefreshRate = worst
-	self._config._refreshRateRange = worst - best
-	self._config._refreshRateMidpoint = (worst + best) / 2
+	local bestPeriod = 1 / bestHz
+	local worstPeriod = 1 / worstHz
+
+	self._config.bestRefreshRate = bestPeriod
+	self._config.worstRefreshRate = worstPeriod
+	self._config._refreshRateRange = worstPeriod - bestPeriod
+	self._config._refreshRateMidpoint = (worstPeriod + bestPeriod) / 2
 end
 
 function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, computeVisibilityOnlyOnDemand: boolean)
