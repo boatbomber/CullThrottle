@@ -1,1 +1,4 @@
 std = "roblox"
+
+[lints]
+global_usage = "allow" # We use _G for dev flags, which are processed out of the production build.
