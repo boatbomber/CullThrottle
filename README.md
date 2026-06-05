@@ -88,6 +88,16 @@ CullThrottle.new()
 
 Creates a new CullThrottle instance with reasonable defaults.
 
+```Luau
+CullThrottle:Destroy()
+```
+
+Tears down the CullThrottle instance. Disconnects its internal per-frame processing loop, releases all tag and object change listeners, drops all signal handlers, and clears its tracked state so the instance can be garbage collected.
+
+Call this when you're done with a CullThrottle instance. The instance must not be used afterwards.
+
+**IMPORTANT:** This does not destroy or modify the objects you added to CullThrottle; it only stops CullThrottle from tracking them.
+
 ### Object Management
 
 ```Luau

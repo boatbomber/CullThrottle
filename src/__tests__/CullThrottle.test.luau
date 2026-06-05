@@ -38,8 +38,8 @@ describe("CullThrottle", function()
 	end)
 
 	afterEach(function()
-		if cullThrottle and cullThrottle._renderConnection then
-			cullThrottle._renderConnection:Disconnect()
+		if cullThrottle then
+			cullThrottle:Destroy()
 		end
 		cullThrottle = nil
 	end)
@@ -68,6 +68,81 @@ describe("CullThrottle", function()
 		it("should setup render connection", function()
 			expect(cullThrottle._renderConnection).toBeDefined()
 			expect(cullThrottle._renderConnection.Connected).toBe(true)
+		end)
+	end)
+
+	describe("Destroy", function()
+		it("should disconnect the render connection", function()
+			expect(cullThrottle._renderConnection.Connected).toBe(true)
+
+			cullThrottle:Destroy()
+
+			expect(cullThrottle._renderConnection.Connected).toBe(false)
+		end)
+
+		it("should disconnect tag connections", function()
+			local tag = "DestroyTag"
+			cullThrottle:CaptureTag(tag)
+
+			local tagConnections = cullThrottle._tagConnections[tag]
+			expect(tagConnections).toBeDefined()
+
+			cullThrottle:Destroy()
+
+			for _, connection in tagConnections do
+				expect(connection.Connected).toBe(false)
+			end
+		end)
+
+		it("should disconnect per-object change connections", function()
+			local part = createMockPart()
+			local objectData = cullThrottle:AddObject(part)
+			expect(#objectData.changeConnections).toBeGreaterThan(0)
+
+			cullThrottle:Destroy()
+
+			for _, connection in objectData.changeConnections do
+				expect(connection.Connected).toBe(false)
+			end
+
+			part:Destroy()
+		end)
+
+		it("should clear all tracked state", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			local physicsPart = createMockPart(nil, nil, false)
+			cullThrottle:AddPhysicsObject(physicsPart)
+
+			cullThrottle:Destroy()
+
+			expect(cullThrottle._objects).toEqual({})
+			expect(cullThrottle._voxels).toEqual({})
+			expect(cullThrottle._physicsObjects).toEqual({})
+			expect(next(cullThrottle._objectVisibilityTimestamps)).toBeNil()
+
+			part:Destroy()
+			physicsPart:Destroy()
+		end)
+
+		it("should drop all signal handlers", function()
+			cullThrottle.ObjectAdded:Connect(function() end)
+			cullThrottle.ObjectEnteredView:Connect(function() end)
+
+			cullThrottle:Destroy()
+
+			expect(cullThrottle.ObjectAdded._connectionCount).toBe(0)
+			expect(cullThrottle.ObjectEnteredView._connectionCount).toBe(0)
+			expect(cullThrottle.ObjectExitedView._connectionCount).toBe(0)
+			expect(cullThrottle.ObjectRemoved._connectionCount).toBe(0)
+		end)
+
+		it("should be safe to call multiple times", function()
+			expect(function()
+				cullThrottle:Destroy()
+				cullThrottle:Destroy()
+			end).never.toThrow()
 		end)
 	end)
 

@@ -918,6 +918,47 @@ function CullThrottle.new(): CullThrottle
 	return self
 end
 
+function CullThrottle.Destroy(self: CullThrottle)
+	-- Stop the per-frame processing loop. This is the most important step;
+	-- without it the PreRender connection keeps this instance (and everything
+	-- it references) alive forever.
+	self._renderConnection:Disconnect()
+
+	-- Disconnect all CollectionService tag listeners
+	for _, tagConnections in self._tagConnections do
+		for _, connection in tagConnections do
+			connection:Disconnect()
+		end
+	end
+	tableClear(self._tagConnections)
+
+	-- Disconnect the per-object dimension change listeners
+	for _, objectData in self._objects do
+		for _, connection in objectData.changeConnections do
+			connection:Disconnect()
+		end
+	end
+
+	-- Drop all handlers on our signals so nothing fires after destruction
+	self.ObjectEnteredView:DisconnectAll()
+	self.ObjectExitedView:DisconnectAll()
+	self.ObjectAdded:DisconnectAll()
+	self.ObjectRemoved:DisconnectAll()
+
+	-- Clear out all tracked state so it can be garbage collected
+	tableClear(self._voxels)
+	tableClear(self._objects)
+	tableClear(self._physicsObjects)
+	tableClear(self._objectVisibilityTimestamps)
+	tableClear(self._lastVoxelVisibility)
+	tableClear(self._visibleVoxelKeys)
+	tableClear(self._volumesToCheck)
+	self._updateObjectVoxelsQueue:clearIncomingBatch()
+	self._updateObjectVoxelsQueue:clear()
+	self._visibleObjectsQueue:clearIncomingBatch()
+	self._visibleObjectsQueue:clear()
+end
+
 function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	if self._objects[object] then
 		return self._objects[object]
