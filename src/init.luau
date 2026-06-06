@@ -79,6 +79,10 @@ type CullThrottleProto = {
 	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue,
 	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
 	_visibleVoxelKeys: { types.VoxelKey },
+	_visibleVoxelCount: number,
+	_pendingVoxelKeys: { types.VoxelKey },
+	_pendingVoxelDistances: { number },
+	_voxelDistanceCounts: { number },
 	_objectVisibilityTimestamps: { [Instance]: number },
 	_physicsObjectIterIndex: number,
 	_lastTableResize: number,
@@ -140,9 +144,17 @@ end
 function CullThrottle._resizeTables(self: CullThrottle)
 	-- We've got a couple arrays that we clear without shrinking their size
 	-- so we occasionally resize them to avoid wasting space
-	local visibleVoxelKeys = tableCreate(#self._visibleVoxelKeys)
-	tableMove(self._visibleVoxelKeys, 1, #self._visibleVoxelKeys, 1, visibleVoxelKeys)
+	local visibleVoxelCount = self._visibleVoxelCount
+
+	local visibleVoxelKeys = tableCreate(visibleVoxelCount)
+	tableMove(self._visibleVoxelKeys, 1, visibleVoxelCount, 1, visibleVoxelKeys)
 	self._visibleVoxelKeys = visibleVoxelKeys
+
+	local pendingVoxelKeys = tableCreate(visibleVoxelCount)
+	tableMove(self._pendingVoxelKeys, 1, visibleVoxelCount, 1, pendingVoxelKeys)
+	self._pendingVoxelKeys = pendingVoxelKeys
+
+	self._pendingVoxelDistances = tableCreate(visibleVoxelCount)
 
 	local volumesSize = self._volumesToCheckSize
 	local volumesToCheck = tableCreate(volumesSize)
@@ -154,36 +166,78 @@ function CullThrottle._resizeTables(self: CullThrottle)
 end
 
 function CullThrottle._addVoxelKeyToVisible(self: CullThrottle, voxelKey: types.VoxelKey)
-	-- Sort by voxelKeys by manhattan distance to camera in voxel space
-	local voxelSize = self._config.voxelSize
-	local cameraVoxelKey = CameraCache.Position // voxelSize
-	local difference = voxelKey - cameraVoxelKey
-	local manhattanDist = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+	-- Accumulate visible voxels unsorted (an O(1) append)
+	-- _sortVisibleVoxelKeys orders the whole batch closest-first once the search finishes.
+	--
+	-- We don't dedupe: the search volumes partition space, so a voxel is only ever
+	-- added once per frame, and any object that spans several voxels is deduped
+	-- downstream by objectData.lastCheckClock during ingest.
+	local count = self._visibleVoxelCount + 1
+	self._visibleVoxelCount = count
+	self._pendingVoxelKeys[count] = voxelKey
+end
 
+function CullThrottle._sortVisibleVoxelKeys(self: CullThrottle)
+	-- Order this frame's visible voxels closest-first by manhattan distance to the
+	-- camera (in voxel space). The ingest passes rely on that order: nearer voxels
+	-- get precise ingestion, and once the budget runs out _fastApproxIngestRemainingVoxels
+	-- uses the index as a coarse priority. The ordering is only a soft heuristic
+	-- (manhattan distance is itself an approximation).
+	--
+	-- Distances are small non-negative integers, so a counting sort orders them in
+	-- O(n + maxDistance) with no element shuffling, and cameraVoxelKey is computed
+	-- just once for the whole batch.
+	local count = self._visibleVoxelCount
+	local pendingVoxelKeys = self._pendingVoxelKeys
 	local visibleVoxelKeys = self._visibleVoxelKeys
-	local left = 1
-	local right = #visibleVoxelKeys
 
-	while left <= right do
-		local mid = (left + right) // 2
-		local otherVoxelKey = visibleVoxelKeys[mid]
-		if otherVoxelKey == voxelKey then
-			return
-		end
+	if count == 0 then
+		return
+	elseif count == 1 then
+		visibleVoxelKeys[1] = pendingVoxelKeys[1]
+		return
+	end
 
-		local otherDifference = otherVoxelKey - cameraVoxelKey
-		local otherManhattanDist = math.abs(otherDifference.X)
-			+ math.abs(otherDifference.Y)
-			+ math.abs(otherDifference.Z)
+	local cameraVoxelKey = CameraCache.Position // self._config.voxelSize
+	local distances = self._pendingVoxelDistances
+	local counts = self._voxelDistanceCounts
 
-		if otherManhattanDist < manhattanDist then
-			left = mid + 1
-		else
-			right = mid - 1
+	-- Manhattan distance for every pending voxel, plus the max (the bucket range).
+	local maxDistance = 0
+	for i = 1, count do
+		local difference = pendingVoxelKeys[i] - cameraVoxelKey
+		local distance = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+		distances[i] = distance
+		if distance > maxDistance then
+			maxDistance = distance
 		end
 	end
 
-	tableInsert(visibleVoxelKeys, left, voxelKey)
+	-- Tally how many voxels land in each distance bucket.
+	for distance = 0, maxDistance do
+		counts[distance] = 0
+	end
+	for i = 1, count do
+		local distance = distances[i]
+		counts[distance] += 1
+	end
+
+	-- Turn the tallies into each bucket's starting output slot (prefix sum).
+	local slot = 1
+	for distance = 0, maxDistance do
+		local bucketCount = counts[distance]
+		counts[distance] = slot
+		slot += bucketCount
+	end
+
+	-- Scatter each voxel into its sorted slot.
+	-- Walking the source in order keeps voxels at equal distance in their original (stable) order.
+	for i = 1, count do
+		local distance = distances[i]
+		local outputIndex = counts[distance]
+		counts[distance] = outputIndex + 1
+		visibleVoxelKeys[outputIndex] = pendingVoxelKeys[i]
+	end
 end
 
 function CullThrottle._updateDesiredVoxelKeys(
@@ -594,13 +648,14 @@ end
 function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: number, startIndex: number)
 	local voxels = self._voxels
 	local visibleVoxelKeys = self._visibleVoxelKeys
+	local visibleVoxelCount = self._visibleVoxelCount
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local objects = self._objects
 	local visibleObjectsQueue = self._visibleObjectsQueue
 	local pendingEnteredView = self._pendingEnteredView
 	local pendingEnteredViewSize = self._pendingEnteredViewSize
 
-	for voxelIndex = startIndex, #visibleVoxelKeys do
+	for voxelIndex = startIndex, visibleVoxelCount do
 		-- Just dump all the objects into the visible objects list,
 		-- approximating priority by voxel order (closer voxels were searched first)
 		local voxelKey = visibleVoxelKeys[voxelIndex]
@@ -637,7 +692,7 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 
 	self._pendingEnteredViewSize = pendingEnteredViewSize
 
-	self._perfMetrics._skippedIngest[1] = 1 + #visibleVoxelKeys - startIndex
+	self._perfMetrics._skippedIngest[1] = 1 + visibleVoxelCount - startIndex
 end
 
 function CullThrottle._pushVolume(
@@ -896,7 +951,9 @@ function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrott
 end
 
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
-	tableClear(self._visibleVoxelKeys)
+	-- Resetting the count is enough; the search overwrites slots 1..count from the
+	-- start each frame, so any stale trailing entries in the reused buffers are never read.
+	self._visibleVoxelCount = 0
 	self._visibleObjectsQueue:clearIncomingBatch()
 	self._visibleObjectsQueue:clear()
 end
@@ -1054,10 +1111,18 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	self._perfMetrics._searchDuration = os.clock() - now
 	debug.profileend()
 
+	-- The search appended visible voxels in subdivision order; order them
+	-- closest-first so the ingest below spends its budget on the nearest voxels.
+	debug.profilebegin("sortVisibleVoxels")
+	self:_sortVisibleVoxelKeys()
+	debug.profileend()
+
 	debug.profilebegin("ingestVoxels")
 	local visibleVoxelKeys = self._visibleVoxelKeys
+	local visibleVoxelCount = self._visibleVoxelCount
 	local startIngestClock = os.clock()
-	for voxelIndex, voxelKey in visibleVoxelKeys do
+	for voxelIndex = 1, visibleVoxelCount do
+		local voxelKey = visibleVoxelKeys[voxelIndex]
 		local voxel = voxels[voxelKey]
 		if not voxel then
 			continue
@@ -1195,6 +1260,10 @@ function CullThrottle.new(): CullThrottle
 	self._updateObjectVoxelsQueue = PriorityQueue.new()
 	self._visibleObjectsQueue = PriorityQueue.new()
 	self._visibleVoxelKeys = {}
+	self._visibleVoxelCount = 0
+	self._pendingVoxelKeys = {}
+	self._pendingVoxelDistances = {}
+	self._voxelDistanceCounts = {}
 	self._objectVisibilityTimestamps = {}
 	self._lastVoxelVisibility = {}
 	self._lastTableResize = os.clock()
@@ -1265,6 +1334,10 @@ function CullThrottle.Destroy(self: CullThrottle)
 	tableClear(self._objectVisibilityTimestamps)
 	tableClear(self._lastVoxelVisibility)
 	tableClear(self._visibleVoxelKeys)
+	self._visibleVoxelCount = 0
+	tableClear(self._pendingVoxelKeys)
+	tableClear(self._pendingVoxelDistances)
+	tableClear(self._voxelDistanceCounts)
 	tableClear(self._volumesToCheck)
 	self._volumesToCheckSize = 0
 	tableClear(self._pendingEnteredView)

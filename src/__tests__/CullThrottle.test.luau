@@ -10,7 +10,9 @@ local expect = JestGlobals.expect
 local beforeEach = JestGlobals.beforeEach
 local afterEach = JestGlobals.afterEach
 
-local CullThrottle = require(Packages:WaitForChild("CullThrottle"))
+local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
+local CullThrottle = require(CullThrottlePackage)
+local CameraCache = require(CullThrottlePackage:WaitForChild("Utilities"):WaitForChild("CameraCache"))
 
 local function createMockPart(position: Vector3?, size: Vector3?, anchored: boolean?)
 	local part = Instance.new("Part")
@@ -1109,6 +1111,7 @@ describe("CullThrottle", function()
 				table.insert(visibleVoxelKeys, voxelKey)
 			end
 			cullThrottle._visibleVoxelKeys = visibleVoxelKeys
+			cullThrottle._visibleVoxelCount = #visibleVoxelKeys
 
 			-- Drive the fast-approximation path directly over every occupied voxel.
 			cullThrottle:_fastApproxIngestRemainingVoxels(os.clock(), 1)
@@ -1145,6 +1148,7 @@ describe("CullThrottle", function()
 				table.insert(visibleVoxelKeys, voxelKey)
 			end
 			cullThrottle._visibleVoxelKeys = visibleVoxelKeys
+			cullThrottle._visibleVoxelCount = #visibleVoxelKeys
 
 			cullThrottle:_fastApproxIngestRemainingVoxels(now, 1)
 
@@ -1552,17 +1556,19 @@ describe("CullThrottle", function()
 
 			-- The voxel was visible a moment ago, so the fallback should re-mark it.
 			cullThrottle._lastVoxelVisibility[voxelKey] = os.clock()
-			table.clear(cullThrottle._visibleVoxelKeys)
+			cullThrottle._visibleVoxelCount = 0
 
 			-- Leave a single-voxel volume on the stack, as if the search ran out of
-			-- time before reaching it, then run the cached-visibility fallback.
+			-- time before reaching it, then run the cached-visibility fallback. The
+			-- fallback accumulates into the unsorted pending buffer (the search sorts
+			-- it afterward), so check there.
 			cullThrottle._volumesToCheckSize = 0
 			cullThrottle:_pushVolume(voxelKey.X, voxelKey.Y, voxelKey.Z, voxelKey.X + 1, voxelKey.Y + 1, voxelKey.Z + 1)
 			cullThrottle:_reuseCachedVisibilityForRemainingVolumes()
 
 			local found = false
-			for _, key in cullThrottle._visibleVoxelKeys do
-				if key == voxelKey then
+			for i = 1, cullThrottle._visibleVoxelCount do
+				if cullThrottle._pendingVoxelKeys[i] == voxelKey then
 					found = true
 					break
 				end
@@ -1571,6 +1577,132 @@ describe("CullThrottle", function()
 			expect(cullThrottle._perfMetrics._skippedSearch[1]).toBe(1)
 
 			part:Destroy()
+		end)
+	end)
+
+	describe("Visible voxel ordering", function()
+		it("accumulates added voxels into the pending buffer in call order", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			cullThrottle:_addVoxelKeyToVisible(cameraVoxel + Vector3.new(3, 0, 0))
+			cullThrottle:_addVoxelKeyToVisible(cameraVoxel + Vector3.new(1, 0, 0))
+
+			-- Appends are O(1) and unsorted; the count tracks the live length.
+			expect(cullThrottle._visibleVoxelCount).toBe(2)
+			expect(cullThrottle._pendingVoxelKeys[1]).toBe(cameraVoxel + Vector3.new(3, 0, 0))
+			expect(cullThrottle._pendingVoxelKeys[2]).toBe(cameraVoxel + Vector3.new(1, 0, 0))
+		end)
+
+		it("sorts visible voxels closest-first by manhattan distance to the camera", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- Offsets deliberately added out of distance order.
+			local offsets = {
+				Vector3.new(5, 0, 0), -- distance 5
+				Vector3.new(0, 0, 0), -- distance 0 (the camera's own voxel)
+				Vector3.new(-2, 1, 0), -- distance 3
+				Vector3.new(1, 0, 0), -- distance 1
+				Vector3.new(2, 2, 2), -- distance 6
+				Vector3.new(0, -3, 1), -- distance 4
+			}
+			for _, offset in offsets do
+				cullThrottle:_addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+
+			cullThrottle:_sortVisibleVoxelKeys()
+
+			expect(cullThrottle._visibleVoxelCount).toBe(#offsets)
+
+			-- Output distances are non-decreasing, and the nearest voxel is first.
+			local previousDistance = -1
+			for i = 1, cullThrottle._visibleVoxelCount do
+				local difference = cullThrottle._visibleVoxelKeys[i] - cameraVoxel
+				local distance = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+				expect(distance).toBeGreaterThanOrEqual(previousDistance)
+				previousDistance = distance
+			end
+			expect(cullThrottle._visibleVoxelKeys[1]).toBe(cameraVoxel)
+		end)
+
+		it("preserves every voxel exactly once through the sort, including ties", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- A spread of distinct voxels, several of which tie on distance.
+			local added = {}
+			for x = -3, 3 do
+				for y = -1, 1 do
+					local key = cameraVoxel + Vector3.new(x, y, 0)
+					cullThrottle:_addVoxelKeyToVisible(key)
+					added[key] = true
+				end
+			end
+
+			cullThrottle:_sortVisibleVoxelKeys()
+
+			local seen = {}
+			for i = 1, cullThrottle._visibleVoxelCount do
+				local key = cullThrottle._visibleVoxelKeys[i]
+				seen[key] = (seen[key] or 0) + 1
+			end
+
+			-- Same set out as went in: each added key present exactly once, nothing extra.
+			local addedCount = 0
+			for key in added do
+				expect(seen[key]).toBe(1)
+				addedCount += 1
+			end
+			expect(cullThrottle._visibleVoxelCount).toBe(addedCount)
+		end)
+
+		it("handles the empty and single-voxel cases", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- Empty: nothing to sort, no error.
+			expect(function()
+				cullThrottle:_sortVisibleVoxelKeys()
+			end).never.toThrow()
+			expect(cullThrottle._visibleVoxelCount).toBe(0)
+
+			-- Single voxel: carried straight across to the output.
+			local onlyKey = cameraVoxel + Vector3.new(7, -2, 4)
+			cullThrottle:_addVoxelKeyToVisible(onlyKey)
+			cullThrottle:_sortVisibleVoxelKeys()
+			expect(cullThrottle._visibleVoxelCount).toBe(1)
+			expect(cullThrottle._visibleVoxelKeys[1]).toBe(onlyKey)
+		end)
+
+		it("keeps visible voxels ordered closest-first end to end", function()
+			-- Spread objects across several voxels so the search produces a batch to order.
+			local parts = {}
+			for i = -3, 3 do
+				local part = createMockPart(Vector3.new(i * 120, 0, 0))
+				cullThrottle:AddObject(part)
+				table.insert(parts, part)
+			end
+
+			-- Generous budgets so the search and ingest both run to completion.
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- However many voxels ended up visible, they must come out non-decreasing
+			-- in manhattan distance to the camera (the ingest passes depend on it).
+			local cameraVoxel = CameraCache.Position // cullThrottle._config.voxelSize
+			local previousDistance = -1
+			for i = 1, cullThrottle._visibleVoxelCount do
+				local difference = cullThrottle._visibleVoxelKeys[i] - cameraVoxel
+				local distance = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+				expect(distance).toBeGreaterThanOrEqual(previousDistance)
+				previousDistance = distance
+			end
+
+			for _, part in parts do
+				part:Destroy()
+			end
 		end)
 	end)
 
