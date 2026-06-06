@@ -291,6 +291,25 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("errors when the object has no resolvable cframe or bounding box", function()
+			-- A Folder resolves to neither a cframe nor a bounding box source, so
+			-- AddObject must reject it outright rather than silently tracking nothing.
+			-- Erroring on unsupported types is documented contract behavior.
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+
+			expect(function()
+				cullThrottle:AddObject(folder)
+			end).toThrow()
+
+			-- The failed add must leave no trace: not tracked, count unchanged.
+			expect(cullThrottle._objects[folder]).toBeNil()
+			expect(cullThrottle:IsTracking(folder)).toBe(false)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			folder:Destroy()
+		end)
 	end)
 
 	describe("AddPhysicsObject", function()
@@ -898,6 +917,25 @@ describe("CullThrottle", function()
 			cullThrottle:SetComputeVisibilityOnlyOnDemand(false)
 			expect(cullThrottle._config.computeVisibilityOnlyOnDemand).toBe(false)
 		end)
+
+		it("still resolves visibility when queried directly in on-demand mode", function()
+			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
+
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -80)).Position)
+			cullThrottle:AddObject(part)
+
+			-- Generous budgets so the on-demand query runs the full precise pass.
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+
+			-- In on-demand mode the render loop never computes visibility, but an
+			-- explicit query must still process it on the spot.
+			local visibleObjects = cullThrottle:GetVisibleObjects()
+			expect(table.find(visibleObjects, part)).never.toBeNil()
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("SetStrictlyEnforceWorstRefreshRate", function()
@@ -1224,6 +1262,37 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("returns objects in the frustum and excludes ones behind or beyond render distance", function()
+			-- Place objects relative to the live camera so the real frustum pass,
+			-- not a hand-built plane set, decides what is visible.
+			local camera = workspace.CurrentCamera
+			local camCFrame = camera.CFrame
+
+			local frontPart = createMockPart((camCFrame * CFrame.new(0, 0, -80)).Position)
+			local behindPart = createMockPart((camCFrame * CFrame.new(0, 0, 120)).Position)
+			local farPart = createMockPart((camCFrame * CFrame.new(0, 0, -5000)).Position)
+
+			cullThrottle:AddObject(frontPart)
+			cullThrottle:AddObject(behindPart)
+			cullThrottle:AddObject(farPart)
+
+			-- Generous budgets so the search and precise ingest run to completion.
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+
+			local visibleObjects = cullThrottle:GetVisibleObjects()
+
+			-- The object in front and within range is visible; the one behind the
+			-- camera and the one well past render distance are not.
+			expect(table.find(visibleObjects, frontPart)).never.toBeNil()
+			expect(table.find(visibleObjects, behindPart)).toBeNil()
+			expect(table.find(visibleObjects, farPart)).toBeNil()
+
+			frontPart:Destroy()
+			behindPart:Destroy()
+			farPart:Destroy()
+		end)
 	end)
 
 	describe("IterateObjectsToUpdate", function()
@@ -1271,6 +1340,96 @@ describe("CullThrottle", function()
 				expect(type(distance)).toBe("number")
 				expect(typeof(cframe)).toBe("CFrame")
 			end
+
+			part:Destroy()
+		end)
+
+		it("yields a visible object with its real distance and cframe", function()
+			local camera = workspace.CurrentCamera
+			local frontPart = createMockPart((camera.CFrame * CFrame.new(0, 0, -80)).Position)
+			cullThrottle:AddObject(frontPart)
+
+			-- Generous budgets so the search runs to completion and the update loop
+			-- doesn't bail before reaching the object.
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			local seen
+			for object, deltaTime, distance, cframe in cullThrottle:IterateObjectsToUpdate() do
+				if object == frontPart then
+					seen = { deltaTime = deltaTime, distance = distance, cframe = cframe }
+				end
+			end
+
+			expect(seen).toBeDefined()
+			expect(type(seen.deltaTime)).toBe("number")
+			-- The object sits 80 studs down the camera's look vector.
+			expect(seen.distance).toBeCloseTo(80)
+			expect(typeof(seen.cframe)).toBe("CFrame")
+
+			frontPart:Destroy()
+		end)
+
+		it("stops iterating and clears the queue when the update budget is exhausted", function()
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 5 do
+				local part = createMockPart((camera.CFrame * CFrame.new(i * 6, 0, -80)).Position)
+				cullThrottle:AddObject(part)
+				parts[i] = part
+			end
+
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+			-- A zero update budget (and no strict enforcement) means even the first
+			-- dequeue is already over budget, so nothing should be iterated.
+			cullThrottle._config.updateTimeBudget = 0
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(false)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			local count = 0
+			for object in cullThrottle:IterateObjectsToUpdate() do
+				if object then
+					count += 1
+				end
+			end
+
+			expect(count).toBe(0)
+			-- Leftovers are cleared so they can't spill into a second iteration.
+			expect(cullThrottle._visibleObjectsQueue:isEmpty()).toBe(true)
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("keeps updating overdue p0 objects past the normal budget under strict enforcement", function()
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -80)).Position)
+			cullThrottle:AddObject(part)
+
+			-- Make the object overdue before ingest so it is enqueued in the p0
+			-- priority band (the band is decided at ingest time, not at iteration).
+			cullThrottle._objects[part].lastUpdateClock = os.clock() - 100
+
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+			-- The normal budget is exhausted immediately, but strict enforcement
+			-- raises the p0 budget so worst-rate objects still update.
+			cullThrottle._config.updateTimeBudget = 0
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			local seen = false
+			for object in cullThrottle:IterateObjectsToUpdate() do
+				if object == part then
+					seen = true
+				end
+			end
+
+			expect(seen).toBe(true)
 
 			part:Destroy()
 		end)
@@ -1379,6 +1538,136 @@ describe("CullThrottle", function()
 			expect(objectData.desiredVoxelKeys[Vector3.new(0, 0, 0)]).toBe(false)
 
 			part:Destroy()
+		end)
+	end)
+
+	describe("Ingest priority", function()
+		-- Reads back the priority _ingestVoxel staged for an object, matching it to
+		-- its entry in the incoming batch (items[i] pairs with priorities[i]).
+		local function incomingPriority(object: Instance): number?
+			local batch = cullThrottle._visibleObjectsQueue._incomingBatch
+			for i = 1, batch.size do
+				if batch.items[i] == object then
+					return batch.priorities[i]
+				end
+			end
+			return nil
+		end
+
+		-- Positions an object a fixed distance straight out from the camera and
+		-- prepares the object data fields the priority branches read.
+		local function stageObject(distance: number, radius: number, elapsed: number): Instance
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
+			objectData.jitterOffset = 0
+			objectData.radius = radius
+			objectData.lastCheckClock = 0
+			objectData.cframe = CFrame.new(CameraCache.Position + Vector3.new(0, 0, distance))
+			-- elapsed is measured from "now" (os.clock) at ingest time.
+			objectData.lastUpdateClock = os.clock() - elapsed
+			return part
+		end
+
+		it("excludes objects beyond the render distance", function()
+			local part = stageObject(500, 2, 0.04)
+			cullThrottle._config._renderDistance = 100
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { part })
+
+			-- Past render distance: never staged, and never marked visible.
+			expect(incomingPriority(part)).toBeNil()
+			expect(cullThrottle._objectVisibilityTimestamps[part]).toBeNil()
+
+			part:Destroy()
+		end)
+
+		it("pushes over-refreshed objects far down the queue", function()
+			-- elapsed 0 is well under bestRefreshRate, so this is the over-refresh
+			-- branch, scaled by OVER_REFRESH_PRIORITY_SCALE (1e6). A small, distant
+			-- object keeps screen size < 1 so the scaled value stays large.
+			local part = stageObject(300, 0.5, 0)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { part })
+
+			local priority = incomingPriority(part)
+			expect(priority).toBeDefined()
+			expect((priority :: number) > 1e5).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("gives overdue objects p0 priority sorted by screen size", function()
+			-- elapsed far past worstRefreshRate puts both in the p0 band.
+			local smallPart = stageObject(100, 0.5, 100)
+			local bigPart = stageObject(100, 5, 100)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { smallPart, bigPart })
+
+			local pSmall = incomingPriority(smallPart) :: number
+			local pBig = incomingPriority(bigPart) :: number
+
+			-- Both sit below the p0 threshold (0.90)...
+			expect(pSmall < 0.9).toBe(true)
+			expect(pBig < 0.9).toBe(true)
+			-- ...and the larger (more on-screen) object sorts ahead with a lower value.
+			expect(pBig < pSmall).toBe(true)
+
+			smallPart:Destroy()
+			bigPart:Destroy()
+		end)
+
+		it("gives nearby objects a distance-proportional priority", function()
+			-- Within NEARBY_DISTANCE_THRESHOLD (30) and refreshing at a fair rate.
+			local part = stageObject(15, 2, 0.04)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { part })
+
+			-- priority = distance / NEARBY_DISTANCE_THRESHOLD = 15 / 30.
+			expect(incomingPriority(part)).toBeCloseTo(15 / 30)
+
+			part:Destroy()
+		end)
+
+		it("ranks a farther object below a nearer one in the fair band", function()
+			-- Both past the nearby threshold and refreshing at a fair rate, so they
+			-- take the weighted-blend branch where distance and screen size matter.
+			local nearPart = stageObject(100, 2, 0.04)
+			local farPart = stageObject(200, 2, 0.04)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { nearPart, farPart })
+
+			local pNear = incomingPriority(nearPart) :: number
+			local pFar = incomingPriority(farPart) :: number
+
+			-- A higher priority value means later in the queue, so the farther,
+			-- smaller-on-screen object should sort after the nearer one.
+			expect(pFar > pNear).toBe(true)
+
+			nearPart:Destroy()
+			farPart:Destroy()
+		end)
+
+		it("ranks a larger object ahead of a smaller one in the fair band", function()
+			local bigPart = stageObject(100, 5, 0.04)
+			local smallPart = stageObject(100, 1, 0.04)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { bigPart, smallPart })
+
+			local pBig = incomingPriority(bigPart) :: number
+			local pSmall = incomingPriority(smallPart) :: number
+
+			-- The bigger object fills more of the screen, so it sorts first (lower value).
+			expect(pBig < pSmall).toBe(true)
+
+			bigPart:Destroy()
+			smallPart:Destroy()
 		end)
 	end)
 
@@ -1762,6 +2051,30 @@ describe("CullThrottle", function()
 
 			for _, part in parts do
 				part:Destroy()
+			end
+		end)
+
+		it("preserves the visible voxel keys when the backing tables are resized", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			cullThrottle:_addVoxelKeyToVisible(cameraVoxel + Vector3.new(1, 0, 0))
+			cullThrottle:_addVoxelKeyToVisible(cameraVoxel + Vector3.new(2, 0, 0))
+			cullThrottle:_addVoxelKeyToVisible(cameraVoxel + Vector3.new(3, 0, 0))
+			cullThrottle:_sortVisibleVoxelKeys()
+
+			local expectedCount = cullThrottle._visibleVoxelCount
+			local before = {}
+			for i = 1, expectedCount do
+				before[i] = cullThrottle._visibleVoxelKeys[i]
+			end
+
+			cullThrottle:_resizeTables()
+
+			-- The resize trims the unused tail without dropping any live key.
+			expect(cullThrottle._visibleVoxelCount).toBe(expectedCount)
+			for i = 1, expectedCount do
+				expect(cullThrottle._visibleVoxelKeys[i]).toBe(before[i])
 			end
 		end)
 	end)

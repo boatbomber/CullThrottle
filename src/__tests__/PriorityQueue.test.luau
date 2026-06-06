@@ -127,6 +127,20 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(5)
 			expect(queue:isEmpty()).toBe(true)
 		end)
+
+		it("rebuilds correctly after being drained to empty", function()
+			queue:enqueue("only", 5)
+			queue:dequeue()
+			expect(queue:isEmpty()).toBe(true)
+
+			-- Re-enqueueing after a full drain must not surface a stale top element.
+			queue:enqueue("fresh1", 3)
+			queue:enqueue("fresh2", 1)
+			expect(queue:len()).toBe(2)
+
+			expect((queue:dequeue())).toBe("fresh2")
+			expect((queue:dequeue())).toBe("fresh1")
+		end)
 	end)
 
 	describe("peek", function()
@@ -225,6 +239,37 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(2)
 			expect(item).toBe("item2")
 		end)
+
+		it("bubbles the replacement up when removing an interior node", function()
+			-- Insertion order produces the heap array [1, 5, 2, 6, 7, 3, 4].
+			local order = {
+				{ "p1", 1 },
+				{ "p5", 5 },
+				{ "p2", 2 },
+				{ "p6", 6 },
+				{ "p7", 7 },
+				{ "p3", 3 },
+				{ "p4", 4 },
+			}
+			for _, pair in order do
+				queue:enqueue(pair[1], pair[2])
+			end
+
+			-- Removing p6 (an interior node) replaces it with the last element p4,
+			-- which is smaller than p6's parent p5, so the replacement must sift up
+			-- toward the root rather than sink. Every other remove test sinks instead.
+			expect(queue:remove("p6")).toBe(true)
+
+			local drained = {}
+			while not queue:isEmpty() do
+				table.insert(drained, (queue:dequeue()))
+			end
+			expect(drained).toEqual({ "p1", "p2", "p3", "p4", "p5", "p7" })
+		end)
+
+		it("should return false when removing from an empty queue", function()
+			expect(queue:remove("missing")).toBe(false)
+		end)
 	end)
 
 	describe("update", function()
@@ -258,6 +303,29 @@ describe("PriorityQueue", function()
 			local item, priority = queue:peek()
 			expect(item).toBe("item3")
 			expect(priority).toBe(1)
+		end)
+
+		it("re-sinks an item when its priority increases", function()
+			queue:enqueue("a", 1)
+			queue:enqueue("b", 2)
+			queue:enqueue("c", 3)
+
+			-- Raising a's priority should move it to the back. The other update tests
+			-- only decrease priority (bubbling toward the root); this exercises the
+			-- opposite, sink, direction.
+			queue:update("a", 10)
+
+			expect((queue:peek())).toBe("b")
+
+			local drained = {}
+			while not queue:isEmpty() do
+				table.insert(drained, (queue:dequeue()))
+			end
+			expect(drained).toEqual({ "b", "c", "a" })
+		end)
+
+		it("should return false when updating an empty queue", function()
+			expect(queue:update("missing", 1)).toBe(false)
 		end)
 	end)
 
@@ -308,6 +376,37 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(2)
 			expect(queue:contains("item1")).toBe(true)
 			expect(queue:contains("item2")).toBe(true)
+		end)
+
+		it("heapifies a large unsorted batch correctly", function()
+			local items, priorities = {}, {}
+			for i = 1, 500 do
+				items[i] = "batch" .. i
+				priorities[i] = math.random() * 1000
+			end
+
+			queue:batchEnqueue(items, priorities)
+			expect(queue:len()).toBe(500)
+
+			-- A correct bulk heapify still drains in non-decreasing priority order.
+			local lastPriority = -math.huge
+			while not queue:isEmpty() do
+				local _, priority = queue:dequeue()
+				expect(priority).toBeGreaterThanOrEqual(lastPriority)
+				lastPriority = priority
+			end
+		end)
+
+		it("merges a batch into an already populated heap", function()
+			queue:enqueue("seed1", 100)
+			queue:enqueue("seed2", 1)
+
+			queue:batchEnqueue({ "x", "y", "z" }, { 50, 0, 200 })
+
+			expect(queue:len()).toBe(5)
+			local item, priority = queue:peek()
+			expect(item).toBe("y")
+			expect(priority).toBe(0)
 		end)
 	end)
 
@@ -406,6 +505,24 @@ describe("PriorityQueue", function()
 			expect(items).toContain("item1")
 			expect(items).toContain("item2")
 			expect(items).toContain("item3")
+		end)
+
+		it("returns an empty array for an empty queue", function()
+			expect(queue:items()).toEqual({})
+		end)
+
+		it("reflects the queue's current contents after a dequeue", function()
+			queue:enqueue("a", 2)
+			queue:enqueue("b", 1)
+			expect(#queue:items()).toBe(2)
+
+			queue:dequeue()
+
+			-- The returned set tracks live membership, dropping the dequeued item.
+			local remaining = queue:items()
+			expect(#remaining).toBe(1)
+			expect(remaining).toContain("a")
+			expect(remaining).never.toContain("b")
 		end)
 
 		it("should clear the queue", function()
@@ -539,6 +656,97 @@ describe("PriorityQueue", function()
 			local item, priority = queue:peek()
 			expect(priority).toBe(3)
 			expect(item).toBe("item3")
+		end)
+
+		it("keeps the queue valid with many equal priorities", function()
+			for i = 1, 50 do
+				queue:enqueue("equal" .. i, 5)
+			end
+
+			expect(queue:len()).toBe(50)
+
+			local count = 0
+			while not queue:isEmpty() do
+				local _, priority = queue:dequeue()
+				expect(priority).toBe(5)
+				count += 1
+			end
+			expect(count).toBe(50)
+		end)
+
+		it("maintains the min-heap invariant across random insert/remove/update/dequeue", function()
+			-- A property test: brute-force the heap with thousands of random ops and
+			-- assert the parent <= children invariant holds after every one. This is
+			-- the highest-value guard for a heap and exercises the remove/update
+			-- mutation paths the targeted tests can't fully cover.
+			local function heapIsValid(): boolean
+				local priorities = queue._priorities
+				for index = 2, queue._size do
+					if priorities[index // 2] > priorities[index] then
+						return false
+					end
+				end
+				return true
+			end
+
+			-- Track present items in an array + index map for O(1) random pick/remove.
+			local presentList, presentIndex = {}, {}
+			local function addPresent(item)
+				table.insert(presentList, item)
+				presentIndex[item] = #presentList
+			end
+			local function removePresent(item)
+				local index = presentIndex[item]
+				if not index then
+					return
+				end
+				local n = #presentList
+				local last = presentList[n]
+				presentList[index] = last
+				presentIndex[last] = index
+				presentList[n] = nil
+				presentIndex[item] = nil
+			end
+			local function randomPresent()
+				return presentList[math.random(1, #presentList)]
+			end
+
+			local nextId = 0
+			local valid = true
+			for _ = 1, 2000 do
+				local operation = math.random(1, 4)
+				if operation == 1 then
+					nextId += 1
+					local item = "rng" .. nextId
+					queue:enqueue(item, math.random() * 100)
+					addPresent(item)
+				elseif operation == 2 and #presentList > 0 then
+					local item = randomPresent()
+					queue:remove(item)
+					removePresent(item)
+				elseif operation == 3 and #presentList > 0 then
+					queue:update(randomPresent(), math.random() * 100)
+				elseif not queue:isEmpty() then
+					local item = queue:dequeue()
+					removePresent(item)
+				end
+
+				if not heapIsValid() then
+					valid = false
+					break
+				end
+			end
+
+			expect(valid).toBe(true)
+			expect(queue:len()).toBe(#presentList)
+
+			-- Whatever survived must still drain in non-decreasing priority order.
+			local lastPriority = -math.huge
+			while not queue:isEmpty() do
+				local _, priority = queue:dequeue()
+				expect(priority).toBeGreaterThanOrEqual(lastPriority)
+				lastPriority = priority
+			end
 		end)
 	end)
 end)
