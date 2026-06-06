@@ -337,6 +337,59 @@ describe("CullThrottle", function()
 			part:Destroy()
 		end)
 
+		it("does not refill voxel keys when a polled object has not moved", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			cullThrottle:AddPhysicsObject(part)
+
+			-- Count the expensive oriented-box fill. Installed after the add so
+			-- the initial fill from AddObject is not counted.
+			local realUpdate = cullThrottle._updateDesiredVoxelKeys
+			local fillCalls = 0
+			cullThrottle._updateDesiredVoxelKeys = function(s, polledObject, objectData)
+				fillCalls += 1
+				return realUpdate(s, polledObject, objectData)
+			end
+
+			-- The object hasn't moved, so repeated polls must skip the refill.
+			cullThrottle:_pollPhysicsObjects(1, os.clock())
+			cullThrottle:_pollPhysicsObjects(1, os.clock())
+			expect(fillCalls).toBe(0)
+
+			part:Destroy()
+		end)
+
+		it("refills voxel keys when physics moves a polled object", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			cullThrottle:AddPhysicsObject(part)
+
+			-- Physics-driven motion changes a part's CFrame without firing the
+			-- change signal, so disconnect this object's listeners to mimic that:
+			-- the poll is then the only thing that can notice the move.
+			for _, connection in cullThrottle._objects[part].changeConnections do
+				connection:Disconnect()
+			end
+
+			local realUpdate = cullThrottle._updateDesiredVoxelKeys
+			local fillCalls = 0
+			cullThrottle._updateDesiredVoxelKeys = function(s, polledObject, objectData)
+				fillCalls += 1
+				return realUpdate(s, polledObject, objectData)
+			end
+
+			part.Position = Vector3.new(500, 0, 0)
+
+			-- First poll notices the new position and refills exactly once.
+			cullThrottle:_pollPhysicsObjects(1, os.clock())
+			expect(fillCalls).toBe(1)
+			expect(cullThrottle._objects[part].cframe.Position).toBe(Vector3.new(500, 0, 0))
+
+			-- The cache now matches the part, so a further poll skips the refill.
+			cullThrottle:_pollPhysicsObjects(1, os.clock())
+			expect(fillCalls).toBe(1)
+
+			part:Destroy()
+		end)
+
 		it("should not register duplicates when added twice", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
 			cullThrottle:AddPhysicsObject(part)

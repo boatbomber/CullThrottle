@@ -513,9 +513,16 @@ function CullThrottle._pollPhysicsObjects(self: CullThrottle, timeBudget: number
 				-- Update the object's cframe
 				local cframe = ObjectDimensions.getObjectCFrame(objectData)
 				if cframe then
+					-- The oriented-box voxel fill is the expensive part of a poll,
+					-- so only redo it when the object actually moved.
+					-- Distance is refreshed every poll since the camera
+					-- may have moved even when the object did not.
+					local moved = cframe ~= objectData.cframe
 					objectData.cframe = cframe
 					objectData.distance = vectorMagnitude(cframe.Position - cameraPos)
-					self:_updateDesiredVoxelKeys(object, objectData)
+					if moved then
+						self:_updateDesiredVoxelKeys(object, objectData)
+					end
 				end
 			end
 		end
