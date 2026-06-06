@@ -85,7 +85,8 @@ type CullThrottleProto = {
 	_tagConnections: { [string]: { RBXScriptConnection } },
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
-	_volumesToCheck: { { number } },
+	_volumesToCheck: { number },
+	_volumesToCheckSize: number,
 	_volumeRotationCounter: number,
 
 	_perfMetrics: {
@@ -136,8 +137,9 @@ function CullThrottle._resizeTables(self: CullThrottle)
 	tableMove(self._visibleVoxelKeys, 1, #self._visibleVoxelKeys, 1, visibleVoxelKeys)
 	self._visibleVoxelKeys = visibleVoxelKeys
 
-	local volumesToCheck = tableCreate(#self._volumesToCheck)
-	tableMove(self._volumesToCheck, 1, #self._volumesToCheck, 1, volumesToCheck)
+	local volumesSize = self._volumesToCheckSize
+	local volumesToCheck = tableCreate(volumesSize)
+	tableMove(self._volumesToCheck, 1, volumesSize, 1, volumesToCheck)
 	self._volumesToCheck = volumesToCheck
 end
 
@@ -182,7 +184,10 @@ function CullThrottle._updateDesiredVoxelKeys(
 	debug.profilebegin("_updateDesiredVoxelKeys")
 	local voxelSize = self._config.voxelSize
 	local multiVoxelRadiusThreshold = self._config._multiVoxelRadiusThreshold
-	local desiredVoxelKeys = {}
+
+	-- Update desiredVoxelKeys table in place rather than reallocating
+	local desiredVoxelKeys = objectData.desiredVoxelKeys
+	tableClear(desiredVoxelKeys)
 
 	-- We'll get the voxelKeys for the center and the 8 corners of the object
 	local cframe, halfBoundingBox = objectData.cframe, objectData.halfBoundingBox
@@ -325,8 +330,6 @@ function CullThrottle._updateDesiredVoxelKeys(
 			desiredVoxelKeys[voxelKey] = false
 		end
 	end
-
-	objectData.desiredVoxelKeys = desiredVoxelKeys
 
 	if next(desiredVoxelKeys) and not self._updateObjectVoxelsQueue:contains(object) then
 		-- Use a cheap manhattan distance check for priority
@@ -617,6 +620,27 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 	self._perfMetrics._skippedIngest[1] = 1 + #visibleVoxelKeys - startIndex
 end
 
+function CullThrottle._pushVolume(
+	self: CullThrottle,
+	x0: number,
+	y0: number,
+	z0: number,
+	x1: number,
+	y1: number,
+	z1: number
+)
+	-- Append one volume (6 numbers) onto the flat stack.
+	local volumesToCheck = self._volumesToCheck
+	local base = self._volumesToCheckSize
+	volumesToCheck[base + 1] = x0
+	volumesToCheck[base + 2] = y0
+	volumesToCheck[base + 3] = z0
+	volumesToCheck[base + 4] = x1
+	volumesToCheck[base + 5] = y1
+	volumesToCheck[base + 6] = z1
+	self._volumesToCheckSize = base + 6
+end
+
 function CullThrottle._searchVolume(
 	self: CullThrottle,
 	now: number,
@@ -780,29 +804,31 @@ function CullThrottle._searchVolume(
 	local lengthY = y1 - y0
 	local lengthZ = z1 - z0
 
-	-- Split along the axis with the greatest length
-	local volumeA: { number }, volumeB: { number }
+	-- Split along the axis with the greatest length into two halves A and B.
+	local ax0, ay0, az0, ax1, ay1, az1
+	local bx0, by0, bz0, bx1, by1, bz1
 	if lengthX >= lengthY and lengthX >= lengthZ then
 		local splitCoord = (x0 + x1) // 2
-		volumeA = { x0, y0, z0, splitCoord, y1, z1 }
-		volumeB = { splitCoord, y0, z0, x1, y1, z1 }
+		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, splitCoord, y1, z1
+		bx0, by0, bz0, bx1, by1, bz1 = splitCoord, y0, z0, x1, y1, z1
 	elseif lengthY >= lengthX and lengthY >= lengthZ then
 		local splitCoord = (y0 + y1) // 2
-		volumeA = { x0, y0, z0, x1, splitCoord, z1 }
-		volumeB = { x0, splitCoord, z0, x1, y1, z1 }
+		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, x1, splitCoord, z1
+		bx0, by0, bz0, bx1, by1, bz1 = x0, splitCoord, z0, x1, y1, z1
 	else
 		local splitCoord = (z0 + z1) // 2
-		volumeA = { x0, y0, z0, x1, y1, splitCoord }
-		volumeB = { x0, y0, splitCoord, x1, y1, z1 }
+		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, x1, y1, splitCoord
+		bx0, by0, bz0, bx1, by1, bz1 = x0, y0, splitCoord, x1, y1, z1
 	end
 
-	-- Alternate the order to ensure each volume gets its turn being processed first
+	-- Alternate the order to ensure each volume gets its turn being processed
+	-- first. The stack is LIFO, so the volume pushed last is searched first.
 	if self._volumeRotationCounter % 2 == 0 then
-		tableInsert(self._volumesToCheck, volumeA)
-		tableInsert(self._volumesToCheck, volumeB)
+		self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1)
+		self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1)
 	else
-		tableInsert(self._volumesToCheck, volumeB)
-		tableInsert(self._volumesToCheck, volumeA)
+		self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1)
+		self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1)
 	end
 end
 
@@ -812,8 +838,10 @@ function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrott
 
 	local skipped = 0
 
-	for _, volume in self._volumesToCheck do
-		local x0, y0, z0, x1, y1, z1 = volume[1], volume[2], volume[3], volume[4], volume[5], volume[6]
+	local volumesToCheck = self._volumesToCheck
+	for base = 0, self._volumesToCheckSize - 1, 6 do
+		local x0, y0, z0 = volumesToCheck[base + 1], volumesToCheck[base + 2], volumesToCheck[base + 3]
+		local x1, y1, z1 = volumesToCheck[base + 4], volumesToCheck[base + 5], volumesToCheck[base + 6]
 
 		if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
 			-- This volume is a single voxel
@@ -900,37 +928,41 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local maxZ = maxBound.Z + 1
 
 	local volumesToCheck = self._volumesToCheck
-	tableClear(volumesToCheck)
+	self._volumesToCheckSize = 0
 
 	-- Split into smaller boxes to start off since the frustum bounding volume
 	-- obviously intersects the frustum planes.
 	if minX == maxX or minY == maxY or minZ == maxZ then
 		-- If the bounds are not divisible then don't split early
-		self._volumesToCheck[1] = { minX, minY, minZ, maxX, maxY, maxZ }
+		self:_pushVolume(minX, minY, minZ, maxX, maxY, maxZ)
 	else
 		local midBound = (minBound + maxBound) // 2
 		local midX = midBound.X
 		local midY = midBound.Y
 		local midZ = midBound.Z
 
-		volumesToCheck[1] = { minX, minY, minZ, midX, midY, midZ }
-		volumesToCheck[2] = { midX, minY, minZ, maxX, midY, midZ }
-		volumesToCheck[3] = { minX, minY, midZ, midX, midY, maxZ }
-		volumesToCheck[4] = { midX, minY, midZ, maxX, midY, maxZ }
-		volumesToCheck[5] = { minX, midY, minZ, midX, maxY, midZ }
-		volumesToCheck[6] = { midX, midY, minZ, maxX, maxY, midZ }
-		volumesToCheck[7] = { minX, midY, midZ, midX, maxY, maxZ }
-		volumesToCheck[8] = { midX, midY, midZ, maxX, maxY, maxZ }
+		self:_pushVolume(minX, minY, minZ, midX, midY, midZ)
+		self:_pushVolume(midX, minY, minZ, maxX, midY, midZ)
+		self:_pushVolume(minX, minY, midZ, midX, midY, maxZ)
+		self:_pushVolume(midX, minY, midZ, maxX, midY, maxZ)
+		self:_pushVolume(minX, midY, minZ, midX, maxY, midZ)
+		self:_pushVolume(midX, midY, minZ, maxX, maxY, midZ)
+		self:_pushVolume(minX, midY, midZ, midX, maxY, maxZ)
+		self:_pushVolume(midX, midY, midZ, maxX, maxY, maxZ)
 
-		-- Ensures each octant gets its turn being processed first
+		-- Ensures each octant gets its turn being processed first. The stack is
+		-- LIFO, so move the chosen octant's 6 numbers into the top block (8).
 		local firstVolumeIndex = self._volumeRotationCounter % 8 + 1
 		if firstVolumeIndex == 8 then
-			-- It's already first, no need to swap
-			-- Just reset the counter
+			-- It's already on top, no need to swap. Just reset the counter.
 			self._volumeRotationCounter = 1
 		else
-			local replacedVolume, chosenVolume = volumesToCheck[8], volumesToCheck[firstVolumeIndex]
-			volumesToCheck[firstVolumeIndex], volumesToCheck[8] = replacedVolume, chosenVolume
+			local chosenBase = (firstVolumeIndex - 1) * 6
+			local topBase = 7 * 6
+			for k = 1, 6 do
+				volumesToCheck[chosenBase + k], volumesToCheck[topBase + k] =
+					volumesToCheck[topBase + k], volumesToCheck[chosenBase + k]
+			end
 			self._volumeRotationCounter += 1
 		end
 	end
@@ -938,15 +970,23 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local voxels = self._voxels
 
 	debug.profilebegin("searchVolumes")
-	while #volumesToCheck > 0 do
+	while self._volumesToCheckSize > 0 do
 		-- TODO: Workers pop volumes from the list and check them in parallel
 
-		local n = #volumesToCheck
-		local volume = volumesToCheck[n]
-		volumesToCheck[n] = nil
+		-- Pop the top volume (6 numbers). We read its bounds into locals before
+		-- shrinking the stack so _searchVolume can reuse the just-freed slots for
+		-- any child volumes it pushes.
+		local n = self._volumesToCheckSize
+		local x0 = volumesToCheck[n - 5]
+		local y0 = volumesToCheck[n - 4]
+		local z0 = volumesToCheck[n - 3]
+		local x1 = volumesToCheck[n - 2]
+		local y1 = volumesToCheck[n - 1]
+		local z1 = volumesToCheck[n]
+		self._volumesToCheckSize = n - 6
 
 		-- Search the volume for visible voxels
-		self:_searchVolume(now, frustumPlanes, volume[1], volume[2], volume[3], volume[4], volume[5], volume[6])
+		self:_searchVolume(now, frustumPlanes, x0, y0, z0, x1, y1, z1)
 
 		if os.clock() - now >= searchTimeBudget then
 			-- We've run out of time!
@@ -1093,7 +1133,8 @@ function CullThrottle.new(): CullThrottle
 	self._lastVoxelVisibility = {}
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
-	self._volumesToCheck = tableCreate(8)
+	self._volumesToCheck = tableCreate(48)
+	self._volumesToCheckSize = 0
 	self._volumeRotationCounter = 1
 	self._tagConnections = {}
 	self._renderConnection = RunService.PreRender:Connect(function()
@@ -1154,6 +1195,7 @@ function CullThrottle.Destroy(self: CullThrottle)
 	tableClear(self._lastVoxelVisibility)
 	tableClear(self._visibleVoxelKeys)
 	tableClear(self._volumesToCheck)
+	self._volumesToCheckSize = 0
 	self._updateObjectVoxelsQueue:clearIncomingBatch()
 	self._updateObjectVoxelsQueue:clear()
 	self._visibleObjectsQueue:clearIncomingBatch()

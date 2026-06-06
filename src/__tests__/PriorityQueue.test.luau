@@ -341,6 +341,28 @@ describe("PriorityQueue", function()
 			expect(#queue._incomingBatch.priorities).toBe(0)
 		end)
 
+		it("should reuse the incoming batch across clear cycles", function()
+			-- clearIncomingBatch clears in place (keeping capacity) rather than
+			-- reassigning fresh tables, so a fresh batch after a clear must still
+			-- enqueue correctly off the contiguous 1..size keys.
+			queue:addToIncomingBatch("stale1", 1)
+			queue:addToIncomingBatch("stale2", 2)
+			queue:enqueueIncomingBatch()
+			queue:clearIncomingBatch()
+
+			queue:addToIncomingBatch("fresh", 3)
+			expect(queue._incomingBatch.size).toBe(1)
+			expect(#queue._incomingBatch.items).toBe(1)
+			expect(queue._incomingBatch.items[1]).toBe("fresh")
+
+			queue:enqueueIncomingBatch()
+
+			-- Both the originally-enqueued items and the post-clear item are present,
+			-- with no duplicates or leftovers from the cleared arrays.
+			expect(queue:len()).toBe(3)
+			expect(queue:contains("fresh")).toBe(true)
+		end)
+
 		it("should add multiple items to incoming batch at once", function()
 			local items = { "item1", "item2", "item3" }
 			local priorities = { 5, 2, 8 }

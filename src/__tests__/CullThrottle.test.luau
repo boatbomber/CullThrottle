@@ -1047,6 +1047,31 @@ describe("CullThrottle", function()
 			part1:Destroy()
 			part2:Destroy()
 		end)
+
+		it("should reuse the desiredVoxelKeys table in place across updates", function()
+			cullThrottle:SetVoxelSize(100)
+
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
+			local voxelSize = cullThrottle._config.voxelSize
+
+			-- Capture the table that already backs the object, then recompute for a
+			-- moved object. The table must be reused (same identity), not realloc'd.
+			local sharedTable = objectData.desiredVoxelKeys
+			objectData.cframe = CFrame.new(5000, 0, 0)
+			cullThrottle:_updateDesiredVoxelKeys(part, objectData)
+
+			expect(objectData.desiredVoxelKeys).toBe(sharedTable)
+
+			-- The diff was rebuilt from scratch: add the new voxel, drop the old one,
+			-- with no stale entries from before the clear.
+			local newKey = objectData.cframe.Position // voxelSize
+			expect(objectData.desiredVoxelKeys[newKey]).toBe(true)
+			expect(objectData.desiredVoxelKeys[Vector3.new(0, 0, 0)]).toBe(false)
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("Visibility events", function()
@@ -1159,6 +1184,60 @@ describe("CullThrottle", function()
 
 			expect(inside).toBe(false)
 			expect(completelyInside).toBe(false)
+		end)
+	end)
+
+	describe("Volume search", function()
+		it("should fully drain the volume search stack after a search", function()
+			-- Spread objects across several voxels so the search subdivides and
+			-- pushes/pops volumes on the flat stack.
+			local parts = {}
+			for i = -2, 2 do
+				local part = createMockPart(Vector3.new(i * 50, 0, 0))
+				cullThrottle:AddObject(part)
+				table.insert(parts, part)
+			end
+
+			-- Generous budget so the search runs to completion rather than bailing
+			-- into the cached-visibility fallback (which leaves volumes on the stack).
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- A correct pop loop empties the stack down to exactly zero.
+			expect(cullThrottle._volumesToCheckSize).toBe(0)
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("should reuse cached visibility for volumes left when the search budget is exhausted", function()
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
+			local voxelKey = next(objectData.voxelKeys)
+
+			-- The voxel was visible a moment ago, so the fallback should re-mark it.
+			cullThrottle._lastVoxelVisibility[voxelKey] = os.clock()
+			table.clear(cullThrottle._visibleVoxelKeys)
+
+			-- Leave a single-voxel volume on the stack, as if the search ran out of
+			-- time before reaching it, then run the cached-visibility fallback.
+			cullThrottle._volumesToCheckSize = 0
+			cullThrottle:_pushVolume(voxelKey.X, voxelKey.Y, voxelKey.Z, voxelKey.X + 1, voxelKey.Y + 1, voxelKey.Z + 1)
+			cullThrottle:_reuseCachedVisibilityForRemainingVolumes()
+
+			local found = false
+			for _, key in cullThrottle._visibleVoxelKeys do
+				if key == voxelKey then
+					found = true
+					break
+				end
+			end
+			expect(found).toBe(true)
+			expect(cullThrottle._perfMetrics._skippedSearch[1]).toBe(1)
+
+			part:Destroy()
 		end)
 	end)
 

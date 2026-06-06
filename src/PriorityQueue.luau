@@ -60,8 +60,8 @@ end
 function PriorityQueue.clearIncomingBatch(self: PriorityQueue): ()
 	local incomingBatch = self._incomingBatch
 	incomingBatch.size = 0
-	incomingBatch.items = {}
-	incomingBatch.priorities = {}
+	table.clear(incomingBatch.items)
+	table.clear(incomingBatch.priorities)
 end
 
 function PriorityQueue.siftup(self: PriorityQueue, from: number)
