@@ -78,6 +78,22 @@ Magic! (jk, I'll write a nice explanation soon tm)
 
 4. **Use tags.** CollectionService tags are a powerful way to group objects together and manage them with CullThrottle. You can add and remove tags at runtime, and CullThrottle will automatically track the objects with those tags. It will automatically add BaseParts as physics objects if they are not anchored, so don't forget #3!
 
+## Supported Object Types
+
+CullThrottle tracks each object using two things: a **position** (a CFrame) and a **bounding box** (a size). It derives each one from the object you add, choosing the source based on the object's class. The position source and the bounding box source are resolved independently, so a class can supply one directly while the other comes from an ancestor. For any class not listed below, CullThrottle walks up the object's ancestry until it finds a class it understands; if it finds none, the object cannot be tracked.
+
+| Class | Position | Bounding box | Notes |
+| --- | --- | --- | --- |
+| `BasePart` | `CFrame` | `Size` | The intended and best supported case. |
+| `Model` | `GetPivot()` | `GetBoundingBox()` | Uses the whole model's bounds. With no `PrimaryPart`, position tracks `WorldPivot`. Prefer adding the specific part you animate (see Best Practices). |
+| `Bone` | `TransformedWorldCFrame` | nearest ancestor | Position follows the deformed bone; size comes from the ancestor part. |
+| `Attachment` | `WorldCFrame` | nearest ancestor | Position follows the attachment; size comes from the ancestor part. |
+| `Beam` | midpoint of `Attachment0` and `Attachment1` | `max(Width0, Width1)` square in cross section, by the attachment-to-attachment distance in length | Requires both `Attachment0` and `Attachment1`. Without them, CullThrottle cannot place or size the beam and warns instead. |
+| `PointLight` / `SpotLight` | nearest ancestor | `Range` cubed (`Vector3.one * Range`) | Position comes from the part or attachment the light sits in. |
+| `Sound` | nearest ancestor | `RollOffMaxDistance` cubed (`Vector3.one * RollOffMaxDistance`) | Position comes from the part or attachment the sound sits in. |
+
+CullThrottle also subscribes to the relevant change signals for whichever source it picked (for example a `BasePart`'s `Size`, a light's `Range`, or a beam's `Width0`/`Width1` and attachment positions), so the position and bounding box stay current as those properties change.
+
 ## API
 
 ### Constructor
@@ -143,7 +159,7 @@ CullThrottle:RemoveObjectsWithTag(tag: string)
 Removes all objects with a given tag from CullThrottle's tracking.
 
 ```Luau
-CullThrottl.ObjectAdded: Signal
+CullThrottle.ObjectAdded: Signal
 ```
 
 Fires when an object is added to CullThrottle's tracking. The object is passed as the first argument. Comes in handy when using CaptureTag.
