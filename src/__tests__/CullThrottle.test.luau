@@ -96,7 +96,8 @@ describe("CullThrottle", function()
 
 		it("should disconnect per-object change connections", function()
 			local part = createMockPart()
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 			expect(#objectData.changeConnections).toBeGreaterThan(0)
 
 			cullThrottle:Destroy()
@@ -149,10 +150,10 @@ describe("CullThrottle", function()
 	describe("AddObject", function()
 		it("should add a Part object", function()
 			local part = createMockPart()
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			expect(objectData).toBeDefined()
-			expect(cullThrottle._objects[part]).toBe(objectData)
 			expect(objectData.cframe).toBeDefined()
 			expect(objectData.halfBoundingBox).toBeDefined()
 			expect(objectData.radius).toBeGreaterThan(0)
@@ -160,20 +161,30 @@ describe("CullThrottle", function()
 			part:Destroy()
 		end)
 
+		it("should not return the internal objectData", function()
+			local part = createMockPart()
+
+			-- AddObject must not leak the private, mutable objectData struct
+			expect(cullThrottle:AddObject(part)).toBeNil()
+
+			part:Destroy()
+		end)
+
 		it("should add a Model object with PrimaryPart", function()
 			local model = createMockModel()
-			local objectData = cullThrottle:AddObject(model)
+			cullThrottle:AddObject(model)
 
-			expect(objectData).toBeDefined()
-			expect(cullThrottle._objects[model]).toBe(objectData)
+			expect(cullThrottle._objects[model]).toBeDefined()
 
 			model:Destroy()
 		end)
 
 		it("should not add duplicate objects", function()
 			local part = createMockPart()
-			local objectData1 = cullThrottle:AddObject(part)
-			local objectData2 = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData1 = cullThrottle._objects[part]
+			cullThrottle:AddObject(part)
+			local objectData2 = cullThrottle._objects[part]
 
 			expect(objectData1).toBe(objectData2)
 
@@ -196,7 +207,8 @@ describe("CullThrottle", function()
 
 		it("should calculate object dimensions correctly", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(10, 10, 10))
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			expect(objectData.halfBoundingBox).toBe(Vector3.new(5, 5, 5))
 			expect(objectData.radius).toBe(5)
@@ -229,7 +241,8 @@ describe("CullThrottle", function()
 
 			-- A 500-long part centered at the origin spans voxels -3..2 on X.
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			-- Interior voxels along the length
 			expect(objectData.voxelKeys[Vector3.new(-2, 0, 0)]).toBe(true)
@@ -252,7 +265,8 @@ describe("CullThrottle", function()
 			-- so the AABB corners that the box doesn't reach must stay empty.
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(600, 20, 20))
 			part.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, math.rad(45), 0)
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			-- Voxels in the empty corners of the AABB are not registered...
 			expect(objectData.voxelKeys[Vector3.new(2, 0, 2)]).toBeNil()
@@ -843,7 +857,8 @@ describe("CullThrottle", function()
 			-- A long part occupies several voxel buckets, so the fast-approximation
 			-- path would emit it once per voxel if it didn't deduplicate.
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			local visibleVoxelKeys = {}
 			for voxelKey in objectData.voxelKeys do
@@ -872,7 +887,8 @@ describe("CullThrottle", function()
 			cullThrottle:SetVoxelSize(100)
 
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
-			local objectData = cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
 
 			local now = os.clock()
 			-- Simulate the precise ingest pass having already handled this object

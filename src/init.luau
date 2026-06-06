@@ -1162,7 +1162,7 @@ end
 
 function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	if self._objects[object] then
-		return self._objects[object]
+		return
 	end
 
 	local cframeSource, cframeType = ObjectDimensions.getObjectCFrameSource(object)
@@ -1242,8 +1242,6 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	end
 
 	self.ObjectAdded:Fire(object)
-
-	return objectData
 end
 
 function CullThrottle.AddPhysicsObject(self: CullThrottle, object: BasePart)
