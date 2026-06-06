@@ -162,7 +162,12 @@ CullThrottle:GetVisibleObjects(): { Instance }
 
 Returns all objects that CullThrottle believes to be visible this frame.
 
-**IMPORTANT:** CullThrottle does not guarantee that all returned objects are actually visible. CullThrottle errs on the side of caution and will possibly return objects that are not visible. Additionally, in performance constrained scenarios, CullThrottle is forced to make approximations that may impact accuracy.
+**IMPORTANT:** CullThrottle does not guarantee that the returned set is exactly the visible set. Under normal conditions it errs on the side of caution, so it may return some objects that are not actually visible. In performance constrained scenarios it is forced to make approximations that may impact accuracy in either direction:
+
+- If the **search** budget runs out, CullThrottle reuses last frame's visibility for the volumes it did not have time to re-check. Until a later frame catches up, that can momentarily keep returning an object that just left view, or omit one that just entered view.
+- If the **ingest** budget runs out, CullThrottle dumps the remaining visible objects into the result at a coarse, approximate priority rather than computing a precise one.
+
+The returned list contains no duplicates even when these fallbacks are hit.
 
 ```Luau
 CullThrottle:IterateObjectsToUpdate(): () -> (Instance?, number?, number?, CFrame?)

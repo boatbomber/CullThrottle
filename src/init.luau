@@ -577,18 +577,35 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 	local voxels = self._voxels
 	local visibleVoxelKeys = self._visibleVoxelKeys
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
+	local objects = self._objects
+	local visibleObjectsQueue = self._visibleObjectsQueue
 
 	for voxelIndex = startIndex, #visibleVoxelKeys do
-		-- Just dump all the objects into the visible objects list
+		-- Just dump all the objects into the visible objects list,
+		-- approximating priority by voxel order (closer voxels were searched first)
 		local voxelKey = visibleVoxelKeys[voxelIndex]
 		local voxel = voxels[voxelKey]
 		if not voxel then
 			continue
 		end
 
-		self._visibleObjectsQueue:addMultipleToIncomingBatch(voxel, tableCreate(#voxel, voxelIndex * 1e4))
+		local approxPriority = voxelIndex * 1e4
 
 		for _, object in voxel do
+			local objectData = objects[object]
+			if not objectData then
+				continue
+			end
+
+			if objectData.lastCheckClock == now then
+				-- Already ingested this frame (here or in the precise pass),
+				-- so skip it to avoid duplicating an object that spans voxels
+				continue
+			end
+			objectData.lastCheckClock = now
+
+			visibleObjectsQueue:addToIncomingBatch(object, approxPriority)
+
 			if objectVisibilityTimestamps[object] == nil then
 				-- This object wasn't visible last frame but it is now
 				self.ObjectEnteredView:Fire(object)

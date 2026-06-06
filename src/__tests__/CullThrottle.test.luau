@@ -836,6 +836,70 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("should not duplicate a multi-voxel object under fast-approximation fallback", function()
+			cullThrottle:SetVoxelSize(100)
+
+			-- A long part occupies several voxel buckets, so the fast-approximation
+			-- path would emit it once per voxel if it didn't deduplicate.
+			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
+			local objectData = cullThrottle:AddObject(part)
+
+			local visibleVoxelKeys = {}
+			for voxelKey in objectData.voxelKeys do
+				table.insert(visibleVoxelKeys, voxelKey)
+			end
+			cullThrottle._visibleVoxelKeys = visibleVoxelKeys
+
+			-- Drive the fast-approximation path directly over every occupied voxel.
+			cullThrottle:_fastApproxIngestRemainingVoxels(os.clock(), 1)
+
+			local items = cullThrottle._visibleObjectsQueue._incomingBatch.items
+			local occurrences = 0
+			for _, object in items do
+				if object == part then
+					occurrences += 1
+				end
+			end
+
+			expect(#visibleVoxelKeys).toBeGreaterThan(1)
+			expect(occurrences).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("should not re-add an object the precise ingest pass already handled", function()
+			cullThrottle:SetVoxelSize(100)
+
+			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
+			local objectData = cullThrottle:AddObject(part)
+
+			local now = os.clock()
+			-- Simulate the precise ingest pass having already handled this object
+			-- this frame (it spans both a precisely-ingested and a fast-path voxel).
+			objectData.lastCheckClock = now
+			cullThrottle._visibleObjectsQueue:addToIncomingBatch(part, 0)
+
+			local visibleVoxelKeys = {}
+			for voxelKey in objectData.voxelKeys do
+				table.insert(visibleVoxelKeys, voxelKey)
+			end
+			cullThrottle._visibleVoxelKeys = visibleVoxelKeys
+
+			cullThrottle:_fastApproxIngestRemainingVoxels(now, 1)
+
+			local items = cullThrottle._visibleObjectsQueue._incomingBatch.items
+			local occurrences = 0
+			for _, object in items do
+				if object == part then
+					occurrences += 1
+				end
+			end
+
+			expect(occurrences).toBe(1)
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("IterateObjectsToUpdate", function()
