@@ -21,7 +21,6 @@ type ConfigurationProto = {
 	_renderDistanceDirection: number,
 	_minRenderDistance: number,
 	_maxRenderDistance: number,
-	_halfVoxelSizeVec: Vector3,
 	_multiVoxelRadiusThreshold: number,
 	_refreshRateRange: number,
 	_refreshRateMidpoint: number,
@@ -50,7 +49,6 @@ function Config.new(): Config
 	self._renderDistanceDirection = 0
 	self._minRenderDistance = self.renderDistanceTarget / 3
 	self._maxRenderDistance = self.renderDistanceTarget * 5
-	self._halfVoxelSizeVec = Vector3.one * (self.voxelSize / 2)
 	self._multiVoxelRadiusThreshold = self.voxelSize * (1 / 8)
 	self._refreshRateRange = self.worstRefreshRate - self.bestRefreshRate
 	self._refreshRateMidpoint = (self.bestRefreshRate + self.worstRefreshRate) / 2

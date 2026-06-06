@@ -21,8 +21,8 @@ local ObjectDimensions = require(script.Utilities.ObjectDimensions)
 local CameraCache = require(script.Utilities.CameraCache)
 local Gizmo = if _G.__DEV__ then require(script.Utilities.Gizmo) else nil :: any
 
-local vectorDot: (any, any) -> number = vector.dot
-local vectorMagnitude: (any) -> number = vector.magnitude
+local vectorDot = (vector.dot :: any) :: (Vector3 | vector, Vector3 | vector) -> number
+local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
 local tableInsert = table.insert
 local tableFind = table.find
 local tableMove = table.move
@@ -36,6 +36,11 @@ local RESIZE_TABLES_RATE = 5
 local SKIPPED_FRAMES_LOOKBACK = 4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.2
 local NEARBY_DISTANCE_THRESHOLD = 30
+
+-- Per-frame voxel upkeep budgets, spent before the visibility search. Each is
+-- 0.05 ms, so the combined voxel maintenance is capped at ~0.1 ms per frame.
+local PHYSICS_POLL_TIME_BUDGET = 5e-5
+local VOXEL_UPDATE_TIME_BUDGET = 5e-5
 
 -- Dynamic render distance is an adaptive controller to avoid bouncing up and down.
 local DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT = 1.3
@@ -62,14 +67,24 @@ local REFRESH_RATE_PRIORITY_WEIGHT = 13
 -- in cases where there are many objects of similar screen size
 local DISTANCE_PRIORITY_WEIGHT = 2
 
+-- Objects that don't need refreshing yet are pushed far down the queue (the
+-- lowest priority value dequeues first) by scaling their screen-size term by
+-- this, so they sort after everything that actually needs an update this frame.
+local OVER_REFRESH_PRIORITY_SCALE = 1e6
+-- The fast-approx ingest path can't compute a real priority, so it derives one
+-- from each voxel's search order (closer voxels are searched first). Scaling the
+-- voxel index keeps successive voxels in distinct, monotonically increasing
+-- priority tiers, so nearer voxels are always dequeued ahead of farther ones.
+local FAST_APPROX_VOXEL_PRIORITY_SCALE = 1e4
+
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
 type CullThrottleProto = {
-	ObjectEnteredView: any, -- TODO: Anyone got strict typing for GoodSignal?
-	ObjectExitedView: any,
-	ObjectAdded: any,
-	ObjectRemoved: any,
+	ObjectEnteredView: GoodSignal.Signal,
+	ObjectExitedView: GoodSignal.Signal,
+	ObjectAdded: GoodSignal.Signal,
+	ObjectRemoved: GoodSignal.Signal,
 
 	_config: Config.Config,
 	_voxels: { [types.VoxelKey]: types.Voxel },
@@ -612,7 +627,7 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 		if jitteredElapsed <= bestRefreshRate then
 			-- No need to refresh faster than our best rate
 			-- so make this super low priority
-			objectPriority = (1 - screenSize) * 1e6
+			objectPriority = (1 - screenSize) * OVER_REFRESH_PRIORITY_SCALE
 		elseif jitteredElapsed >= worstRefreshRate then
 			-- To maintain the worst refresh rate, make this p0 priority
 			-- Sort these p0s by screen size
@@ -664,7 +679,7 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 			continue
 		end
 
-		local approxPriority = voxelIndex * 1e4
+		local approxPriority = voxelIndex * FAST_APPROX_VOXEL_PRIORITY_SCALE
 
 		for _, object in voxel do
 			local objectData = objects[object]
@@ -1198,9 +1213,10 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 
 	debug.profilebegin("CullThrottle.processObjectVisibility")
 
-	-- Make sure our voxels are up to date for up to 0.1 ms
-	self:_pollPhysicsObjects(5e-5, start)
-	self:_updateObjectVoxels(5e-5, os.clock())
+	-- Keep our voxels up to date, spending up to PHYSICS_POLL_TIME_BUDGET +
+	-- VOXEL_UPDATE_TIME_BUDGET (~0.1 ms total) before searching for visibility.
+	self:_pollPhysicsObjects(PHYSICS_POLL_TIME_BUDGET, start)
+	self:_updateObjectVoxels(VOXEL_UPDATE_TIME_BUDGET, os.clock())
 
 	-- Find the objects that are visible this frame
 	self:_findVisibleObjects(start)
@@ -1637,8 +1653,12 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 end
 
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
+	if voxelSize <= 0 then
+		-- A zero or negative voxel size divides by zero in the voxel coordinate math
+		error("SetVoxelSize expects a voxel size greater than zero")
+	end
+
 	self._config.voxelSize = voxelSize
-	self._config._halfVoxelSizeVec = Vector3.one * (voxelSize / 2)
 	self._config._multiVoxelRadiusThreshold = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
@@ -1652,6 +1672,12 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 end
 
 function CullThrottle.SetRenderDistanceTarget(self: CullThrottle, renderDistanceTarget: number)
+	if renderDistanceTarget <= 0 then
+		-- The render distance is a divisor in the priority math and seeds the
+		-- min/max bounds, so a zero or negative target corrupts visibility state
+		error("SetRenderDistanceTarget expects a render distance greater than zero")
+	end
+
 	self._config.renderDistanceTarget = renderDistanceTarget
 	self._config._renderDistance = renderDistanceTarget
 	self._config._minRenderDistance = renderDistanceTarget / 3
@@ -1664,6 +1690,12 @@ function CullThrottle.SetTimeBudgets(
 	ingestTimeBudget: number,
 	updateTimeBudget: number
 )
+	if searchTimeBudget < 0 or ingestTimeBudget < 0 or updateTimeBudget < 0 then
+		-- Budgets are per-frame time allowances in seconds; a negative budget
+		-- silently starves the corresponding pass. Zero is allowed (skip the work).
+		error("SetTimeBudgets expects non-negative time budgets in seconds")
+	end
+
 	self._config.searchTimeBudget = searchTimeBudget
 	self._config.ingestTimeBudget = ingestTimeBudget
 	self._config.updateTimeBudget = updateTimeBudget

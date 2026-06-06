@@ -57,7 +57,16 @@ end
 local Connection = {}
 Connection.__index = Connection
 
-function Connection.new(signal, fn)
+type ConnectionProto = {
+	_connected: boolean,
+	_signal: any,
+	_fn: any,
+	_next: any,
+}
+
+export type Connection = typeof(setmetatable({} :: ConnectionProto, Connection))
+
+function Connection.new(signal: any, fn: any): Connection
 	return setmetatable({
 		_connected = true,
 		_signal = signal,
@@ -66,7 +75,7 @@ function Connection.new(signal, fn)
 	}, Connection)
 end
 
-function Connection:Disconnect()
+function Connection.Disconnect(self: Connection)
 	self._connected = false
 	self._signal._connectionCount -= 1
 
@@ -101,14 +110,21 @@ setmetatable(Connection, {
 local Signal = {}
 Signal.__index = Signal
 
-function Signal.new()
+type SignalProto = {
+	_handlerListHead: any,
+	_connectionCount: number,
+}
+
+export type Signal = typeof(setmetatable({} :: SignalProto, Signal))
+
+function Signal.new(): Signal
 	return setmetatable({
 		_handlerListHead = false,
 		_connectionCount = 0,
 	}, Signal)
 end
 
-function Signal:Connect(fn)
+function Signal.Connect(self: Signal, fn: (...any) -> ()): Connection
 	self._connectionCount += 1
 	local connection = Connection.new(self, fn)
 	if self._handlerListHead then
@@ -122,7 +138,7 @@ end
 
 -- Disconnect all handlers. Since we use a linked list it suffices to clear the
 -- reference to the head handler.
-function Signal:DisconnectAll()
+function Signal.DisconnectAll(self: Signal)
 	self._connectionCount = 0
 	self._handlerListHead = false
 end
@@ -131,7 +147,7 @@ end
 -- coRunnerThread, and any time the resulting thread yielded without returning
 -- to us, that means that it yielded to the Roblox scheduler and has been taken
 -- over by Roblox scheduling, meaning we have to make a new coroutine runner.
-function Signal:Fire(...)
+function Signal.Fire(self: Signal, ...: any)
 	local item = self._handlerListHead
 	while item do
 		if item._connected then
@@ -148,7 +164,7 @@ end
 
 -- Implement Signal:Wait() in terms of a temporary connection using
 -- a Signal:Connect() which disconnects itself.
-function Signal:Wait()
+function Signal.Wait(self: Signal): ...any
 	local waitingCoroutine = coroutine.running()
 	local cn
 	cn = self:Connect(function(...)
@@ -160,7 +176,7 @@ end
 
 -- Implement Signal:Once() in terms of a connection which disconnects
 -- itself before running the handler.
-function Signal:Once(fn)
+function Signal.Once(self: Signal, fn: (...any) -> ()): Connection
 	local cn
 	cn = self:Connect(function(...)
 		if cn._connected then

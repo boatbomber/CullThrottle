@@ -12,7 +12,9 @@ local afterEach = JestGlobals.afterEach
 
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
-local CameraCache = require(CullThrottlePackage:WaitForChild("Utilities"):WaitForChild("CameraCache"))
+local Utilities = CullThrottlePackage:WaitForChild("Utilities")
+local CameraCache = require(Utilities:WaitForChild("CameraCache"))
+local ObjectDimensions = require(Utilities:WaitForChild("ObjectDimensions"))
 
 local function createMockPart(position: Vector3?, size: Vector3?, anchored: boolean?)
 	local part = Instance.new("Part")
@@ -746,7 +748,6 @@ describe("CullThrottle", function()
 			cullThrottle:SetVoxelSize(newVoxelSize)
 
 			expect(cullThrottle._config.voxelSize).toBe(newVoxelSize)
-			expect(cullThrottle._config._halfVoxelSizeVec).toBe(Vector3.one * 50)
 		end)
 
 		it("should reassign objects to new voxels", function()
@@ -772,6 +773,15 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("should reject a non-positive voxel size", function()
+			expect(function()
+				cullThrottle:SetVoxelSize(0)
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetVoxelSize(-50)
+			end).toThrow()
+		end)
 	end)
 
 	describe("SetRenderDistanceTarget", function()
@@ -783,6 +793,15 @@ describe("CullThrottle", function()
 			expect(cullThrottle._config._renderDistance).toBe(newDistance)
 			expect(cullThrottle._config._minRenderDistance).toBeCloseTo(newDistance / 3)
 			expect(cullThrottle._config._maxRenderDistance).toBe(newDistance * 5)
+		end)
+
+		it("should reject a non-positive render distance", function()
+			expect(function()
+				cullThrottle:SetRenderDistanceTarget(0)
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetRenderDistanceTarget(-100)
+			end).toThrow()
 		end)
 	end)
 
@@ -797,6 +816,28 @@ describe("CullThrottle", function()
 			expect(cullThrottle._config.searchTimeBudget).toBe(searchBudget)
 			expect(cullThrottle._config.ingestTimeBudget).toBe(ingestBudget)
 			expect(cullThrottle._config.updateTimeBudget).toBe(updateBudget)
+		end)
+
+		it("should reject a negative time budget", function()
+			expect(function()
+				cullThrottle:SetTimeBudgets(-0.001, 0.003, 0.004)
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetTimeBudgets(0.002, -0.003, 0.004)
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetTimeBudgets(0.002, 0.003, -0.004)
+			end).toThrow()
+		end)
+
+		it("should allow zero time budgets", function()
+			expect(function()
+				cullThrottle:SetTimeBudgets(0, 0, 0)
+			end).never.toThrow()
+
+			expect(cullThrottle._config.searchTimeBudget).toBe(0)
+			expect(cullThrottle._config.ingestTimeBudget).toBe(0)
+			expect(cullThrottle._config.updateTimeBudget).toBe(0)
 		end)
 	end)
 
@@ -876,6 +917,25 @@ describe("CullThrottle", function()
 
 			cullThrottle:SetDynamicRenderDistance(false)
 			expect(cullThrottle._config.dynamicRenderDistance).toBe(false)
+		end)
+	end)
+
+	describe("getScreenSize", function()
+		it("should return a finite screen size for an object at the camera", function()
+			-- distance == 0 would divide by zero and produce an infinite screen
+			-- size, which feeds -inf into the priority math downstream
+			local screenSize = ObjectDimensions.getScreenSize(0, 4)
+
+			expect(screenSize == math.huge).toBe(false)
+			expect(screenSize ~= screenSize).toBe(false)
+			expect(screenSize > 0).toBe(true)
+		end)
+
+		it("should grow as the object gets closer", function()
+			local near = ObjectDimensions.getScreenSize(10, 4)
+			local far = ObjectDimensions.getScreenSize(100, 4)
+
+			expect(near > far).toBe(true)
 		end)
 	end)
 

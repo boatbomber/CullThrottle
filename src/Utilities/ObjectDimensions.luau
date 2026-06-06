@@ -10,9 +10,14 @@ local CameraCache = require(script.Parent.CameraCache)
 
 local ObjectDimensions = {}
 
+-- An object centered exactly on the camera has distance == 0, which would make
+-- screen size infinite and feed -inf into the priority math. Clamp distance to a
+-- tiny positive minimum; objects this close fill the view and sort first anyway.
+local MIN_SCREEN_SIZE_DISTANCE = 1e-4
+
 function ObjectDimensions.getScreenSize(distance: number, radius: number): number
 	-- Calculate the screen size using the precomputed tan(FoV/2)
-	return (radius / distance) / CameraCache.HalfTanFOV
+	return (radius / math.max(distance, MIN_SCREEN_SIZE_DISTANCE)) / CameraCache.HalfTanFOV
 end
 
 --[[
@@ -83,7 +88,7 @@ function ObjectDimensions.getObjectCFrame(objectData: types.ObjectData): CFrame?
 	elseif sourceType == "Beam" then
 		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
+			warn("[CullThrottle] Cannot determine position of Beam since it does not have attachments")
 			return nil
 		end
 		return attachment0.WorldCFrame:Lerp(attachment1.WorldCFrame, 0.5)
@@ -104,7 +109,7 @@ function ObjectDimensions.getObjectBoundingBox(objectData: types.ObjectData): Ve
 	elseif sourceType == "Beam" then
 		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
+			warn("[CullThrottle] Cannot determine bounding box of Beam since it does not have attachments")
 			return nil
 		end
 
@@ -179,7 +184,7 @@ function ObjectDimensions.connectCFrameChangeEvent(
 		-- Beams are roughly located between their attachments
 		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
-			warn("Cannot determine position of Beam since it does not have attachments")
+			warn("[CullThrottle] Cannot determine position of Beam since it does not have attachments")
 			return connections
 		end
 		table.insert(
@@ -243,7 +248,7 @@ function ObjectDimensions.connectBoundingBoxChangeEvent(
 		-- Beams sized between their attachments with their defined width
 		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
-			warn("Cannot determine bounding box of Beam since it does not have attachments")
+			warn("[CullThrottle] Cannot determine bounding box of Beam since it does not have attachments")
 			return connections
 		end
 
