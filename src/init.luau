@@ -1485,7 +1485,7 @@ function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, compu
 	self._config.computeVisibilityOnlyOnDemand = computeVisibilityOnlyOnDemand
 end
 
-function CullThrottle.SetStrictlyEnforcedWorstRefreshRate(self: CullThrottle, strictlyEnforceWorstRefreshRate: boolean)
+function CullThrottle.SetStrictlyEnforceWorstRefreshRate(self: CullThrottle, strictlyEnforceWorstRefreshRate: boolean)
 	self._config.strictlyEnforceWorstRefreshRate = strictlyEnforceWorstRefreshRate
 end
 
