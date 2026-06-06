@@ -271,6 +271,48 @@ If enabled, CullThrottle will automatically adjust the render distance to mainta
 
 It is _highly recommended_ to leave dynamic render distance enabled unless you have a specific reason to disable it. It will get you the best performance and quality within your time budget, and most importantly it will result in more consistent and correct visibilities by avoiding going over budget and using the approximate visibilities.
 
+### Reading Configuration & State
+
+Each configuration setter has a matching getter that returns the same value(s) in the same units.
+
+```Luau
+CullThrottle:GetVoxelSize(): number
+CullThrottle:GetRenderDistanceTarget(): number
+CullThrottle:GetTimeBudgets(): (number, number, number) -- search, ingest, update (seconds)
+CullThrottle:GetRefreshRates(): (number, number) -- best, worst (Hz)
+CullThrottle:GetComputeVisibilityOnlyOnDemand(): boolean
+CullThrottle:GetStrictlyEnforceWorstRefreshRate(): boolean
+CullThrottle:GetDynamicRenderDistance(): boolean
+```
+
+`GetRefreshRates` returns rates in Hz, matching what you pass to `SetRefreshRates`.
+
+```Luau
+CullThrottle:GetRenderDistance(): number
+```
+
+Returns the **current, effective** render distance. With dynamic render distance enabled this is the value the controller has settled on, which may differ from the target you set with `SetRenderDistanceTarget` (use `GetRenderDistanceTarget` to read that back).
+
+```Luau
+CullThrottle:IsTracking(object: Instance): boolean
+CullThrottle:GetTrackedObjects(): { Instance }
+CullThrottle:GetTrackedObjectCount(): number
+```
+
+`IsTracking` reports whether a specific instance is currently tracked. `GetTrackedObjects` returns a fresh array of every tracked instance (safe to iterate or mutate, since it is a snapshot, not the internal store). `GetTrackedObjectCount` returns how many objects are tracked without allocating.
+
+```Luau
+CullThrottle:GetPerformanceMetrics(): {
+    searchDuration: number, -- seconds, last frame
+    ingestDuration: number, -- seconds, last frame
+    skippedSearch: number, -- voxels the search budget skipped last frame
+    skippedIngest: number, -- voxels the ingest budget skipped last frame
+    averageObjectDeltaTime: number, -- seconds (invert for an average refresh rate in Hz)
+}
+```
+
+Returns a read-only snapshot of the latest performance metrics. Useful for graphing or tuning your time budgets.
+
 ## Roadmap
 
 - Parallel computation of visible voxels. I built the search algorithm with this future optimization in mind, so it should be relatively straightforward.

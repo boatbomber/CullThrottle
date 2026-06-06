@@ -877,6 +877,206 @@ describe("CullThrottle", function()
 		end)
 	end)
 
+	describe("Configuration getters", function()
+		it("should read back the voxel size", function()
+			cullThrottle:SetVoxelSize(50)
+			expect(cullThrottle:GetVoxelSize()).toBe(50)
+		end)
+
+		it("should read back the render distance target", function()
+			cullThrottle:SetRenderDistanceTarget(500)
+			expect(cullThrottle:GetRenderDistanceTarget()).toBe(500)
+		end)
+
+		it("should read back the time budgets in seconds", function()
+			cullThrottle:SetTimeBudgets(0.002, 0.003, 0.004)
+
+			local search, ingest, update = cullThrottle:GetTimeBudgets()
+			expect(search).toBe(0.002)
+			expect(ingest).toBe(0.003)
+			expect(update).toBe(0.004)
+		end)
+
+		it("should read back the refresh rates in Hz, symmetric with the setter", function()
+			cullThrottle:SetRefreshRates(60, 15)
+
+			local bestHz, worstHz = cullThrottle:GetRefreshRates()
+			expect(bestHz).toBeCloseTo(60)
+			expect(worstHz).toBeCloseTo(15)
+		end)
+
+		it("should read back the boolean flags", function()
+			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
+			cullThrottle:SetDynamicRenderDistance(false)
+
+			expect(cullThrottle:GetComputeVisibilityOnlyOnDemand()).toBe(true)
+			expect(cullThrottle:GetStrictlyEnforceWorstRefreshRate()).toBe(true)
+			expect(cullThrottle:GetDynamicRenderDistance()).toBe(false)
+		end)
+
+		it("should expose the live render distance, distinct from the target", function()
+			cullThrottle:SetRenderDistanceTarget(600)
+			expect(cullThrottle:GetRenderDistance()).toBe(600)
+
+			-- Simulate the dynamic controller having adjusted the effective distance
+			-- down from the target; the getter reports the live value, not the target.
+			cullThrottle._config._renderDistance = 450
+			expect(cullThrottle:GetRenderDistance()).toBe(450)
+			expect(cullThrottle:GetRenderDistanceTarget()).toBe(600)
+		end)
+	end)
+
+	describe("IsTracking", function()
+		it("should report whether an object is tracked", function()
+			local part = createMockPart()
+
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			cullThrottle:AddObject(part)
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+
+			cullThrottle:RemoveObject(part)
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("GetTrackedObjects", function()
+		it("should return every tracked object", function()
+			local a = createMockPart(Vector3.new(0, 0, 0))
+			local b = createMockPart(Vector3.new(500, 0, 0))
+			cullThrottle:AddObject(a)
+			cullThrottle:AddObject(b)
+
+			local tracked = cullThrottle:GetTrackedObjects()
+			expect(#tracked).toBe(2)
+			expect(table.find(tracked, a)).never.toBeNil()
+			expect(table.find(tracked, b)).never.toBeNil()
+
+			a:Destroy()
+			b:Destroy()
+		end)
+
+		it("should return a snapshot that cannot mutate internal state", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			local tracked = cullThrottle:GetTrackedObjects()
+			table.clear(tracked)
+
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("GetTrackedObjectCount", function()
+		it("should track the count across add and remove", function()
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			local a = createMockPart(Vector3.new(0, 0, 0))
+			local b = createMockPart(Vector3.new(500, 0, 0))
+
+			cullThrottle:AddObject(a)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			cullThrottle:AddObject(b)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(2)
+
+			cullThrottle:RemoveObject(a)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			a:Destroy()
+			b:Destroy()
+		end)
+
+		it("should not double-count an idempotent re-add", function()
+			local part = createMockPart()
+
+			cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("should not underflow when removing an untracked object", function()
+			local part = createMockPart()
+
+			cullThrottle:RemoveObject(part)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			part:Destroy()
+		end)
+
+		it("should stay correct through RemoveObjectsWithTag", function()
+			local tag = "TrackedCountTag"
+			local tagged = {}
+			for i = 1, 4 do
+				local part = createMockPart(Vector3.new(i * 10, 0, 0))
+				CollectionService:AddTag(part, tag)
+				cullThrottle:AddObject(part)
+				tagged[i] = part
+			end
+
+			local untagged = createMockPart(Vector3.new(0, 500, 0))
+			cullThrottle:AddObject(untagged)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(5)
+
+			cullThrottle:RemoveObjectsWithTag(tag)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			for _, part in tagged do
+				CollectionService:RemoveTag(part, tag)
+				part:Destroy()
+			end
+			untagged:Destroy()
+		end)
+	end)
+
+	describe("GetPerformanceMetrics", function()
+		it("should return a snapshot with the documented metric fields", function()
+			local metrics = cullThrottle:GetPerformanceMetrics()
+
+			expect(type(metrics.searchDuration)).toBe("number")
+			expect(type(metrics.ingestDuration)).toBe("number")
+			expect(type(metrics.skippedSearch)).toBe("number")
+			expect(type(metrics.skippedIngest)).toBe("number")
+			expect(type(metrics.averageObjectDeltaTime)).toBe("number")
+		end)
+
+		it("should reflect the latest internal metrics", function()
+			cullThrottle._perfMetrics._searchDuration = 0.00123
+			cullThrottle._perfMetrics._ingestDuration = 0.00456
+			cullThrottle._perfMetrics._skippedSearch[1] = 7
+			cullThrottle._perfMetrics._skippedIngest[1] = 9
+			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.025
+
+			local metrics = cullThrottle:GetPerformanceMetrics()
+			expect(metrics.searchDuration).toBe(0.00123)
+			expect(metrics.ingestDuration).toBe(0.00456)
+			expect(metrics.skippedSearch).toBe(7)
+			expect(metrics.skippedIngest).toBe(9)
+			expect(metrics.averageObjectDeltaTime).toBe(0.025)
+		end)
+
+		it("should return a fresh snapshot that cannot corrupt internal metrics", function()
+			local metrics = cullThrottle:GetPerformanceMetrics()
+			metrics.searchDuration = 999
+			metrics.skippedSearch = 999
+
+			expect(cullThrottle._perfMetrics._searchDuration).never.toBe(999)
+			expect(cullThrottle._perfMetrics._skippedSearch[1]).never.toBe(999)
+		end)
+	end)
+
 	describe("GetVisibleObjects", function()
 		it("should return empty array when no objects are visible", function()
 			local visibleObjects = cullThrottle:GetVisibleObjects()

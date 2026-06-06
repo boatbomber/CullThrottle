@@ -45,7 +45,7 @@ end
 function Utility.applyHeatmapColor(object: Instance, alpha: number)
 	local color = Utility.getHeatmapColor(alpha)
 	if object:IsA("BasePart") then
-		object.Color = object.Color:Lerp(color, 0.2)
+		object.Color = object.Color:Lerp(color, 0.1)
 	elseif object:IsA("TextLabel") then
 		object.TextColor3 = color
 	elseif object:IsA("GuiObject") then

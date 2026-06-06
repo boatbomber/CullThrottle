@@ -1,4 +1,4 @@
-math.randomseed(0) -- Constant seed for reproducibility
+math.randomseed(1) -- Constant seed for reproducibility
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -11,9 +11,9 @@ local CameraCache = require(Packages:WaitForChild("CullThrottle").Utilities.Came
 
 local Blocks = require(script.Blocks)
 local MetricGraph = require(script.MetricGraph)
+local Utility = require(script.Utility)
 
-local VISIBLE_COLOR = Color3.fromRGB(225, 75, 183)
-local INVISIBLE_COLOR = Color3.fromRGB(16, 27, 35)
+local INVISIBLE_COLOR = Color3.fromRGB(77, 127, 182)
 local TAG = "FloatingBlock"
 
 -- Let's make some blocks to run effects on
@@ -22,7 +22,7 @@ BlocksFolder.Name = "Blocks"
 
 local blockMetadata = {}
 
-for _, block in Blocks.generateBlockClusters(60, 200) do
+for _, block in Blocks.generateBlockClusters(200, 150) do
 	block:AddTag(TAG)
 	block.Color = INVISIBLE_COLOR
 	block.Parent = BlocksFolder
@@ -39,10 +39,12 @@ BlocksFolder.Parent = workspace
 local FloatingBlocksUpdater = CullThrottle.new()
 FloatingBlocksUpdater:CaptureTag(TAG)
 
+local bestRefreshHz, worstRefreshHz = FloatingBlocksUpdater:GetRefreshRates()
+
 -- Change colors of blocks to indicate visibility
-FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
-	block.Color = VISIBLE_COLOR
-end)
+-- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
+-- 	block.Color = VISIBLE_COLOR
+-- end)
 
 FloatingBlocksUpdater.ObjectExitedView:Connect(function(block)
 	block.Color = INVISIBLE_COLOR
@@ -51,15 +53,18 @@ end)
 local updateDuration = 0
 local objectDeltas = {}
 
-local blocks, cframes = {}, {}
+local blocks, cframes, alphas = {}, {}, {}
 RunService.PreAnimation:Connect(function()
 	table.clear(blocks)
 	table.clear(cframes)
-
+	table.clear(alphas)
 	table.clear(objectDeltas) -- For the debug graphs
 
 	local now = os.clock()
 	for block, dt in FloatingBlocksUpdater:IterateObjectsToUpdate() do
+		local alpha = math.clamp(math.map(dt, 1 / bestRefreshHz, 1 / worstRefreshHz, 1, 0), 0, 1)
+		table.insert(alphas, alpha)
+
 		table.insert(objectDeltas, dt)
 		dt = math.min(dt, 1 / 15) * 3
 
@@ -78,6 +83,9 @@ RunService.PreAnimation:Connect(function()
 	updateDuration = os.clock() - now
 
 	workspace:BulkMoveTo(blocks, cframes, Enum.BulkMoveMode.FireCFrameChanged)
+	for i, block in blocks do
+		task.defer(Utility.applyHeatmapColor, block, alphas[i])
+	end
 end)
 
 ----------------------------------------------------------------------------------
@@ -131,27 +139,13 @@ BottomRightGraphs.Parent = ScreenGui
 local BottomRightListLayout = TopLeftListLayout:Clone()
 BottomRightListLayout.Parent = BottomRightGraphs
 
-local searchDurationGraph = MetricGraph.new(
-	"Search Duration",
-	table.create(50, 0),
-	0,
-	FloatingBlocksUpdater._config.searchTimeBudget * 1e6 * 1.25,
-	"%dμs"
-)
-local ingestDurationGraph = MetricGraph.new(
-	"Ingest Duration",
-	table.create(50, 0),
-	0,
-	FloatingBlocksUpdater._config.ingestTimeBudget * 1e6 * 1.25,
-	"%dμs"
-)
-local updateDurationGraph = MetricGraph.new(
-	"Update Duration",
-	table.create(50, 0),
-	0,
-	FloatingBlocksUpdater._config.updateTimeBudget * 1e6 * 1.25,
-	"%dμs"
-)
+local searchTimeBudget, ingestTimeBudget, updateTimeBudget = FloatingBlocksUpdater:GetTimeBudgets()
+local searchDurationGraph =
+	MetricGraph.new("Search Duration", table.create(50, 0), 0, searchTimeBudget * 1e6 * 1.25, "%dμs")
+local ingestDurationGraph =
+	MetricGraph.new("Ingest Duration", table.create(50, 0), 0, ingestTimeBudget * 1e6 * 1.25, "%dμs")
+local updateDurationGraph =
+	MetricGraph.new("Update Duration", table.create(50, 0), 0, updateTimeBudget * 1e6 * 1.25, "%dμs")
 
 searchDurationGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
 ingestDurationGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
@@ -162,13 +156,9 @@ updateDurationGraph.Frame.Parent = TopLeftGraphs
 
 local skippedSearchGraph = MetricGraph.new("Skipped Search", table.create(50, 0), 0, 90, "%d")
 local skippedIngestGraph = MetricGraph.new("Skipped Ingest", table.create(50, 0), 0, 50, "%d")
-local renderDistanceGraph = MetricGraph.new(
-	"Render Distance",
-	table.create(50, 0),
-	FloatingBlocksUpdater._config._minRenderDistance,
-	FloatingBlocksUpdater._config._maxRenderDistance,
-	"%d"
-)
+local renderDistanceTarget = FloatingBlocksUpdater:GetRenderDistanceTarget()
+local renderDistanceGraph =
+	MetricGraph.new("Render Distance", table.create(50, 0), renderDistanceTarget / 3, renderDistanceTarget * 5, "%d")
 
 skippedSearchGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
 skippedIngestGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
@@ -186,27 +176,12 @@ objectsVisibleGraph.Frame.Parent = BottomLeftGraphs
 objectsUpdatedGraph.Frame.Parent = BottomLeftGraphs
 
 local gameRefreshRateGraph = MetricGraph.new("Game Refresh Rate", table.create(50, 0), 0, 144, "%dHz")
-local p05ObjectRefreshRateGraph = MetricGraph.new(
-	"p05 Obj Refresh",
-	table.create(50, 0),
-	1 / FloatingBlocksUpdater._config.worstRefreshRate,
-	1 / FloatingBlocksUpdater._config.bestRefreshRate,
-	"%dHz"
-)
-local avgObjectRefreshRateGraph = MetricGraph.new(
-	"Avg Obj Refresh",
-	table.create(50, 0),
-	1 / FloatingBlocksUpdater._config.worstRefreshRate,
-	1 / FloatingBlocksUpdater._config.bestRefreshRate,
-	"%dHz"
-)
-local p95ObjectRefreshRateGraph = MetricGraph.new(
-	"p95 Obj Refresh",
-	table.create(50, 0),
-	1 / FloatingBlocksUpdater._config.worstRefreshRate,
-	1 / FloatingBlocksUpdater._config.bestRefreshRate,
-	"%dHz"
-)
+local p05ObjectRefreshRateGraph =
+	MetricGraph.new("p05 Obj Refresh", table.create(50, 0), worstRefreshHz, bestRefreshHz, "%dHz")
+local avgObjectRefreshRateGraph =
+	MetricGraph.new("Avg Obj Refresh", table.create(50, 0), worstRefreshHz, bestRefreshHz, "%dHz")
+local p95ObjectRefreshRateGraph =
+	MetricGraph.new("p95 Obj Refresh", table.create(50, 0), worstRefreshHz, bestRefreshHz, "%dHz")
 
 gameRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
 p05ObjectRefreshRateGraph.Frame.Size = UDim2.fromScale(1, 1 / 4)
@@ -244,19 +219,28 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	local visibleObjectCount = #FloatingBlocksUpdater:GetVisibleObjects()
 	local updatedObjectCount = #objectDeltas
 
-	searchDurationGraph:measure(FloatingBlocksUpdater._perfMetrics._searchDuration * 1e6)
-	ingestDurationGraph:measure(FloatingBlocksUpdater._perfMetrics._ingestDuration * 1e6)
+	local perfMetrics = FloatingBlocksUpdater:GetPerformanceMetrics()
+	local renderDistance = FloatingBlocksUpdater:GetRenderDistance()
+	searchDurationGraph:measure(perfMetrics.searchDuration * 1e6)
+	ingestDurationGraph:measure(perfMetrics.ingestDuration * 1e6)
 	updateDurationGraph:measure(updateDuration * 1e6)
-	skippedSearchGraph:measure(FloatingBlocksUpdater._perfMetrics._skippedSearch[1])
-	skippedIngestGraph:measure(FloatingBlocksUpdater._perfMetrics._skippedIngest[1])
-	renderDistanceGraph:measure(FloatingBlocksUpdater._config._renderDistance)
+	skippedSearchGraph:measure(perfMetrics.skippedSearch)
+	skippedIngestGraph:measure(perfMetrics.skippedIngest)
+	renderDistanceGraph:measure(renderDistance)
 	objectsVisibleGraph:measure(visibleObjectCount)
 	objectsUpdatedGraph.Max = math.max(table.unpack(objectsVisibleGraph._data))
 	objectsUpdatedGraph:measure(updatedObjectCount)
 	p05ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.05)] or math.huge))
-	avgObjectRefreshRateGraph:measure(1 / FloatingBlocksUpdater._perfMetrics._averageObjectDeltaTime)
+	avgObjectRefreshRateGraph:measure(1 / perfMetrics.averageObjectDeltaTime)
 	p95ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.95)] or math.huge))
 	gameRefreshRateGraph:measure(1 / gameDelta)
+
+	-- Adjust fog to visualize render distance
+	-- (Not when VISUALIZE is true because then we need to see the entire scene)
+	if not _G.__VISUALIZE__ then
+		game:GetService("Lighting").FogEnd = renderDistance * 2
+		game:GetService("Lighting").FogStart = renderDistance
+	end
 end)
 
 -- Use a fake camera to get a third person view

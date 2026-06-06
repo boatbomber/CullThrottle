@@ -74,6 +74,7 @@ type CullThrottleProto = {
 	_config: Config.Config,
 	_voxels: { [types.VoxelKey]: types.Voxel },
 	_objects: { [Instance]: types.ObjectData },
+	_objectCount: number,
 	_physicsObjects: { Instance },
 	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue,
 	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
@@ -1188,6 +1189,7 @@ function CullThrottle.new(): CullThrottle
 
 	self._voxels = {}
 	self._objects = {}
+	self._objectCount = 0
 	self._physicsObjects = {}
 	self._physicsObjectIterIndex = 1
 	self._updateObjectVoxelsQueue = PriorityQueue.new()
@@ -1258,6 +1260,7 @@ function CullThrottle.Destroy(self: CullThrottle)
 	-- Clear out all tracked state so it can be garbage collected
 	tableClear(self._voxels)
 	tableClear(self._objects)
+	self._objectCount = 0
 	tableClear(self._physicsObjects)
 	tableClear(self._objectVisibilityTimestamps)
 	tableClear(self._lastVoxelVisibility)
@@ -1346,6 +1349,9 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	self:_updateDesiredVoxelKeys(object, objectData)
 
 	self._objects[object] = objectData
+	-- Only reached for genuinely new objects; the early-return above makes
+	-- AddObject idempotent, so a repeat add can't double-count.
+	self._objectCount += 1
 
 	for voxelKey, desired in objectData.desiredVoxelKeys do
 		if desired then
@@ -1381,6 +1387,8 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 	end
 
 	self._objects[object] = nil
+	-- Guarded by the early-return above, so an untracked remove can't underflow.
+	self._objectCount -= 1
 
 	-- Drop the visibility timestamp so the next _signalVisibilityChanges pass
 	-- doesn't fire a spurious ObjectExitedView for an object we've already removed
@@ -1615,6 +1623,88 @@ end
 
 function CullThrottle.SetDynamicRenderDistance(self: CullThrottle, dynamicRenderDistance: boolean)
 	self._config.dynamicRenderDistance = dynamicRenderDistance
+end
+
+function CullThrottle.GetVoxelSize(self: CullThrottle): number
+	return self._config.voxelSize
+end
+
+function CullThrottle.GetRenderDistanceTarget(self: CullThrottle): number
+	return self._config.renderDistanceTarget
+end
+
+function CullThrottle.GetRenderDistance(self: CullThrottle): number
+	-- The live, effective render distance. With dynamic render distance enabled
+	-- this is the value the controller has settled on and may differ from the
+	-- configured target (see GetRenderDistanceTarget).
+	return self._config._renderDistance
+end
+
+function CullThrottle.GetTimeBudgets(self: CullThrottle): (number, number, number)
+	-- Mirrors SetTimeBudgets: search, ingest, update, all in seconds.
+	local config = self._config
+	return config.searchTimeBudget, config.ingestTimeBudget, config.updateTimeBudget
+end
+
+function CullThrottle.GetRefreshRates(self: CullThrottle): (number, number)
+	-- Mirrors SetRefreshRates, returning rates in Hz. The config stores them as
+	-- seconds-between-refreshes periods, so we invert back to Hz here rather than
+	-- leaking the internal unit (keeps the Hz-only contract symmetric).
+	local config = self._config
+	return 1 / config.bestRefreshRate, 1 / config.worstRefreshRate
+end
+
+function CullThrottle.GetComputeVisibilityOnlyOnDemand(self: CullThrottle): boolean
+	return self._config.computeVisibilityOnlyOnDemand
+end
+
+function CullThrottle.GetStrictlyEnforceWorstRefreshRate(self: CullThrottle): boolean
+	return self._config.strictlyEnforceWorstRefreshRate
+end
+
+function CullThrottle.GetDynamicRenderDistance(self: CullThrottle): boolean
+	return self._config.dynamicRenderDistance
+end
+
+function CullThrottle.IsTracking(self: CullThrottle, object: Instance): boolean
+	return self._objects[object] ~= nil
+end
+
+function CullThrottle.GetTrackedObjects(self: CullThrottle): { Instance }
+	-- Fresh array snapshot so callers can iterate/mutate it freely without
+	-- touching CullThrottle's internal state.
+	local objects = tableCreate(self._objectCount)
+	local count = 0
+	for object in self._objects do
+		count += 1
+		objects[count] = object
+	end
+	return objects
+end
+
+function CullThrottle.GetTrackedObjectCount(self: CullThrottle): number
+	return self._objectCount
+end
+
+function CullThrottle.GetPerformanceMetrics(self: CullThrottle): {
+	searchDuration: number,
+	ingestDuration: number,
+	skippedSearch: number,
+	skippedIngest: number,
+	averageObjectDeltaTime: number,
+}
+	-- Read-only snapshot of the latest perf metrics with public field names, so
+	-- callers never get a reference to the internal _perfMetrics table. Durations
+	-- and averageObjectDeltaTime are in seconds; the skipped counts are the most
+	-- recent frame's tallies.
+	local perfMetrics = self._perfMetrics
+	return {
+		searchDuration = perfMetrics._searchDuration,
+		ingestDuration = perfMetrics._ingestDuration,
+		skippedSearch = perfMetrics._skippedSearch[1],
+		skippedIngest = perfMetrics._skippedIngest[1],
+		averageObjectDeltaTime = perfMetrics._averageObjectDeltaTime,
+	}
 end
 
 return CullThrottle
