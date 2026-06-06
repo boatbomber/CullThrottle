@@ -89,6 +89,12 @@ type CullThrottleProto = {
 	_volumesToCheckSize: number,
 	_volumeRotationCounter: number,
 
+	-- Visibility signals are deferred so a handler can't mutate while we're still iterating
+	_pendingEnteredView: { Instance },
+	_pendingEnteredViewSize: number,
+	_pendingExitedView: { Instance },
+	_pendingExitedViewSize: number,
+
 	_perfMetrics: {
 		_skippedSearch: { number },
 		_skippedIngest: { number },
@@ -141,6 +147,9 @@ function CullThrottle._resizeTables(self: CullThrottle)
 	local volumesToCheck = tableCreate(volumesSize)
 	tableMove(self._volumesToCheck, 1, volumesSize, 1, volumesToCheck)
 	self._volumesToCheck = volumesToCheck
+
+	self._pendingEnteredView = tableCreate(self._pendingEnteredViewSize)
+	self._pendingExitedView = tableCreate(self._pendingExitedViewSize)
 end
 
 function CullThrottle._addVoxelKeyToVisible(self: CullThrottle, voxelKey: types.VoxelKey)
@@ -517,6 +526,8 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local visibleObjectsQueue = self._visibleObjectsQueue
 	local objects = self._objects
+	local pendingEnteredView = self._pendingEnteredView
+	local pendingEnteredViewSize = self._pendingEnteredViewSize
 
 	for _, object in voxel do
 		local objectData = objects[object]
@@ -568,10 +579,13 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 
 		if objectVisibilityTimestamps[object] == nil then
 			-- This object wasn't visible last frame but it is now
-			self.ObjectEnteredView:Fire(object)
+			pendingEnteredViewSize += 1
+			pendingEnteredView[pendingEnteredViewSize] = object
 		end
 		objectVisibilityTimestamps[object] = now
 	end
+
+	self._pendingEnteredViewSize = pendingEnteredViewSize
 
 	debug.profileend()
 end
@@ -582,6 +596,8 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local objects = self._objects
 	local visibleObjectsQueue = self._visibleObjectsQueue
+	local pendingEnteredView = self._pendingEnteredView
+	local pendingEnteredViewSize = self._pendingEnteredViewSize
 
 	for voxelIndex = startIndex, #visibleVoxelKeys do
 		-- Just dump all the objects into the visible objects list,
@@ -611,11 +627,14 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 
 			if objectVisibilityTimestamps[object] == nil then
 				-- This object wasn't visible last frame but it is now
-				self.ObjectEnteredView:Fire(object)
+				pendingEnteredViewSize += 1
+				pendingEnteredView[pendingEnteredViewSize] = object
 			end
 			objectVisibilityTimestamps[object] = now
 		end
 	end
+
+	self._pendingEnteredViewSize = pendingEnteredViewSize
 
 	self._perfMetrics._skippedIngest[1] = 1 + #visibleVoxelKeys - startIndex
 end
@@ -890,13 +909,50 @@ end
 function CullThrottle._signalVisibilityChanges(self: CullThrottle, now: number)
 	debug.profilebegin("signalVisibilityChanges")
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
+	local pendingExitedView = self._pendingExitedView
+	local pendingExitedViewSize = self._pendingExitedViewSize
 
 	for object, lastSeen in objectVisibilityTimestamps do
 		if lastSeen ~= now then
 			-- Object was visible last frame but not this frame
 			objectVisibilityTimestamps[object] = nil
-			self.ObjectExitedView:Fire(object)
+			pendingExitedViewSize += 1
+			pendingExitedView[pendingExitedViewSize] = object
 		end
+	end
+
+	self._pendingExitedViewSize = pendingExitedViewSize
+
+	debug.profileend()
+end
+
+function CullThrottle._flushVisibilitySignals(self: CullThrottle)
+	-- Fire the visibility signals buffered during this frame's search/ingest.
+	-- By the time we get here all of CullThrottle's own iteration over _voxels,
+	-- _objects, and _objectVisibilityTimestamps is finished, so a handler is now
+	-- free to mutate the tracked set (AddObject/RemoveObject) without corrupting
+	-- an in-progress loop. We null out each slot as we go so a removed/destroyed
+	-- instance isn't pinned in the buffer until the next frame overwrites it.
+	debug.profilebegin("flushVisibilitySignals")
+
+	local enteredView = self.ObjectEnteredView
+	local pendingEnteredView = self._pendingEnteredView
+	local enteredCount = self._pendingEnteredViewSize
+	self._pendingEnteredViewSize = 0
+	for i = 1, enteredCount do
+		local object = pendingEnteredView[i]
+		pendingEnteredView[i] = nil
+		enteredView:Fire(object)
+	end
+
+	local exitedView = self.ObjectExitedView
+	local pendingExitedView = self._pendingExitedView
+	local exitedCount = self._pendingExitedViewSize
+	self._pendingExitedViewSize = 0
+	for i = 1, exitedCount do
+		local object = pendingExitedView[i]
+		pendingExitedView[i] = nil
+		exitedView:Fire(object)
 	end
 
 	debug.profileend()
@@ -1089,7 +1145,15 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 	-- Adjust dynamic render distance to hit the budgets
 	self:_adjustDynamicRenderDistance()
 
+	-- Mark the frame done before flushing so a signal handler that re-enters
+	-- (e.g. calls GetVisibleObjects/IterateObjectsToUpdate) short-circuits
+	-- instead of recomputing visibility from inside the flush.
 	self._processedVisibilityThisFrame = true
+
+	-- All of our own iteration is finished, so it's now safe to fire the
+	-- visibility signals we buffered during the search/ingest pass.
+	self:_flushVisibilitySignals()
+
 	debug.profileend()
 end
 
@@ -1136,6 +1200,10 @@ function CullThrottle.new(): CullThrottle
 	self._volumesToCheck = tableCreate(48)
 	self._volumesToCheckSize = 0
 	self._volumeRotationCounter = 1
+	self._pendingEnteredView = {}
+	self._pendingEnteredViewSize = 0
+	self._pendingExitedView = {}
+	self._pendingExitedViewSize = 0
 	self._tagConnections = {}
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self._processedVisibilityThisFrame = false
@@ -1196,6 +1264,10 @@ function CullThrottle.Destroy(self: CullThrottle)
 	tableClear(self._visibleVoxelKeys)
 	tableClear(self._volumesToCheck)
 	self._volumesToCheckSize = 0
+	tableClear(self._pendingEnteredView)
+	self._pendingEnteredViewSize = 0
+	tableClear(self._pendingExitedView)
+	self._pendingExitedViewSize = 0
 	self._updateObjectVoxelsQueue:clearIncomingBatch()
 	self._updateObjectVoxelsQueue:clear()
 	self._visibleObjectsQueue:clearIncomingBatch()
@@ -1387,10 +1459,20 @@ function CullThrottle.ReleaseTag(self: CullThrottle, tag: string)
 end
 
 function CullThrottle.RemoveObjectsWithTag(self: CullThrottle, tag: string)
+	-- Snapshot the matching objects before removing any. RemoveObject mutates
+	-- _objects (and fires ObjectRemoved, whose handler may mutate it further),
+	-- so iterating _objects directly while removing would be undefined.
+	local toRemove = {}
+	local count = 0
 	for object in self._objects do
 		if object:HasTag(tag) then
-			self:RemoveObject(object)
+			count += 1
+			toRemove[count] = object
 		end
+	end
+
+	for i = 1, count do
+		self:RemoveObject(toRemove[i])
 	end
 end
 

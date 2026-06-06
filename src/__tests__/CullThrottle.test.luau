@@ -499,6 +499,7 @@ describe("CullThrottle", function()
 			end)
 
 			cullThrottle:_signalVisibilityChanges(now + 1)
+			cullThrottle:_flushVisibilitySignals()
 			expect(exited).toBe(false)
 
 			connection:Disconnect()
@@ -691,6 +692,49 @@ describe("CullThrottle", function()
 			part1:Destroy()
 			part2:Destroy()
 			part3:Destroy()
+		end)
+
+		it("should snapshot before removing so an ObjectRemoved handler may mutate _objects", function()
+			-- RemoveObjectsWithTag must not iterate _objects live while removing,
+			-- because RemoveObject fires ObjectRemoved and a handler may add or
+			-- remove tracked objects. Snapshotting the matches first makes that
+			-- mid-removal mutation safe.
+			local tag = "ReentrancyTag"
+			local tagged = {}
+			for i = 1, 5 do
+				local part = createMockPart(Vector3.new(i * 10, 0, 0))
+				CollectionService:AddTag(part, tag)
+				cullThrottle:AddObject(part)
+				tagged[i] = part
+			end
+
+			-- An untagged object the handler adds partway through the removal.
+			local extra = createMockPart(Vector3.new(0, 500, 0))
+
+			local connection = cullThrottle.ObjectRemoved:Connect(function()
+				if not cullThrottle._objects[extra] then
+					cullThrottle:AddObject(extra)
+				end
+			end)
+
+			expect(function()
+				cullThrottle:RemoveObjectsWithTag(tag)
+			end).never.toThrow()
+
+			-- Every tagged object was removed despite the mid-loop insertion...
+			for _, part in tagged do
+				expect(cullThrottle._objects[part]).toBeNil()
+			end
+			-- ...and the object added by the handler survived (it isn't tagged, so
+			-- the pre-removal snapshot never included it).
+			expect(cullThrottle._objects[extra]).toBeDefined()
+
+			connection:Disconnect()
+			for _, part in tagged do
+				CollectionService:RemoveTag(part, tag)
+				part:Destroy()
+			end
+			extra:Destroy()
 		end)
 	end)
 
@@ -1089,6 +1133,12 @@ describe("CullThrottle", function()
 			cullThrottle._objectVisibilityTimestamps[part] = nil
 			cullThrottle:_ingestVoxel(os.clock(), { part })
 
+			-- The signal is buffered during ingest and fired only on flush, so a
+			-- handler can't mutate the tracked set mid-iteration.
+			expect(fired).toBe(false)
+
+			cullThrottle:_flushVisibilitySignals()
+
 			expect(fired).toBe(true)
 			expect(firedObject).toBe(part)
 
@@ -1113,11 +1163,94 @@ describe("CullThrottle", function()
 
 			cullThrottle:_signalVisibilityChanges(now)
 
+			-- Buffered during the visibility pass, fired only on flush.
+			expect(fired).toBe(false)
+
+			cullThrottle:_flushVisibilitySignals()
+
 			expect(fired).toBe(true)
 			expect(firedObject).toBe(part)
 
 			connection:Disconnect()
 			part:Destroy()
+		end)
+
+		it("should let an entered-view handler remove another object without skipping it", function()
+			-- Two objects sharing a voxel. The handler removes the other object
+			-- the moment one enters view. Because the entered-view signals are
+			-- buffered and fired only after _ingestVoxel finishes iterating the
+			-- voxel, both still get their event; firing synchronously mid-ingest
+			-- would have mutated the voxel array and skipped the second object.
+			local part1 = createMockPart(Vector3.new(0, 0, 0))
+			local part2 = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part1)
+			cullThrottle:AddObject(part2)
+
+			local voxelKey = next(cullThrottle._objects[part1].voxelKeys)
+			local voxel = cullThrottle._voxels[voxelKey]
+			expect(#voxel).toBe(2)
+
+			local entered = {}
+			local connection = cullThrottle.ObjectEnteredView:Connect(function(obj)
+				entered[obj] = true
+				if obj == part1 then
+					cullThrottle:RemoveObject(part2)
+				elseif obj == part2 then
+					cullThrottle:RemoveObject(part1)
+				end
+			end)
+
+			cullThrottle._objectVisibilityTimestamps[part1] = nil
+			cullThrottle._objectVisibilityTimestamps[part2] = nil
+
+			expect(function()
+				cullThrottle:_ingestVoxel(os.clock(), voxel)
+				cullThrottle:_flushVisibilitySignals()
+			end).never.toThrow()
+
+			expect(entered[part1]).toBe(true)
+			expect(entered[part2]).toBe(true)
+
+			connection:Disconnect()
+			part1:Destroy()
+			part2:Destroy()
+		end)
+
+		it("should let an exited-view handler remove another object without corrupting iteration", function()
+			-- Both objects were visible last frame and neither is this frame, so
+			-- both exit. The handler removes the other object mid-dispatch, which
+			-- mutates _objectVisibilityTimestamps. Deferring the fire to after
+			-- _signalVisibilityChanges finishes iterating that table makes it safe.
+			local part1 = createMockPart(Vector3.new(0, 0, 0))
+			local part2 = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part1)
+			cullThrottle:AddObject(part2)
+
+			local now = os.clock()
+			cullThrottle._objectVisibilityTimestamps[part1] = now - 1
+			cullThrottle._objectVisibilityTimestamps[part2] = now - 1
+
+			local exited = {}
+			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
+				exited[obj] = true
+				if obj == part1 then
+					cullThrottle:RemoveObject(part2)
+				elseif obj == part2 then
+					cullThrottle:RemoveObject(part1)
+				end
+			end)
+
+			expect(function()
+				cullThrottle:_signalVisibilityChanges(now)
+				cullThrottle:_flushVisibilitySignals()
+			end).never.toThrow()
+
+			expect(exited[part1]).toBe(true)
+			expect(exited[part2]).toBe(true)
+
+			connection:Disconnect()
+			part1:Destroy()
+			part2:Destroy()
 		end)
 	end)
 
