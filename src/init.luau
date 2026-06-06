@@ -625,9 +625,8 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 		local objectPriority = 0
 
 		if jitteredElapsed <= bestRefreshRate then
-			-- No need to refresh faster than our best rate
-			-- so make this super low priority
-			objectPriority = (1 - screenSize) * OVER_REFRESH_PRIORITY_SCALE
+			-- This was refreshed within the best rate, so push it far down the queue.
+			objectPriority = P0_THRESHOLD + (1 - math.min(screenSize, 1)) * OVER_REFRESH_PRIORITY_SCALE
 		elseif jitteredElapsed >= worstRefreshRate then
 			-- To maintain the worst refresh rate, make this p0 priority
 			-- Sort these p0s by screen size

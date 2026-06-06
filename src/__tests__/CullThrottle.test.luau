@@ -1599,6 +1599,32 @@ describe("CullThrottle", function()
 			part:Destroy()
 		end)
 
+		it("keeps over-refreshed large objects from stealing p0 priority", function()
+			-- A large radius relative to distance gives a screen size above 1,
+			-- which would drive (1 - screenSize) negative and pull this just
+			-- updated object below the p0 threshold and ahead of overdue ones.
+			-- elapsed 0 selects the over-refresh branch.
+			local overRefreshed = stageObject(10, 50, 0)
+			-- A small, distant object that is genuinely overdue (elapsed far past
+			-- the worst refresh rate) sits in the p0 band.
+			local overdue = stageObject(300, 0.5, 100)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { overRefreshed, overdue })
+
+			local pOverRefreshed = incomingPriority(overRefreshed) :: number
+			local pOverdue = incomingPriority(overdue) :: number
+
+			-- The over-refreshed object stays at or above the p0 threshold (0.90),
+			-- so the update loop never grants it the extended p0 budget.
+			expect(pOverRefreshed >= 0.9).toBe(true)
+			-- The genuinely overdue object still sorts first (lower value dequeues first).
+			expect(pOverdue < pOverRefreshed).toBe(true)
+
+			overRefreshed:Destroy()
+			overdue:Destroy()
+		end)
+
 		it("gives overdue objects p0 priority sorted by screen size", function()
 			-- elapsed far past worstRefreshRate puts both in the p0 band.
 			local smallPart = stageObject(100, 0.5, 100)
