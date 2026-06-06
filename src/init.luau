@@ -1083,8 +1083,10 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 		-- LIFO, so move the chosen octant's 6 numbers into the top block (8).
 		local firstVolumeIndex = self._volumeRotationCounter % 8 + 1
 		if firstVolumeIndex == 8 then
-			-- It's already on top, no need to swap. Just reset the counter.
-			self._volumeRotationCounter = 1
+			-- Octant 8 is already on top, so no swap is needed. Reset the counter
+			-- to 0 so the next frame selects octant 1 and the full 1..8 rotation
+			-- continues.
+			self._volumeRotationCounter = 0
 		else
 			local chosenBase = (firstVolumeIndex - 1) * 6
 			local topBase = 7 * 6
@@ -1286,7 +1288,7 @@ function CullThrottle.new(): CullThrottle
 	self._processedVisibilityThisFrame = false
 	self._volumesToCheck = tableCreate(48)
 	self._volumesToCheckSize = 0
-	self._volumeRotationCounter = 1
+	self._volumeRotationCounter = 0
 	self._pendingEnteredView = {}
 	self._pendingEnteredViewSize = 0
 	self._pendingExitedView = {}

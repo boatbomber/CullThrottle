@@ -1927,6 +1927,42 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("rotates the first-searched octant so each of the eight gets a turn", function()
+			-- The frustum bounding box is split into eight octants every frame, and
+			-- _volumeRotationCounter chooses which one is moved to the top of the
+			-- LIFO stack so it is searched first. A small voxel size keeps the eight
+			-- octants distinct, and a zero search budget bails right after the first
+			-- octant is searched, so the first _searchVolume call each frame is the
+			-- chosen octant.
+			cullThrottle._config.voxelSize = 50
+			cullThrottle._config.searchTimeBudget = 0
+
+			local realSearchVolume = cullThrottle._searchVolume
+			local firstOrigin = nil
+			cullThrottle._searchVolume = function(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1)
+				if firstOrigin == nil then
+					firstOrigin = Vector3.new(x0, y0, z0)
+				end
+				return realSearchVolume(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1)
+			end
+
+			-- Eight frames is one full rotation through the eight octants.
+			local distinctOrigins = {}
+			local distinctCount = 0
+			for _ = 1, 8 do
+				firstOrigin = nil
+				cullThrottle:_findVisibleObjects(os.clock())
+				expect(firstOrigin).never.toBeNil()
+				if not distinctOrigins[firstOrigin] then
+					distinctOrigins[firstOrigin] = true
+					distinctCount += 1
+				end
+			end
+
+			-- Every octant, including octant 1, was searched first exactly once.
+			expect(distinctCount).toBe(8)
+		end)
 	end)
 
 	describe("Visible voxel ordering", function()
