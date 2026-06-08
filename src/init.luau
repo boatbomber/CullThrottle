@@ -255,6 +255,36 @@ function CullThrottle._sortVisibleVoxelKeys(self: CullThrottle)
 	end
 end
 
+-- Clip a z-row's [lo, hi] span (measured in voxel steps from the row's first
+-- voxel) to where the voxel center stays within `reach` of the box along one box
+-- axis. The center's coordinate down the row is `coord + t * step`, so the test
+-- |coord + t * step| <= reach is an interval of t that we intersect into [lo, hi].
+-- When the axis doesn't vary down the row (`varies` is false because the box axis
+-- is perpendicular to world Z, leaving step ~ 0) the coordinate is constant: it
+-- either leaves the whole row eligible or, if already out of reach, empties it.
+local function clampRowToAxis(
+	lo: number,
+	hi: number,
+	coord: number,
+	reach: number,
+	invStep: number,
+	varies: boolean
+): (number, number)
+	if varies then
+		local t1 = (-reach - coord) * invStep
+		local t2 = (reach - coord) * invStep
+		if t1 > t2 then
+			t1, t2 = t2, t1
+		end
+		return math.max(lo, t1), math.min(hi, t2)
+	elseif coord > reach or coord < -reach then
+		-- Out of reach for the entire row, so return an empty span (lo > hi).
+		return 1, 0
+	end
+
+	return lo, hi
+end
+
 function CullThrottle._updateDesiredVoxelKeys(
 	self: CullThrottle,
 	object: Instance,
@@ -310,92 +340,61 @@ function CullThrottle._updateDesiredVoxelKeys(
 		local minVoxelKey = (position - worldHalf) // voxelSize
 		local maxVoxelKey = (position + worldHalf) // voxelSize
 
-		-- Two properties keep this loop cheap despite scanning the AABB:
+		-- Within one z-row (fixed x and y) the voxels that pass form a single
+		-- contiguous run, because the passing region (the box, inflated by half a
+		-- voxel on each axis) is convex. Each box-local coordinate is linear in the
+		-- row index, so every reach test reduces to an interval of z; the run we
+		-- fill is the integers common to all three intervals.
 		--
-		-- 1. The region that passes the test (the box, inflated by half a voxel on
-		--    each axis) is convex. So along any axis-aligned line the voxels that
-		--    pass form a single contiguous run (· · ■ ■ ■ · ·, never ■ · ■). Once a
-		--    line has started hitting and then misses, every later voxel on it must
-		--    also miss, so we break. This holds per-row (z), per-slice (y) and
-		--    per-volume (x), letting us skip the empty margins of the AABB.
-		--
-		-- 2. A voxel center's box-local coordinate is linear in its grid index, so
-		--    within a row we advance it by a constant step rather than recomputing
-		--    the three dot products for every voxel.
-		local zStepX, zStepY, zStepZ = voxelSize * r20, voxelSize * r21, voxelSize * r22
-		local dzMin = (minVoxelKey.Z + 0.5) * voxelSize - position.Z
+		-- As the inner loop steps one voxel along world Z, each box-local coordinate
+		-- moves by a fixed amount: the world-Z component of that box axis times the
+		-- voxel size. Precompute those per-step increments so a row reduces to
+		-- lx + t * lxStep (and likewise ly, lz), where t counts steps from the row's
+		-- first voxel.
+		local lxStep, lyStep, lzStep = voxelSize * r20, voxelSize * r21, voxelSize * r22
+		local firstRowDz = (minVoxelKey.Z + 0.5) * voxelSize - position.Z
+		local rowLen = maxVoxelKey.Z - minVoxelKey.Z
 
-		local xEntered = false
+		-- A box axis perpendicular to world Z has a ~zero step, so its coordinate is
+		-- constant down the row. Flag those (we hold them constant rather than divide
+		-- by ~zero) and precompute reciprocals of the steps that do vary.
+		local stepEpsilon = 1e-9
+		local lxVaries = math.abs(lxStep) > stepEpsilon
+		local lyVaries = math.abs(lyStep) > stepEpsilon
+		local lzVaries = math.abs(lzStep) > stepEpsilon
+		local invLxStep = if lxVaries then 1 / lxStep else 0
+		local invLyStep = if lyVaries then 1 / lyStep else 0
+		local invLzStep = if lzVaries then 1 / lzStep else 0
+
+		-- Round the surviving span outward by a hair so a center sitting exactly on
+		-- the boundary is kept rather than lost to float error.
+		local boundaryBias = 1e-6
+
 		for x = minVoxelKey.X, maxVoxelKey.X do
 			local dx = (x + 0.5) * voxelSize - position.X
 			local dxR00, dxR01, dxR02 = dx * r00, dx * r01, dx * r02
 
-			local xHit = false
-			local yEntered = false
 			for y = minVoxelKey.Y, maxVoxelKey.Y do
 				local dy = (y + 0.5) * voxelSize - position.Y
 
-				-- Box-local coordinates of the first voxel center in this row.
-				local lx = dxR00 + dy * r10 + dzMin * r20
-				local ly = dxR01 + dy * r11 + dzMin * r21
-				local lz = dxR02 + dy * r12 + dzMin * r22
+				-- Box-local coordinates of the row's first voxel center (z = minVoxelKey.Z).
+				local lx = dxR00 + dy * r10 + firstRowDz * r20
+				local ly = dxR01 + dy * r11 + firstRowDz * r21
+				local lz = dxR02 + dy * r12 + firstRowDz * r22
 
-				-- The cells that pass form one contiguous run. Scan for the first hit.
-				local rowLen = maxVoxelKey.Z - minVoxelKey.Z
-				local rowHit = false
+				-- Start from the whole row, then clip it to each box axis's reach.
+				-- What survives is the run of voxels this row actually occupies.
+				local lo, hi = 0, rowLen
+				lo, hi = clampRowToAxis(lo, hi, lx, reachX, invLxStep, lxVaries)
+				lo, hi = clampRowToAxis(lo, hi, ly, reachY, invLyStep, lyVaries)
+				lo, hi = clampRowToAxis(lo, hi, lz, reachZ, invLzStep, lzVaries)
 
-				local firstHit = -1
-				local sx, sy, sz = lx, ly, lz
-				for i = 0, rowLen do
-					if math.abs(sx) <= reachX and math.abs(sy) <= reachY and math.abs(sz) <= reachZ then
-						firstHit = i
-						break
-					end
-					sx += zStepX
-					sy += zStepY
-					sz += zStepZ
+				-- Round the surviving [lo, hi] span to the integer voxels it covers.
+				local firstZ = minVoxelKey.Z + math.ceil(lo - boundaryBias)
+				local lastZ = minVoxelKey.Z + math.floor(hi + boundaryBias)
+				for z = firstZ, lastZ do
+					desiredVoxelKeys[Vector3.new(x, y, z)] = true
 				end
-
-				if firstHit >= 0 then
-					rowHit = true
-
-					-- From the first hit rightward the row reads filled...empty
-					-- (convex => the run is contiguous), which IS monotonic, so we can
-					-- binary search the last filled cell rather than walking to it.
-					local lo, hi = firstHit, rowLen
-					while lo < hi do
-						local mid = (lo + hi + 1) // 2
-						if
-							math.abs(lx + mid * zStepX) <= reachX
-							and math.abs(ly + mid * zStepY) <= reachY
-							and math.abs(lz + mid * zStepZ) <= reachZ
-						then
-							lo = mid
-						else
-							hi = mid - 1
-						end
-					end
-
-					-- Fill the contiguous run [firstHit, lo] with no further tests.
-					for z = minVoxelKey.Z + firstHit, minVoxelKey.Z + lo do
-						desiredVoxelKeys[Vector3.new(x, y, z)] = true
-					end
-				end
-
-				if rowHit then
-					xHit = true
-					yEntered = true
-				elseif yEntered then
-					-- Convex slice: no later row in this x-slice can hit.
-					break
-				end
-			end
-
-			if xHit then
-				xEntered = true
-			elseif xEntered then
-				-- Convex volume: no later x-slice can hit.
-				break
 			end
 		end
 	end
