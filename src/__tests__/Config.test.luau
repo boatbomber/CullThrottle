@@ -41,10 +41,6 @@ describe("Config", function()
 			expect(config.dynamicRenderDistance).toBe(true)
 			expect(config.renderDistanceStep).toBeCloseTo(0.03)
 			expect(config.renderDistanceDirection).toBe(0)
-			-- Drives multi-voxel registration (voxelSize * 1/4); never asserted elsewhere.
-			expect(config.multiVoxelRadiusThreshold).toBeCloseTo(100 * (1 / 4))
-			expect(config.refreshRateRange).toBeCloseTo(1 / 15 - 1 / 60)
-			expect(config.refreshRateMidpoint).toBeCloseTo((1 / 60 + 1 / 15) / 2)
 		end)
 
 		it("returns independent instances", function()

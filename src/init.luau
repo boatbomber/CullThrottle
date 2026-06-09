@@ -1676,7 +1676,7 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	end
 
 	self._config.voxelSize = voxelSize
-	self._config.multiVoxelRadiusThreshold = voxelSize * (1 / 8)
+	self._config.multiVoxelRadiusThreshold = voxelSize * 0.25
 
 	-- We need to move all the objects around to their new voxels
 	self._voxels = {}
