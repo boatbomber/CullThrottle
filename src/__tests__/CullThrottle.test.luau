@@ -1578,6 +1578,75 @@ describe("CullThrottle", function()
 			part2:Destroy()
 		end)
 
+		it("should add a new voxel to the coarse grid", function()
+			local voxelKey = Vector3.new(1, 1, 1)
+			local part = createMockPart()
+
+			cullThrottle:_insertToVoxel(voxelKey, part)
+
+			-- The occupied voxel is discoverable through the coarse grid query
+			local count = cullThrottle:_getVoxelKeysInVolume(0, 0, 0, 4, 4, 4)
+			expect(count).toBe(1)
+			expect(cullThrottle._searchVoxelKeys[1]).toBe(voxelKey)
+
+			part:Destroy()
+		end)
+
+		it("should drop a voxel from the coarse grid when it empties", function()
+			local voxelKey = Vector3.new(1, 1, 1)
+			local part = createMockPart()
+
+			cullThrottle:_insertToVoxel(voxelKey, part)
+			cullThrottle:_removeFromVoxel(voxelKey, part)
+
+			-- With no objects left, the grid must not report a ghost voxel
+			local count = cullThrottle:_getVoxelKeysInVolume(0, 0, 0, 4, 4, 4)
+			expect(count).toBe(0)
+
+			part:Destroy()
+		end)
+
+		it("should keep co-located voxels in the coarse grid when one empties", function()
+			-- Two distinct voxels that share one coarse bucket (COARSE_VOXEL_SIZE is 4)
+			local voxelKeyA = Vector3.new(0, 0, 0)
+			local voxelKeyB = Vector3.new(1, 0, 0)
+			local partA = createMockPart()
+			local partB = createMockPart()
+
+			cullThrottle:_insertToVoxel(voxelKeyA, partA)
+			cullThrottle:_insertToVoxel(voxelKeyB, partB)
+
+			-- Emptying one voxel must not evict the other from the shared bucket
+			cullThrottle:_removeFromVoxel(voxelKeyA, partA)
+
+			local count = cullThrottle:_getVoxelKeysInVolume(0, 0, 0, 4, 4, 4)
+			expect(count).toBe(1)
+			expect(cullThrottle._searchVoxelKeys[1]).toBe(voxelKeyB)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("should filter out edge-bucket voxels that fall outside the queried box", function()
+			-- Both voxels share coarse bucket (0,0,0) but only one is inside the box
+			local insideKey = Vector3.new(1, 1, 1)
+			local outsideKey = Vector3.new(3, 1, 1)
+			local insidePart = createMockPart()
+			local outsidePart = createMockPart()
+
+			cullThrottle:_insertToVoxel(insideKey, insidePart)
+			cullThrottle:_insertToVoxel(outsideKey, outsidePart)
+
+			-- The box stops at x = 2, so the bucket is only partially covered and its
+			-- keys must be filtered down to the box bounds
+			local count = cullThrottle:_getVoxelKeysInVolume(0, 0, 0, 2, 4, 4)
+			expect(count).toBe(1)
+			expect(cullThrottle._searchVoxelKeys[1]).toBe(insideKey)
+
+			insidePart:Destroy()
+			outsidePart:Destroy()
+		end)
+
 		it("should reuse the desiredVoxelKeys table in place across updates", function()
 			cullThrottle:SetVoxelSize(100)
 
@@ -2021,10 +2090,21 @@ describe("CullThrottle", function()
 
 			-- Leave a single-voxel volume on the stack, as if the search ran out of
 			-- time before reaching it, then run the cached-visibility fallback. The
+			-- volume points at its key's slice in the seeded search buffer, and the
 			-- fallback accumulates into the unsorted pending buffer (the search sorts
 			-- it afterward), so check there.
+			cullThrottle._searchVoxelKeys[1] = voxelKey
 			cullThrottle._volumesToCheckSize = 0
-			cullThrottle:_pushVolume(voxelKey.X, voxelKey.Y, voxelKey.Z, voxelKey.X + 1, voxelKey.Y + 1, voxelKey.Z + 1)
+			cullThrottle:_pushVolume(
+				voxelKey.X,
+				voxelKey.Y,
+				voxelKey.Z,
+				voxelKey.X + 1,
+				voxelKey.Y + 1,
+				voxelKey.Z + 1,
+				1,
+				1
+			)
 			cullThrottle:_reuseCachedVisibilityForRemainingVolumes()
 
 			local found = false
@@ -2052,11 +2132,11 @@ describe("CullThrottle", function()
 
 			local realSearchVolume = cullThrottle._searchVolume
 			local firstOrigin = nil
-			cullThrottle._searchVolume = function(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1)
+			cullThrottle._searchVolume = function(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1, lo, hi)
 				if firstOrigin == nil then
 					firstOrigin = Vector3.new(x0, y0, z0)
 				end
-				return realSearchVolume(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1)
+				return realSearchVolume(self, now, frustumPlanes, x0, y0, z0, x1, y1, z1, lo, hi)
 			end
 
 			-- Eight frames is one full rotation through the eight octants.
@@ -2074,6 +2154,44 @@ describe("CullThrottle", function()
 
 			-- Every octant, including octant 1, was searched first exactly once.
 			expect(distinctCount).toBe(8)
+		end)
+
+		it("surfaces every in-frustum object spread across the seeded octants", function()
+			-- The root seed sorts every occupied voxel key into eight octant slices via
+			-- in-place partition. Spread objects through the view in a cone (so they land
+			-- in distinct voxels across the bounding box and across octant boundaries),
+			-- then confirm the seed and its partitions drop none of them.
+			local camCFrame = workspace.CurrentCamera.CFrame
+
+			-- Small voxels so the spread objects occupy distinct, widely separated voxels.
+			cullThrottle:SetVoxelSize(40)
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+
+			-- Offsets scale with depth to stay safely inside the FOV at every distance.
+			local parts = {}
+			for _, depth in { 100, 300, 500 } do
+				for _, sx in { -1, 1 } do
+					for _, sy in { -1, 1 } do
+						local offset = CFrame.new(sx * depth * 0.2, sy * depth * 0.1, -depth)
+						local part = createMockPart((camCFrame * offset).Position)
+						cullThrottle:AddObject(part)
+						table.insert(parts, part)
+					end
+				end
+			end
+
+			local visibleObjects = cullThrottle:GetVisibleObjects()
+
+			-- Each object is in front of the camera and within range, so the octant seed
+			-- must surface all of them.
+			for _, part in parts do
+				expect(table.find(visibleObjects, part)).never.toBeNil()
+			end
+
+			for _, part in parts do
+				part:Destroy()
+			end
 		end)
 	end)
 

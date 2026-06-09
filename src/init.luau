@@ -37,10 +37,21 @@ local SKIPPED_FRAMES_LOOKBACK = 4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.2
 local NEARBY_DISTANCE_THRESHOLD = 30
 
+-- The visibility search collects occupied voxel keys once per frame. To avoid
+-- touching empty cells, occupied voxel keys are also bucketed into a coarse grid
+-- (each bucket spans COARSE_VOXEL_SIZE voxels per axis) so the collection iterates
+-- only the occupied keys it overlaps instead of every cell within the bounds.
+local COARSE_VOXEL_SIZE = 4
+
+-- Axis selectors for the in-place voxel-key partition used to split search volumes.
+local AXIS_X = 1
+local AXIS_Y = 2
+local AXIS_Z = 3
+
 -- Per-frame voxel upkeep budgets, spent before the visibility search. Each is
 -- 0.05 ms, so the combined voxel maintenance is capped at ~0.1 ms per frame.
 local PHYSICS_POLL_TIME_BUDGET = 5e-5
-local VOXEL_UPDATE_TIME_BUDGET = 5e-5
+local VOXEL_MAINTENANCE_TIME_BUDGET = 5e-5
 
 -- Dynamic render distance is an adaptive controller to avoid bouncing up and down.
 local DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT = 1.3
@@ -88,6 +99,8 @@ type CullThrottleProto = {
 
 	_config: Config.Config,
 	_voxels: { [types.VoxelKey]: types.Voxel },
+	_coarseVoxels: { [types.CoarseVoxelKey]: { types.VoxelKey } },
+	_searchVoxelKeys: { types.VoxelKey },
 	_objects: { [Instance]: types.ObjectData },
 	_objectCount: number,
 	_physicsObjects: { Instance },
@@ -426,6 +439,19 @@ function CullThrottle._insertToVoxel(self: CullThrottle, voxelKey: types.VoxelKe
 	if not voxel then
 		-- New voxel, init the list with this object inside
 		self._voxels[voxelKey] = { object }
+
+		-- This voxel just became occupied, so add it to its coarse bucket
+		local coarseKey = Vector3.new(
+			voxelKey.X // COARSE_VOXEL_SIZE,
+			voxelKey.Y // COARSE_VOXEL_SIZE,
+			voxelKey.Z // COARSE_VOXEL_SIZE
+		)
+		local bucket = self._coarseVoxels[coarseKey]
+		if bucket then
+			tableInsert(bucket, voxelKey)
+		else
+			self._coarseVoxels[coarseKey] = { voxelKey }
+		end
 	else
 		-- Existing voxel, add this object to its list
 		tableInsert(voxel, object)
@@ -448,6 +474,28 @@ function CullThrottle._removeFromVoxel(self: CullThrottle, voxelKey: types.Voxel
 		-- Lets just cleanup this now empty voxel instead
 		self._voxels[voxelKey] = nil
 		self._lastVoxelVisibility[voxelKey] = nil
+
+		-- This voxel is no longer occupied, so remove it from its coarse bucket
+		local coarseKey = Vector3.new(
+			voxelKey.X // COARSE_VOXEL_SIZE,
+			voxelKey.Y // COARSE_VOXEL_SIZE,
+			voxelKey.Z // COARSE_VOXEL_SIZE
+		)
+		local bucket = self._coarseVoxels[coarseKey]
+		if bucket then
+			local bucketIndex = tableFind(bucket, voxelKey)
+			if bucketIndex then
+				local bucketN = #bucket
+				if bucketN == 1 then
+					-- Last voxel in this bucket, so drop the bucket entirely
+					self._coarseVoxels[coarseKey] = nil
+				else
+					-- Swap with the last key to avoid shifting the array
+					bucket[bucketIndex] = bucket[bucketN]
+					bucket[bucketN] = nil
+				end
+			end
+		end
 	elseif n == objectIndex then
 		-- This object is at the end, so we can remove it without needing
 		-- to shift anything or fill gaps
@@ -755,6 +803,47 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 	self._perfMetrics._skippedIngest[1] = 1 + visibleVoxelCount - startIndex
 end
 
+local function partitionVoxelKeys(
+	buffer: { types.VoxelKey },
+	lo: number,
+	hi: number,
+	axis: number,
+	splitCoord: number
+): number
+	-- Reorder buffer[lo..hi] in place so every key whose coordinate on the chosen
+	-- axis is below splitCoord comes first. Returns mid, the first index of the
+	-- high group: buffer[lo..mid-1] are below splitCoord, buffer[mid..hi] are at or
+	-- above it. An empty range (hi < lo) returns lo. This is a Lomuto partition; the
+	-- order within each group does not matter since the visible batch is sorted later.
+	local mid = lo
+	if axis == AXIS_X then
+		for i = lo, hi do
+			local k = buffer[i]
+			if k.X < splitCoord then
+				buffer[i], buffer[mid] = buffer[mid], buffer[i]
+				mid += 1
+			end
+		end
+	elseif axis == AXIS_Y then
+		for i = lo, hi do
+			local k = buffer[i]
+			if k.Y < splitCoord then
+				buffer[i], buffer[mid] = buffer[mid], buffer[i]
+				mid += 1
+			end
+		end
+	else
+		for i = lo, hi do
+			local k = buffer[i]
+			if k.Z < splitCoord then
+				buffer[i], buffer[mid] = buffer[mid], buffer[i]
+				mid += 1
+			end
+		end
+	end
+	return mid
+end
+
 function CullThrottle._pushVolume(
 	self: CullThrottle,
 	x0: number,
@@ -762,9 +851,12 @@ function CullThrottle._pushVolume(
 	z0: number,
 	x1: number,
 	y1: number,
-	z1: number
+	z1: number,
+	lo: number,
+	hi: number
 )
-	-- Append one volume (6 numbers) onto the flat stack.
+	-- Append one volume (6 bounds plus its [lo, hi] slice of _searchVoxelKeys) onto
+	-- the flat stack.
 	local volumesToCheck = self._volumesToCheck
 	local base = self._volumesToCheckSize
 	volumesToCheck[base + 1] = x0
@@ -773,7 +865,67 @@ function CullThrottle._pushVolume(
 	volumesToCheck[base + 4] = x1
 	volumesToCheck[base + 5] = y1
 	volumesToCheck[base + 6] = z1
-	self._volumesToCheckSize = base + 6
+	volumesToCheck[base + 7] = lo
+	volumesToCheck[base + 8] = hi
+	self._volumesToCheckSize = base + 8
+end
+
+function CullThrottle._getVoxelKeysInVolume(
+	self: CullThrottle,
+	x0: number,
+	y0: number,
+	z0: number,
+	x1: number,
+	y1: number,
+	z1: number
+): number
+	-- Fill _searchVoxelKeys with the occupied voxel keys inside the half-open box
+	-- [x0,x1) x [y0,y1) x [z0,z1) and return how many there are. We walk only the
+	-- coarse buckets the box overlaps and pull occupied keys straight out of them, so
+	-- empty cells within the box are never visited.
+	local coarseVoxels = self._coarseVoxels
+	local searchVoxelKeys = self._searchVoxelKeys
+	local count = 0
+
+	-- (x1 - 1) // COARSE_VOXEL_SIZE so a box ending exactly on a bucket boundary doesn't reach into
+	-- the empty bucket just past its edge.
+	local cx0, cx1 = x0 // COARSE_VOXEL_SIZE, (x1 - 1) // COARSE_VOXEL_SIZE
+	local cy0, cy1 = y0 // COARSE_VOXEL_SIZE, (y1 - 1) // COARSE_VOXEL_SIZE
+	local cz0, cz1 = z0 // COARSE_VOXEL_SIZE, (z1 - 1) // COARSE_VOXEL_SIZE
+
+	for cx = cx0, cx1 do
+		local interiorX = cx * COARSE_VOXEL_SIZE >= x0 and (cx + 1) * COARSE_VOXEL_SIZE <= x1
+		for cy = cy0, cy1 do
+			local interiorXY = interiorX and cy * COARSE_VOXEL_SIZE >= y0 and (cy + 1) * COARSE_VOXEL_SIZE <= y1
+			for cz = cz0, cz1 do
+				local bucket = coarseVoxels[Vector3.new(cx, cy, cz)]
+				if not bucket then
+					-- No occupied voxels in this coarse cell
+					continue
+				end
+
+				-- A bucket sitting fully inside the box needs no per-key filtering
+				if interiorXY and cz * COARSE_VOXEL_SIZE >= z0 and (cz + 1) * COARSE_VOXEL_SIZE <= z1 then
+					for i = 1, #bucket do
+						count += 1
+						searchVoxelKeys[count] = bucket[i]
+					end
+				else
+					-- Edge bucket, so keep only the keys that fall inside the box
+					for i = 1, #bucket do
+						local voxelKey = bucket[i]
+						local kx, ky, kz = voxelKey.X, voxelKey.Y, voxelKey.Z
+						if kx >= x0 and kx < x1 and ky >= y0 and ky < y1 and kz >= z0 and kz < z1 then
+							count += 1
+							searchVoxelKeys[count] = voxelKey
+						end
+					end
+				end
+			end
+		end
+	end
+
+	return count
 end
 
 function CullThrottle._searchVolume(
@@ -785,24 +937,28 @@ function CullThrottle._searchVolume(
 	z0: number,
 	x1: number,
 	y1: number,
-	z1: number
+	z1: number,
+	lo: number,
+	hi: number
 )
-	local isSingleVoxel = x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1
-	local voxels = self._voxels
+	-- This volume owns the occupied voxel keys in _searchVoxelKeys[lo..hi]. The buffer
+	-- was seeded once at the root and is partitioned in place as volumes split, so
+	-- there is nothing to gather here.
+	if hi < lo then
+		-- No occupied voxels in this box
+		return
+	end
+
 	local lastVoxelVisibility = self._lastVoxelVisibility
+	local searchVoxelKeys = self._searchVoxelKeys
 
 	-- We add jitter so that we don't end up with every voxel ending grace on the same frame
 	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
 
 	-- Special case for volumes of a single voxel
-	if isSingleVoxel then
-		local voxelKey = Vector3.new(x0, y0, z0)
-		local voxel = voxels[voxelKey]
-
-		-- No need to check an empty voxel
-		if not voxel then
-			return
-		end
+	if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
+		-- A single cell holds at most one occupied key, and the slice is non-empty here
+		local voxelKey = searchVoxelKeys[lo]
 
 		-- If this voxel was visible a moment ago, assume it still is
 		if now - (lastVoxelVisibility[voxelKey] or 0) < JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
@@ -832,54 +988,30 @@ function CullThrottle._searchVolume(
 		return
 	end
 
+	-- Check whether every voxel here was visible a moment ago. We speculatively add
+	-- each one to the visible set as we go; if we hit a stale voxel we roll those
+	-- adds back and fall through to the real frustum check below. This relies on
+	-- _searchVolume running serially (it does today); parallel volume workers would
+	-- race on the shared visible set here.
 	debug.profilebegin("checkBoxVisibilityCache")
+	local startCount = self._visibleVoxelCount
 	local allVoxelsVisible = true
-	local containsVoxels = false
-	for x = x0, x1 - 1 do
-		for y = y0, y1 - 1 do
-			for z = z0, z1 - 1 do
-				local voxelKey = Vector3.new(x, y, z)
-				if not voxels[voxelKey] then
-					continue
-				end
-				containsVoxels = true
-				if now - (lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
-					allVoxelsVisible = false
-					break
-				end
-			end
-			if allVoxelsVisible == false then
-				-- No need to check further if we already know some voxels are not visible
-				break
-			end
-		end
-		if allVoxelsVisible == false then
+	for i = lo, hi do
+		local voxelKey = searchVoxelKeys[i]
+		self:_addVoxelKeyToVisible(voxelKey)
+		if now - (lastVoxelVisibility[voxelKey] or 0) >= JITTERED_LAST_VISIBILITY_GRACE_PERIOD then
+			allVoxelsVisible = false
+			self._visibleVoxelCount = startCount
 			break
 		end
 	end
 	debug.profileend()
 
-	-- Don't bother checking further if this box doesn't contain any voxels
-	if not containsVoxels then
-		return
-	end
-
-	-- If all voxels in this box were visible a moment ago, just assume they still are
+	-- If all voxels in this box were visible a moment ago, just assume they still
+	-- are. They were already added to the visible set during the check above. We
+	-- deliberately don't refresh their grace timestamps here, so each will get a
+	-- real frustum recheck once its grace period lapses.
 	if allVoxelsVisible then
-		debug.profilebegin("allVoxelsVisible")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					local voxel = voxels[voxelKey]
-					if not voxel then
-						continue
-					end
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
-		end
-		debug.profileend()
 		if _G.__DEV__ then
 			self:_drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
 		end
@@ -893,14 +1025,10 @@ function CullThrottle._searchVolume(
 	if not isInside then
 		-- All voxels within this box are not visible and should clear their cache
 		debug.profilebegin("clearBoxVisibilityCache")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					if lastVoxelVisibility[voxelKey] then
-						lastVoxelVisibility[voxelKey] = nil
-					end
-				end
+		for i = lo, hi do
+			local voxelKey = searchVoxelKeys[i]
+			if lastVoxelVisibility[voxelKey] then
+				lastVoxelVisibility[voxelKey] = nil
 			end
 		end
 		debug.profileend()
@@ -911,18 +1039,10 @@ function CullThrottle._searchVolume(
 	-- and we can process them now and not split further
 	if isCompletelyInside then
 		debug.profilebegin("isCompletelyInside")
-		for x = x0, x1 - 1 do
-			for y = y0, y1 - 1 do
-				for z = z0, z1 - 1 do
-					local voxelKey = Vector3.new(x, y, z)
-					local voxel = voxels[voxelKey]
-					if not voxel then
-						continue
-					end
-					lastVoxelVisibility[voxelKey] = now
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
+		for i = lo, hi do
+			local voxelKey = searchVoxelKeys[i]
+			lastVoxelVisibility[voxelKey] = now
+			self:_addVoxelKeyToVisible(voxelKey)
 		end
 		debug.profileend()
 		if _G.__DEV__ then
@@ -940,74 +1060,78 @@ function CullThrottle._searchVolume(
 	local lengthZ = z1 - z0
 
 	-- Split along the axis with the greatest length into two halves A and B.
+	local axis, splitCoord
 	local ax0, ay0, az0, ax1, ay1, az1
 	local bx0, by0, bz0, bx1, by1, bz1
 	if lengthX >= lengthY and lengthX >= lengthZ then
-		local splitCoord = (x0 + x1) // 2
+		axis = AXIS_X
+		splitCoord = (x0 + x1) // 2
 		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, splitCoord, y1, z1
 		bx0, by0, bz0, bx1, by1, bz1 = splitCoord, y0, z0, x1, y1, z1
 	elseif lengthY >= lengthX and lengthY >= lengthZ then
-		local splitCoord = (y0 + y1) // 2
+		axis = AXIS_Y
+		splitCoord = (y0 + y1) // 2
 		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, x1, splitCoord, z1
 		bx0, by0, bz0, bx1, by1, bz1 = x0, splitCoord, z0, x1, y1, z1
 	else
-		local splitCoord = (z0 + z1) // 2
+		axis = AXIS_Z
+		splitCoord = (z0 + z1) // 2
 		ax0, ay0, az0, ax1, ay1, az1 = x0, y0, z0, x1, y1, splitCoord
 		bx0, by0, bz0, bx1, by1, bz1 = x0, y0, splitCoord, x1, y1, z1
 	end
 
+	-- Partition this volume's slice around the split plane: keys below splitCoord (the
+	-- low half A) move to [lo, mid-1], the rest (the high half B) to [mid, hi]. The two
+	-- child slices are disjoint and tile this one, so the search can keep partitioning
+	-- each child's own range without disturbing any other volume on the stack.
+	local mid = partitionVoxelKeys(searchVoxelKeys, lo, hi, axis, splitCoord)
+	local aHasVoxels = mid - 1 >= lo
+	local bHasVoxels = hi >= mid
+
 	-- Alternate the order to ensure each volume gets its turn being processed
-	-- first. The stack is LIFO, so the volume pushed last is searched first.
+	-- first. The stack is LIFO, so the volume pushed last is searched first. Empty
+	-- halves hold no occupied voxels, so we skip pushing them.
 	if self._volumeRotationCounter % 2 == 0 then
-		self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1)
-		self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1)
+		if aHasVoxels then
+			self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1)
+		end
+		if bHasVoxels then
+			self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi)
+		end
 	else
-		self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1)
-		self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1)
+		if bHasVoxels then
+			self:_pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi)
+		end
+		if aHasVoxels then
+			self:_pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1)
+		end
 	end
 end
 
 function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrottle)
-	local voxels = self._voxels
+	debug.profilebegin("reuseCachedVisibilityForRemainingVolumes")
 	local lastVoxelVisibility = self._lastVoxelVisibility
+	local searchVoxelKeys = self._searchVoxelKeys
 
 	local skipped = 0
 
+	-- Each leftover volume still owns an intact [lo, hi] slice of the search buffer
+	-- (a volume is only partitioned when it is popped, and these were never popped),
+	-- so we just re-mark every key that was visible a moment ago.
 	local volumesToCheck = self._volumesToCheck
-	for base = 0, self._volumesToCheckSize - 1, 6 do
-		local x0, y0, z0 = volumesToCheck[base + 1], volumesToCheck[base + 2], volumesToCheck[base + 3]
-		local x1, y1, z1 = volumesToCheck[base + 4], volumesToCheck[base + 5], volumesToCheck[base + 6]
-
-		if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
-			-- This volume is a single voxel
-			local voxelKey = Vector3.new(x0, y0, z0)
-			local voxel = voxels[voxelKey]
-			if voxel then
-				skipped += 1
-				if lastVoxelVisibility[voxelKey] then
-					self:_addVoxelKeyToVisible(voxelKey)
-				end
-			end
-		else
-			-- Run through the voxels contained in this volume
-			for x = x0, x1 - 1 do
-				for y = y0, y1 - 1 do
-					for z = z0, z1 - 1 do
-						local voxelKey = Vector3.new(x, y, z)
-						local voxel = voxels[voxelKey]
-						if voxel then
-							skipped += 1
-							if lastVoxelVisibility[voxelKey] then
-								self:_addVoxelKeyToVisible(voxelKey)
-							end
-						end
-					end
-				end
+	for base = 0, self._volumesToCheckSize - 1, 8 do
+		local lo, hi = volumesToCheck[base + 7], volumesToCheck[base + 8]
+		for i = lo, hi do
+			local voxelKey = searchVoxelKeys[i]
+			skipped += 1
+			if lastVoxelVisibility[voxelKey] then
+				self:_addVoxelKeyToVisible(voxelKey)
 			end
 		end
 	end
 
 	self._perfMetrics._skippedSearch[1] = skipped
+	debug.profileend()
 end
 
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
@@ -1104,28 +1228,48 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local volumesToCheck = self._volumesToCheck
 	self._volumesToCheckSize = 0
 
+	-- Seed the search buffer once with every occupied voxel key inside the frustum
+	-- bounds. The search reads and partitions this buffer in place from here on, so
+	-- the sparse voxel set is never rescanned per box.
+	debug.profilebegin("seedSearchVoxelKeys")
+	local total = self:_getVoxelKeysInVolume(minX, minY, minZ, maxX, maxY, maxZ)
+
 	-- Split into smaller boxes to start off since the frustum bounding volume
 	-- obviously intersects the frustum planes.
 	if minX == maxX or minY == maxY or minZ == maxZ then
 		-- If the bounds are not divisible then don't split early
-		self:_pushVolume(minX, minY, minZ, maxX, maxY, maxZ)
+		self:_pushVolume(minX, minY, minZ, maxX, maxY, maxZ, 1, total)
 	else
 		local midBound = (minBound + maxBound) // 2
 		local midX = midBound.X
 		local midY = midBound.Y
 		local midZ = midBound.Z
 
-		self:_pushVolume(minX, minY, minZ, midX, midY, midZ)
-		self:_pushVolume(midX, minY, minZ, maxX, midY, midZ)
-		self:_pushVolume(minX, minY, midZ, midX, midY, maxZ)
-		self:_pushVolume(midX, minY, midZ, maxX, midY, maxZ)
-		self:_pushVolume(minX, midY, minZ, midX, maxY, midZ)
-		self:_pushVolume(midX, midY, minZ, maxX, maxY, midZ)
-		self:_pushVolume(minX, midY, midZ, midX, maxY, maxZ)
-		self:_pushVolume(midX, midY, midZ, maxX, maxY, maxZ)
+		-- Partition the seeded keys into the eight octant slices matching the boxes
+		-- pushed below: by X at midX, then Y within each X half, then Z within each of
+		-- the four. Every octant ends up owning a contiguous range. Some ranges may be
+		-- empty (lo > hi); those octants are still pushed so the rotation below always
+		-- operates on exactly eight blocks, and they return immediately when searched.
+		local searchVoxelKeys = self._searchVoxelKeys
+		local mx = partitionVoxelKeys(searchVoxelKeys, 1, total, AXIS_X, midX)
+		local myLo = partitionVoxelKeys(searchVoxelKeys, 1, mx - 1, AXIS_Y, midY)
+		local myHi = partitionVoxelKeys(searchVoxelKeys, mx, total, AXIS_Y, midY)
+		local mz1 = partitionVoxelKeys(searchVoxelKeys, 1, myLo - 1, AXIS_Z, midZ)
+		local mz2 = partitionVoxelKeys(searchVoxelKeys, myLo, mx - 1, AXIS_Z, midZ)
+		local mz3 = partitionVoxelKeys(searchVoxelKeys, mx, myHi - 1, AXIS_Z, midZ)
+		local mz4 = partitionVoxelKeys(searchVoxelKeys, myHi, total, AXIS_Z, midZ)
+
+		self:_pushVolume(minX, minY, minZ, midX, midY, midZ, 1, mz1 - 1)
+		self:_pushVolume(midX, minY, minZ, maxX, midY, midZ, mx, mz3 - 1)
+		self:_pushVolume(minX, minY, midZ, midX, midY, maxZ, mz1, myLo - 1)
+		self:_pushVolume(midX, minY, midZ, maxX, midY, maxZ, mz3, myHi - 1)
+		self:_pushVolume(minX, midY, minZ, midX, maxY, midZ, myLo, mz2 - 1)
+		self:_pushVolume(midX, midY, minZ, maxX, maxY, midZ, myHi, mz4 - 1)
+		self:_pushVolume(minX, midY, midZ, midX, maxY, maxZ, mz2, mx - 1)
+		self:_pushVolume(midX, midY, midZ, maxX, maxY, maxZ, mz4, total)
 
 		-- Ensures each octant gets its turn being processed first. The stack is
-		-- LIFO, so move the chosen octant's 6 numbers into the top block (8).
+		-- LIFO, so move the chosen octant's 8 numbers into the top block (8).
 		local firstVolumeIndex = self._volumeRotationCounter % 8 + 1
 		if firstVolumeIndex == 8 then
 			-- Octant 8 is already on top, so no swap is needed. Reset the counter
@@ -1133,36 +1277,37 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 			-- continues.
 			self._volumeRotationCounter = 0
 		else
-			local chosenBase = (firstVolumeIndex - 1) * 6
-			local topBase = 7 * 6
-			for k = 1, 6 do
+			local chosenBase = (firstVolumeIndex - 1) * 8
+			local topBase = 7 * 8
+			for k = 1, 8 do
 				volumesToCheck[chosenBase + k], volumesToCheck[topBase + k] =
 					volumesToCheck[topBase + k], volumesToCheck[chosenBase + k]
 			end
 			self._volumeRotationCounter += 1
 		end
 	end
+	debug.profileend()
 
 	local voxels = self._voxels
 
 	debug.profilebegin("searchVolumes")
 	while self._volumesToCheckSize > 0 do
-		-- TODO: Workers pop volumes from the list and check them in parallel
-
-		-- Pop the top volume (6 numbers). We read its bounds into locals before
-		-- shrinking the stack so _searchVolume can reuse the just-freed slots for
-		-- any child volumes it pushes.
+		-- Pop the top volume (8 numbers: 6 bounds plus its [lo, hi] slice). We read
+		-- everything into locals before shrinking the stack so _searchVolume can reuse
+		-- the just-freed slots for any child volumes it pushes.
 		local n = self._volumesToCheckSize
-		local x0 = volumesToCheck[n - 5]
-		local y0 = volumesToCheck[n - 4]
-		local z0 = volumesToCheck[n - 3]
-		local x1 = volumesToCheck[n - 2]
-		local y1 = volumesToCheck[n - 1]
-		local z1 = volumesToCheck[n]
-		self._volumesToCheckSize = n - 6
+		local x0 = volumesToCheck[n - 7]
+		local y0 = volumesToCheck[n - 6]
+		local z0 = volumesToCheck[n - 5]
+		local x1 = volumesToCheck[n - 4]
+		local y1 = volumesToCheck[n - 3]
+		local z1 = volumesToCheck[n - 2]
+		local lo = volumesToCheck[n - 1]
+		local hi = volumesToCheck[n]
+		self._volumesToCheckSize = n - 8
 
 		-- Search the volume for visible voxels
-		self:_searchVolume(now, frustumPlanes, x0, y0, z0, x1, y1, z1)
+		self:_searchVolume(now, frustumPlanes, x0, y0, z0, x1, y1, z1, lo, hi)
 
 		if os.clock() - now >= searchTimeBudget then
 			-- We've run out of time!
@@ -1260,10 +1405,9 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 
 	debug.profilebegin("CullThrottle.processObjectVisibility")
 
-	-- Keep our voxels up to date, spending up to PHYSICS_POLL_TIME_BUDGET +
-	-- VOXEL_UPDATE_TIME_BUDGET (~0.1 ms total) before searching for visibility.
+	-- Keep our voxels up to date before searching for visibility
 	self:_pollPhysicsObjects(PHYSICS_POLL_TIME_BUDGET, start)
-	self:_updateObjectVoxels(VOXEL_UPDATE_TIME_BUDGET, os.clock())
+	self:_updateObjectVoxels(VOXEL_MAINTENANCE_TIME_BUDGET, os.clock())
 
 	-- Find the objects that are visible this frame
 	self:_findVisibleObjects(start)
@@ -1316,6 +1460,8 @@ function CullThrottle.new(): CullThrottle
 	}
 
 	self._voxels = {}
+	self._coarseVoxels = {}
+	self._searchVoxelKeys = {}
 	self._objects = {}
 	self._objectCount = 0
 	self._physicsObjects = {}
@@ -1331,7 +1477,7 @@ function CullThrottle.new(): CullThrottle
 	self._lastVoxelVisibility = {}
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
-	self._volumesToCheck = tableCreate(48)
+	self._volumesToCheck = tableCreate(64)
 	self._volumesToCheckSize = 0
 	self._volumeRotationCounter = 0
 	self._pendingEnteredView = {}
@@ -1391,6 +1537,7 @@ function CullThrottle.Destroy(self: CullThrottle)
 
 	-- Clear out all tracked state so it can be garbage collected
 	tableClear(self._voxels)
+	tableClear(self._coarseVoxels)
 	tableClear(self._objects)
 	self._objectCount = 0
 	tableClear(self._physicsObjects)
@@ -1710,6 +1857,7 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 
 	-- We need to move all the objects around to their new voxels
 	self._voxels = {}
+	self._coarseVoxels = {}
 
 	for object, objectData in self._objects do
 		self:_updateDesiredVoxelKeys(object, objectData)

@@ -2,6 +2,8 @@
 
 export type VoxelKey = Vector3
 
+export type CoarseVoxelKey = Vector3
+
 export type Voxel = { Instance }
 
 export type ObjectData = {
