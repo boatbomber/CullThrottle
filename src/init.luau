@@ -48,7 +48,7 @@ local DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT = 1.0
 local DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT = 0.8
 -- Grow only when the worst weighted load is below this fraction of budget.
 local DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM = 0.6
--- Step size as a fraction of renderDistanceTarget, adapted each frame.
+-- Step size as a fraction of the render distance range midpoint, adapted each frame.
 local DYNAMIC_RENDER_DISTANCE_MIN_STEP = 0.0002
 local DYNAMIC_RENDER_DISTANCE_MAX_STEP = 0.025
 -- Shrink the step when we reverse/settle, grow it when the scene really changed.
@@ -292,7 +292,7 @@ function CullThrottle._updateDesiredVoxelKeys(
 ): { [types.VoxelKey]: boolean }
 	debug.profilebegin("_updateDesiredVoxelKeys")
 	local voxelSize = self._config.voxelSize
-	local multiVoxelRadiusThreshold = self._config._multiVoxelRadiusThreshold
+	local multiVoxelRadiusThreshold = self._config.multiVoxelRadiusThreshold
 
 	-- Update desiredVoxelKeys table in place rather than reallocating
 	local desiredVoxelKeys = objectData.desiredVoxelKeys
@@ -596,10 +596,10 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 	local cameraPos = CameraCache.Position
 	local cameraLookVector = CameraCache.CFrame.LookVector
 	local halfDiagFov = CameraCache.HalfDiagFOV
-	local renderDistance = self._config._renderDistance
+	local renderDistance = self._config.renderDistance
 	local bestRefreshRate = self._config.bestRefreshRate
 	local worstRefreshRate = self._config.worstRefreshRate
-	local refreshRateRange = self._config._refreshRateRange
+	local refreshRateRange = self._config.refreshRateRange
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local visibleObjectsQueue = self._visibleObjectsQueue
@@ -1060,7 +1060,7 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	local searchTimeBudget = self._config.searchTimeBudget
 	local ingestTimeBudget = self._config.ingestTimeBudget
 	local voxelSize = self._config.voxelSize
-	local renderDistance = self._config._renderDistance
+	local renderDistance = self._config.renderDistance
 
 	local frustumPlanes, minBound, maxBound = CameraCache.getPlanesAndBounds(renderDistance, voxelSize)
 
@@ -1192,15 +1192,15 @@ function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 	local load = math.max(
 		(perfMetrics._searchDuration / config.searchTimeBudget) * DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT,
 		(perfMetrics._ingestDuration / config.ingestTimeBudget) * DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT,
-		(perfMetrics._averageObjectDeltaTime / config._refreshRateMidpoint) * DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT
+		(perfMetrics._averageObjectDeltaTime / config.refreshRateMidpoint) * DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT
 	)
 
 	-- -1 shrink, 0 hold (within the deadband), 1 grow
 	local direction = if isSkipping or load > 1 then -1 elseif load < DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM then 1 else 0
 
 	-- Adapt the step rather than slamming on any signal.
-	local step = config._renderDistanceStep
-	local lastDirection = config._renderDistanceDirection
+	local step = config.renderDistanceStep
+	local lastDirection = config.renderDistanceDirection
 	if direction == 0 or (lastDirection ~= 0 and direction ~= lastDirection) then
 		-- Settled in the deadband, or reversed past the sustainable edge: damp to settle.
 		step *= DYNAMIC_RENDER_DISTANCE_STEP_DAMPING
@@ -1210,14 +1210,14 @@ function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 	end
 	step = math.clamp(step, DYNAMIC_RENDER_DISTANCE_MIN_STEP, DYNAMIC_RENDER_DISTANCE_MAX_STEP)
 
-	config._renderDistanceStep = step
-	config._renderDistanceDirection = direction
+	config.renderDistanceStep = step
+	config.renderDistanceDirection = direction
 
 	if direction ~= 0 then
-		config._renderDistance = math.clamp(
-			config._renderDistance + direction * step * config.renderDistanceTarget,
-			config._minRenderDistance,
-			config._maxRenderDistance
+		config.renderDistance = math.clamp(
+			config.renderDistance + direction * step * config.renderDistanceMidpoint,
+			config.minRenderDistance,
+			config.maxRenderDistance
 		)
 	end
 end
@@ -1676,7 +1676,7 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	end
 
 	self._config.voxelSize = voxelSize
-	self._config._multiVoxelRadiusThreshold = voxelSize * (1 / 8)
+	self._config.multiVoxelRadiusThreshold = voxelSize * (1 / 8)
 
 	-- We need to move all the objects around to their new voxels
 	self._voxels = {}
@@ -1688,17 +1688,25 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	self:_updateObjectVoxels(5, os.clock())
 end
 
-function CullThrottle.SetRenderDistanceTarget(self: CullThrottle, renderDistanceTarget: number)
-	if renderDistanceTarget <= 0 then
+function CullThrottle.SetRenderDistanceRange(self: CullThrottle, renderDistanceRange: NumberRange)
+	local minRenderDistance = renderDistanceRange.Min
+	local maxRenderDistance = renderDistanceRange.Max
+	if minRenderDistance <= 0 then
 		-- The render distance is a divisor in the priority math and seeds the
-		-- min/max bounds, so a zero or negative target corrupts visibility state
-		error("SetRenderDistanceTarget expects a render distance greater than zero")
+		-- min/max bounds, so a zero or negative distance corrupts visibility state.
+		-- (NumberRange already guarantees Min <= Max, so checking Min covers Max.)
+		error("SetRenderDistanceRange expects render distances greater than zero")
 	end
 
-	self._config.renderDistanceTarget = renderDistanceTarget
-	self._config._renderDistance = renderDistanceTarget
-	self._config._minRenderDistance = renderDistanceTarget / 3
-	self._config._maxRenderDistance = renderDistanceTarget * 5
+	local config = self._config
+	config.minRenderDistance = minRenderDistance
+	config.maxRenderDistance = maxRenderDistance
+	config.renderDistanceMidpoint = (minRenderDistance + maxRenderDistance) / 2
+	-- Dynamic render distance is implied by a range that spans more than one value.
+	-- A zero-width range (Min == Max) pins the distance and disables the controller.
+	config.dynamicRenderDistance = minRenderDistance ~= maxRenderDistance
+	-- Reset the live distance to the range's baseline; the controller floats from here.
+	config.renderDistance = config.renderDistanceMidpoint
 end
 
 function CullThrottle.SetTimeBudgets(
@@ -1718,21 +1726,25 @@ function CullThrottle.SetTimeBudgets(
 	self._config.updateTimeBudget = updateTimeBudget
 end
 
-function CullThrottle.SetRefreshRates(self: CullThrottle, bestHz: number, worstHz: number)
-	if bestHz <= 0 or worstHz <= 0 then
+function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRange)
+	-- Rates are in Hz. The most frequent (best) rate is the higher number, so it
+	-- maps to the range's Max; the least frequent (worst) rate maps to Min.
+	-- NumberRange already guarantees Min <= Max, so the best rate can never be
+	-- slower than the worst, and checking Min > 0 covers Max too.
+	local worstHz = refreshRates.Min
+	local bestHz = refreshRates.Max
+	if worstHz <= 0 then
 		error("SetRefreshRates expects refresh rates in Hz greater than zero")
-	end
-	if bestHz < worstHz then
-		error("SetRefreshRates expects the best (most frequent) rate to be at least the worst rate, both in Hz")
 	end
 
 	local bestPeriod = 1 / bestHz
 	local worstPeriod = 1 / worstHz
 
-	self._config.bestRefreshRate = bestPeriod
-	self._config.worstRefreshRate = worstPeriod
-	self._config._refreshRateRange = worstPeriod - bestPeriod
-	self._config._refreshRateMidpoint = (worstPeriod + bestPeriod) / 2
+	local config = self._config
+	config.bestRefreshRate = bestPeriod
+	config.worstRefreshRate = worstPeriod
+	config.refreshRateRange = worstPeriod - bestPeriod
+	config.refreshRateMidpoint = (worstPeriod + bestPeriod) / 2
 end
 
 function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, computeVisibilityOnlyOnDemand: boolean)
@@ -1743,23 +1755,22 @@ function CullThrottle.SetStrictlyEnforceWorstRefreshRate(self: CullThrottle, str
 	self._config.strictlyEnforceWorstRefreshRate = strictlyEnforceWorstRefreshRate
 end
 
-function CullThrottle.SetDynamicRenderDistance(self: CullThrottle, dynamicRenderDistance: boolean)
-	self._config.dynamicRenderDistance = dynamicRenderDistance
-end
-
 function CullThrottle.GetVoxelSize(self: CullThrottle): number
 	return self._config.voxelSize
 end
 
-function CullThrottle.GetRenderDistanceTarget(self: CullThrottle): number
-	return self._config.renderDistanceTarget
+function CullThrottle.GetRenderDistanceRange(self: CullThrottle): NumberRange
+	-- Mirrors SetRenderDistanceRange. The configured [min, max] bounds the live
+	-- distance floats within; an equal min and max disables dynamic adjustment.
+	local config = self._config
+	return NumberRange.new(config.minRenderDistance, config.maxRenderDistance)
 end
 
 function CullThrottle.GetRenderDistance(self: CullThrottle): number
 	-- The live, effective render distance. With dynamic render distance enabled
 	-- this is the value the controller has settled on and may differ from the
-	-- configured target (see GetRenderDistanceTarget).
-	return self._config._renderDistance
+	-- configured range's midpoint (see GetRenderDistanceRange).
+	return self._config.renderDistance
 end
 
 function CullThrottle.GetTimeBudgets(self: CullThrottle): (number, number, number)
@@ -1768,12 +1779,13 @@ function CullThrottle.GetTimeBudgets(self: CullThrottle): (number, number, numbe
 	return config.searchTimeBudget, config.ingestTimeBudget, config.updateTimeBudget
 end
 
-function CullThrottle.GetRefreshRates(self: CullThrottle): (number, number)
+function CullThrottle.GetRefreshRates(self: CullThrottle): NumberRange
 	-- Mirrors SetRefreshRates, returning rates in Hz. The config stores them as
 	-- seconds-between-refreshes periods, so we invert back to Hz here rather than
-	-- leaking the internal unit (keeps the Hz-only contract symmetric).
+	-- leaking the internal unit (keeps the Hz-only contract symmetric). The worst
+	-- (least frequent) rate is the lower number, so it is the range's Min.
 	local config = self._config
-	return 1 / config.bestRefreshRate, 1 / config.worstRefreshRate
+	return NumberRange.new(1 / config.worstRefreshRate, 1 / config.bestRefreshRate)
 end
 
 function CullThrottle.GetComputeVisibilityOnlyOnDemand(self: CullThrottle): boolean
@@ -1785,6 +1797,9 @@ function CullThrottle.GetStrictlyEnforceWorstRefreshRate(self: CullThrottle): bo
 end
 
 function CullThrottle.GetDynamicRenderDistance(self: CullThrottle): boolean
+	-- Derived, read-only: dynamic adjustment is active whenever the render distance
+	-- range spans more than a single value. Set the range via SetRenderDistanceRange;
+	-- a zero-width range (Min == Max) pins the distance and disables the controller.
 	return self._config.dynamicRenderDistance
 end
 

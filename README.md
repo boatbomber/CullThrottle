@@ -232,12 +232,14 @@ Updates the size of the voxels used for visibility checks. Smaller voxels are mo
 Updating the size of the voxels will force CullThrottle to recompute which voxel each object is in, so this operation can be expensive and should basically only be used right after construction before any objects are added.
 
 ```Luau
-CullThrottle:SetRenderDistanceTarget(renderDistanceTarget: number)
+CullThrottle:SetRenderDistanceRange(renderDistanceRange: NumberRange)
 ```
 
-Sets the target render distance for CullThrottle. Objects that are further away than this distance will not be considered for visibility checks.
+Sets the render distance range for CullThrottle, in studs. Objects that are further away than the current render distance will not be considered for visibility checks.
 
-**IMPORTANT:** By default, dynamic render distance is enabled. CullThrottle will automatically adjust the render distance from your target by up to a 66% reduction or +500% extension in order to maintain an ideal balance of performance and quality. If you disable dynamic render distance, you should manually set the render distance target to a reasonable value for your use case.
+The range's `Min` and `Max` are the bounds that dynamic render distance is allowed to move between, and its midpoint is the baseline the render distance starts at and settles around. For example, `SetRenderDistanceRange(NumberRange.new(200, 3000))` lets CullThrottle render anywhere from 200 to 3000 studs, starting at the 1600 stud midpoint.
+
+**IMPORTANT:** Dynamic render distance is implied by the range. When `Min` and `Max` differ, CullThrottle automatically adjusts the render distance within those bounds to maintain an ideal balance of performance and quality. To pin the render distance to a fixed value (disabling dynamic adjustment), pass a zero-width range such as `NumberRange.new(600, 600)`.
 
 ```Luau
 CullThrottle:SetTimeBudgets(searchTimeBudget: number, ingestTimeBudget: number, updateTimeBudget: number)
@@ -254,12 +256,12 @@ The update phase is the time spent by `IterateObjectsToUpdate`. If the budget ru
 Note that dynamic render distance will adjust the render distance as needed in order to remain within these budgets. A lower budget will result in a lower render distance and vice versa.
 
 ```Luau
-CullThrottle:SetRefreshRates(bestHz: number, worstHz: number)
+CullThrottle:SetRefreshRates(refreshRates: NumberRange)
 ```
 
-Sets the desired refresh rates for CullThrottle, in Hz (updates per second). The best refresh rate is the maximum rate at which CullThrottle will update objects, and the worst refresh rate is the minimum rate at which CullThrottle will update objects. Both must be greater than zero, and `bestHz` must be at least `worstHz` (the best rate is the more frequent one); otherwise this throws.
+Sets the desired refresh rates for CullThrottle, in Hz (updates per second). The range's `Max` is the best (most frequent) refresh rate, the maximum rate at which CullThrottle will update objects, and its `Min` is the worst (least frequent) refresh rate, the minimum rate at which CullThrottle will update objects. The rates must be greater than zero; otherwise this throws.
 
-For example, `SetRefreshRates(60, 15)` updates the most important objects up to 60 times per second and the least important ones at least 15 times per second.
+For example, `SetRefreshRates(NumberRange.new(15, 60))` updates the most important objects up to 60 times per second and the least important ones at least 15 times per second.
 
 **IMPORTANT:** In some scenarios, these rates may be violated. If there is surplus update budget, objects may be updated more frequently than the best refresh rate. If there is not enough update budget, objects may be updated less frequently than the worst refresh rate. If you want to guarantee that objects do not go below the worst rate, even at the cost of game performance, you can use `SetStrictlyEnforceWorstRefreshRate`.
 
@@ -279,35 +281,29 @@ CullThrottle:SetStrictlyEnforceWorstRefreshRate(strictlyEnforceWorstRefreshRate:
 
 If enabled, CullThrottle will strictly enforce the worst refresh rate, even if it means that the update time budget is exceeded. This may lead to performance issues, and should only be used for cases that truly demand a minimum refresh rate.
 
-```Luau
-CullThrottle:SetDynamicRenderDistance(dynamicRenderDistance: boolean)
-```
-
-If enabled, CullThrottle will automatically adjust the render distance to maintain an ideal balance of performance and quality for the current scenario and hardware. If disabled, you should manually set the render distance target to a reasonable value for your use case.
-
-It is _highly recommended_ to leave dynamic render distance enabled unless you have a specific reason to disable it. It will get you the best performance and quality within your time budget, and most importantly it will result in more consistent and correct visibilities by avoiding going over budget and using the approximate visibilities.
-
 ### Reading Configuration & State
 
 Each configuration setter has a matching getter that returns the same value(s) in the same units.
 
 ```Luau
 CullThrottle:GetVoxelSize(): number
-CullThrottle:GetRenderDistanceTarget(): number
+CullThrottle:GetRenderDistanceRange(): NumberRange
 CullThrottle:GetTimeBudgets(): (number, number, number) -- search, ingest, update (seconds)
-CullThrottle:GetRefreshRates(): (number, number) -- best, worst (Hz)
+CullThrottle:GetRefreshRates(): NumberRange -- Min = worst, Max = best (Hz)
 CullThrottle:GetComputeVisibilityOnlyOnDemand(): boolean
 CullThrottle:GetStrictlyEnforceWorstRefreshRate(): boolean
 CullThrottle:GetDynamicRenderDistance(): boolean
 ```
 
-`GetRefreshRates` returns rates in Hz, matching what you pass to `SetRefreshRates`.
+`GetRefreshRates` returns a `NumberRange` in Hz, matching what you pass to `SetRefreshRates` (`Max` is the best rate, `Min` is the worst).
+
+`GetDynamicRenderDistance` is derived, returning `true` whenever the configured render distance range spans more than a single value.
 
 ```Luau
 CullThrottle:GetRenderDistance(): number
 ```
 
-Returns the **current, effective** render distance. With dynamic render distance enabled this is the value the controller has settled on, which may differ from the target you set with `SetRenderDistanceTarget` (use `GetRenderDistanceTarget` to read that back).
+Returns the **current, effective** render distance. With dynamic render distance enabled this is the value the controller has currently settled on. To read the range you set with `SetRenderDistanceRange`, use `GetRenderDistanceRange` instead.
 
 ```Luau
 CullThrottle:IsTracking(object: Instance): boolean

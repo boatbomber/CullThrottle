@@ -22,7 +22,6 @@ describe("Config", function()
 			-- These defaults are the library's out-of-the-box contract, so pin them
 			-- directly rather than only through Set/Get round-trips that overwrite them.
 			expect(config.voxelSize).toBe(100)
-			expect(config.renderDistanceTarget).toBe(600)
 			expect(config.searchTimeBudget).toBeCloseTo(0.8 / 1000)
 			expect(config.ingestTimeBudget).toBeCloseTo(1.2 / 1000)
 			expect(config.updateTimeBudget).toBeCloseTo(0.4 / 1000)
@@ -30,19 +29,22 @@ describe("Config", function()
 			expect(config.worstRefreshRate).toBeCloseTo(1 / 15)
 			expect(config.computeVisibilityOnlyOnDemand).toBe(false)
 			expect(config.strictlyEnforceWorstRefreshRate).toBe(false)
-			expect(config.dynamicRenderDistance).toBe(true)
 		end)
 
 		it("derives the computed fields from the public defaults", function()
-			expect(config._renderDistance).toBe(600)
-			expect(config._renderDistanceStep).toBeCloseTo(0.03)
-			expect(config._renderDistanceDirection).toBe(0)
-			expect(config._minRenderDistance).toBeCloseTo(600 / 3)
-			expect(config._maxRenderDistance).toBe(600 * 5)
-			-- Drives multi-voxel registration (voxelSize * 1/8); never asserted elsewhere.
-			expect(config._multiVoxelRadiusThreshold).toBeCloseTo(100 * (1 / 8))
-			expect(config._refreshRateRange).toBeCloseTo(1 / 15 - 1 / 60)
-			expect(config._refreshRateMidpoint).toBeCloseTo((1 / 60 + 1 / 15) / 2)
+			-- The default render distance range is [150, 2000], so its midpoint is the
+			-- live distance's starting baseline and dynamic adjustment is active.
+			expect(config.minRenderDistance).toBe(150)
+			expect(config.maxRenderDistance).toBe(2000)
+			expect(config.renderDistanceMidpoint).toBe((150 + 2000) / 2)
+			expect(config.renderDistance).toBe((150 + 2000) / 2)
+			expect(config.dynamicRenderDistance).toBe(true)
+			expect(config.renderDistanceStep).toBeCloseTo(0.03)
+			expect(config.renderDistanceDirection).toBe(0)
+			-- Drives multi-voxel registration (voxelSize * 1/4); never asserted elsewhere.
+			expect(config.multiVoxelRadiusThreshold).toBeCloseTo(100 * (1 / 4))
+			expect(config.refreshRateRange).toBeCloseTo(1 / 15 - 1 / 60)
+			expect(config.refreshRateMidpoint).toBeCloseTo((1 / 60 + 1 / 15) / 2)
 		end)
 
 		it("returns independent instances", function()
@@ -50,11 +52,11 @@ describe("Config", function()
 			local b = Config.new()
 
 			a.voxelSize = 999
-			a._renderDistance = 12345
+			a.renderDistance = 12345
 
 			-- Mutating one config must not bleed into another.
-			expect(b.voxelSize).toBe(100)
-			expect(b._renderDistance).toBe(600)
+			expect(b.voxelSize).never.toBe(a.voxelSize)
+			expect(b.renderDistance).never.toBe(a.renderDistance)
 		end)
 	end)
 end)

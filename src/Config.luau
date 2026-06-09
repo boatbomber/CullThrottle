@@ -5,25 +5,27 @@ Config.__index = Config
 
 type ConfigurationProto = {
 	voxelSize: number,
-	renderDistanceTarget: number,
-	searchTimeBudget: number,
-	updateTimeBudget: number,
-	ingestTimeBudget: number,
-	bestRefreshRate: number,
-	worstRefreshRate: number,
+	multiVoxelRadiusThreshold: number,
 
 	computeVisibilityOnlyOnDemand: boolean,
 	strictlyEnforceWorstRefreshRate: boolean,
-	dynamicRenderDistance: boolean,
 
-	_renderDistance: number,
-	_renderDistanceStep: number,
-	_renderDistanceDirection: number,
-	_minRenderDistance: number,
-	_maxRenderDistance: number,
-	_multiVoxelRadiusThreshold: number,
-	_refreshRateRange: number,
-	_refreshRateMidpoint: number,
+	searchTimeBudget: number,
+	updateTimeBudget: number,
+	ingestTimeBudget: number,
+
+	bestRefreshRate: number,
+	worstRefreshRate: number,
+	refreshRateRange: number,
+	refreshRateMidpoint: number,
+
+	minRenderDistance: number,
+	maxRenderDistance: number,
+	renderDistanceMidpoint: number,
+	dynamicRenderDistance: boolean,
+	renderDistance: number,
+	renderDistanceStep: number,
+	renderDistanceDirection: number,
 }
 
 export type Config = typeof(setmetatable({} :: ConfigurationProto, Config))
@@ -32,26 +34,27 @@ function Config.new(): Config
 	local self = setmetatable({}, Config)
 
 	self.voxelSize = 100
-	self.renderDistanceTarget = 600
+	self.multiVoxelRadiusThreshold = self.voxelSize * 0.25
+
+	self.computeVisibilityOnlyOnDemand = false
+	self.strictlyEnforceWorstRefreshRate = false
+
 	self.searchTimeBudget = 0.8 / 1000
 	self.ingestTimeBudget = 1.2 / 1000
 	self.updateTimeBudget = 0.4 / 1000
+
 	self.bestRefreshRate = 1 / 60
 	self.worstRefreshRate = 1 / 15
-	self.computeVisibilityOnlyOnDemand = false
-	self.strictlyEnforceWorstRefreshRate = false
-	self.dynamicRenderDistance = true
+	self.refreshRateRange = self.worstRefreshRate - self.bestRefreshRate
+	self.refreshRateMidpoint = (self.bestRefreshRate + self.worstRefreshRate) / 2
 
-	-- These are computed values, not meant to be directly set
-	self._renderDistance = self.renderDistanceTarget
-	-- Adaptive controller state for dynamic render distance (see _adjustDynamicRenderDistance)
-	self._renderDistanceStep = 0.03
-	self._renderDistanceDirection = 0
-	self._minRenderDistance = self.renderDistanceTarget / 3
-	self._maxRenderDistance = self.renderDistanceTarget * 5
-	self._multiVoxelRadiusThreshold = self.voxelSize * (1 / 8)
-	self._refreshRateRange = self.worstRefreshRate - self.bestRefreshRate
-	self._refreshRateMidpoint = (self.bestRefreshRate + self.worstRefreshRate) / 2
+	self.minRenderDistance = 150
+	self.maxRenderDistance = 2000
+	self.renderDistanceMidpoint = (self.minRenderDistance + self.maxRenderDistance) / 2
+	self.dynamicRenderDistance = self.minRenderDistance ~= self.maxRenderDistance
+	self.renderDistance = self.renderDistanceMidpoint
+	self.renderDistanceStep = 0.03
+	self.renderDistanceDirection = 0
 
 	return self
 end

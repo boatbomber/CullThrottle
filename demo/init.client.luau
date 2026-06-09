@@ -39,7 +39,8 @@ BlocksFolder.Parent = workspace
 local FloatingBlocksUpdater = CullThrottle.new()
 FloatingBlocksUpdater:CaptureTag(TAG)
 
-local bestRefreshHz, worstRefreshHz = FloatingBlocksUpdater:GetRefreshRates()
+local refreshRates = FloatingBlocksUpdater:GetRefreshRates()
+local bestRefreshHz, worstRefreshHz = refreshRates.Max, refreshRates.Min
 
 -- Change colors of blocks to indicate visibility
 -- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
@@ -156,9 +157,9 @@ updateDurationGraph.Frame.Parent = TopLeftGraphs
 
 local skippedSearchGraph = MetricGraph.new("Skipped Search", table.create(50, 0), 0, 90, "%d")
 local skippedIngestGraph = MetricGraph.new("Skipped Ingest", table.create(50, 0), 0, 50, "%d")
-local renderDistanceTarget = FloatingBlocksUpdater:GetRenderDistanceTarget()
+local renderDistanceRange = FloatingBlocksUpdater:GetRenderDistanceRange()
 local renderDistanceGraph =
-	MetricGraph.new("Render Distance", table.create(50, 0), renderDistanceTarget / 3, renderDistanceTarget * 5, "%d")
+	MetricGraph.new("Render Distance", table.create(50, 0), renderDistanceRange.Min, renderDistanceRange.Max, "%d")
 
 skippedSearchGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
 skippedIngestGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)

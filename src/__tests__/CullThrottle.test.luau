@@ -856,23 +856,33 @@ describe("CullThrottle", function()
 		end)
 	end)
 
-	describe("SetRenderDistanceTarget", function()
+	describe("SetRenderDistanceRange", function()
 		it("should update render distance configuration", function()
-			local newDistance = 500
-			cullThrottle:SetRenderDistanceTarget(newDistance)
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(300, 900))
 
-			expect(cullThrottle._config.renderDistanceTarget).toBe(newDistance)
-			expect(cullThrottle._config._renderDistance).toBe(newDistance)
-			expect(cullThrottle._config._minRenderDistance).toBeCloseTo(newDistance / 3)
-			expect(cullThrottle._config._maxRenderDistance).toBe(newDistance * 5)
+			expect(cullThrottle._config.minRenderDistance).toBe(300)
+			expect(cullThrottle._config.maxRenderDistance).toBe(900)
+			expect(cullThrottle._config.renderDistanceMidpoint).toBe((300 + 900) / 2)
+			-- The live distance resets to the range's midpoint baseline.
+			expect(cullThrottle._config.renderDistance).toBe((300 + 900) / 2)
+			expect(cullThrottle._config.dynamicRenderDistance).toBe(true)
+		end)
+
+		it("should disable dynamic adjustment for a zero-width range", function()
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(500, 500))
+
+			expect(cullThrottle._config.minRenderDistance).toBe(500)
+			expect(cullThrottle._config.maxRenderDistance).toBe(500)
+			expect(cullThrottle._config.renderDistance).toBe(500)
+			expect(cullThrottle._config.dynamicRenderDistance).toBe(false)
 		end)
 
 		it("should reject a non-positive render distance", function()
 			expect(function()
-				cullThrottle:SetRenderDistanceTarget(0)
+				cullThrottle:SetRenderDistanceRange(NumberRange.new(0, 100))
 			end).toThrow()
 			expect(function()
-				cullThrottle:SetRenderDistanceTarget(-100)
+				cullThrottle:SetRenderDistanceRange(NumberRange.new(-100))
 			end).toThrow()
 		end)
 	end)
@@ -914,11 +924,12 @@ describe("CullThrottle", function()
 	end)
 
 	describe("SetRefreshRates", function()
+		-- The range's Max is the best (most frequent) rate, Min is the worst (least frequent).
 		it("should convert Hz rates to seconds-between-refreshes periods", function()
 			local bestHz = 30
 			local worstHz = 5
 
-			cullThrottle:SetRefreshRates(bestHz, worstHz)
+			cullThrottle:SetRefreshRates(NumberRange.new(worstHz, bestHz))
 
 			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / bestHz)
 			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / worstHz)
@@ -928,36 +939,30 @@ describe("CullThrottle", function()
 			local bestHz = 60
 			local worstHz = 15
 
-			cullThrottle:SetRefreshRates(bestHz, worstHz)
+			cullThrottle:SetRefreshRates(NumberRange.new(worstHz, bestHz))
 
 			local bestPeriod = 1 / bestHz
 			local worstPeriod = 1 / worstHz
 
-			expect(cullThrottle._config._refreshRateRange).toBeCloseTo(worstPeriod - bestPeriod)
-			expect(cullThrottle._config._refreshRateRange > 0).toBe(true)
-			expect(cullThrottle._config._refreshRateMidpoint).toBeCloseTo((bestPeriod + worstPeriod) / 2)
+			expect(cullThrottle._config.refreshRateRange).toBeCloseTo(worstPeriod - bestPeriod)
+			expect(cullThrottle._config.refreshRateRange > 0).toBe(true)
+			expect(cullThrottle._config.refreshRateMidpoint).toBeCloseTo((bestPeriod + worstPeriod) / 2)
 		end)
 
 		it("should accept equal best and worst rates", function()
-			cullThrottle:SetRefreshRates(20, 20)
+			cullThrottle:SetRefreshRates(NumberRange.new(20, 20))
 
 			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / 20)
 			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / 20)
-			expect(cullThrottle._config._refreshRateRange).toBeCloseTo(0)
-		end)
-
-		it("should reject a best rate slower than the worst rate", function()
-			expect(function()
-				cullThrottle:SetRefreshRates(5, 30)
-			end).toThrow()
+			expect(cullThrottle._config.refreshRateRange).toBeCloseTo(0)
 		end)
 
 		it("should reject non-positive rates", function()
 			expect(function()
-				cullThrottle:SetRefreshRates(0, 15)
+				cullThrottle:SetRefreshRates(NumberRange.new(0, 15))
 			end).toThrow()
 			expect(function()
-				cullThrottle:SetRefreshRates(60, -1)
+				cullThrottle:SetRefreshRates(NumberRange.new(-1, 60))
 			end).toThrow()
 		end)
 	end)
@@ -1001,16 +1006,6 @@ describe("CullThrottle", function()
 		end)
 	end)
 
-	describe("SetDynamicRenderDistance", function()
-		it("should update dynamicRenderDistance setting", function()
-			cullThrottle:SetDynamicRenderDistance(true)
-			expect(cullThrottle._config.dynamicRenderDistance).toBe(true)
-
-			cullThrottle:SetDynamicRenderDistance(false)
-			expect(cullThrottle._config.dynamicRenderDistance).toBe(false)
-		end)
-	end)
-
 	describe("getScreenSize", function()
 		it("should return a finite screen size for an object at the camera", function()
 			-- distance == 0 would divide by zero and produce an infinite screen
@@ -1036,9 +1031,12 @@ describe("CullThrottle", function()
 			expect(cullThrottle:GetVoxelSize()).toBe(50)
 		end)
 
-		it("should read back the render distance target", function()
-			cullThrottle:SetRenderDistanceTarget(500)
-			expect(cullThrottle:GetRenderDistanceTarget()).toBe(500)
+		it("should read back the render distance range", function()
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(250, 750))
+
+			local range = cullThrottle:GetRenderDistanceRange()
+			expect(range.Min).toBe(250)
+			expect(range.Max).toBe(750)
 		end)
 
 		it("should read back the time budgets in seconds", function()
@@ -1051,32 +1049,44 @@ describe("CullThrottle", function()
 		end)
 
 		it("should read back the refresh rates in Hz, symmetric with the setter", function()
-			cullThrottle:SetRefreshRates(60, 15)
+			cullThrottle:SetRefreshRates(NumberRange.new(15, 60))
 
-			local bestHz, worstHz = cullThrottle:GetRefreshRates()
-			expect(bestHz).toBeCloseTo(60)
-			expect(worstHz).toBeCloseTo(15)
+			local refreshRates = cullThrottle:GetRefreshRates()
+			expect(refreshRates.Max).toBeCloseTo(60)
+			expect(refreshRates.Min).toBeCloseTo(15)
 		end)
 
 		it("should read back the boolean flags", function()
 			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
-			cullThrottle:SetDynamicRenderDistance(false)
 
 			expect(cullThrottle:GetComputeVisibilityOnlyOnDemand()).toBe(true)
 			expect(cullThrottle:GetStrictlyEnforceWorstRefreshRate()).toBe(true)
+		end)
+
+		it("should derive dynamic render distance from the range width", function()
+			-- A range spanning more than one value enables dynamic adjustment.
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 800))
+			expect(cullThrottle:GetDynamicRenderDistance()).toBe(true)
+
+			-- A zero-width range pins the distance and disables it.
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(500, 500))
 			expect(cullThrottle:GetDynamicRenderDistance()).toBe(false)
 		end)
 
-		it("should expose the live render distance, distinct from the target", function()
-			cullThrottle:SetRenderDistanceTarget(600)
+		it("should expose the live render distance, distinct from the configured range", function()
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 1000))
+			-- The live distance starts at the range's midpoint baseline.
 			expect(cullThrottle:GetRenderDistance()).toBe(600)
 
 			-- Simulate the dynamic controller having adjusted the effective distance
-			-- down from the target; the getter reports the live value, not the target.
-			cullThrottle._config._renderDistance = 450
+			-- down; the getter reports the live value, not the configured range.
+			cullThrottle._config.renderDistance = 450
 			expect(cullThrottle:GetRenderDistance()).toBe(450)
-			expect(cullThrottle:GetRenderDistanceTarget()).toBe(600)
+
+			local range = cullThrottle:GetRenderDistanceRange()
+			expect(range.Min).toBe(200)
+			expect(range.Max).toBe(1000)
 		end)
 	end)
 
@@ -1624,7 +1634,7 @@ describe("CullThrottle", function()
 
 		it("excludes objects beyond the render distance", function()
 			local part = stageObject(500, 2, 0.04)
-			cullThrottle._config._renderDistance = 100
+			cullThrottle._config.renderDistance = 100
 
 			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
 			cullThrottle:_ingestVoxel(os.clock(), { part })
@@ -2196,22 +2206,20 @@ describe("CullThrottle", function()
 
 	describe("Dynamic render distance", function()
 		it("should adjust render distance when performance is poor", function()
-			cullThrottle:SetDynamicRenderDistance(true)
-			cullThrottle:SetRenderDistanceTarget(500)
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 1
 			cullThrottle._perfMetrics._searchDuration = 0.01
 			cullThrottle._perfMetrics._ingestDuration = 0.01
 
-			local originalDistance = cullThrottle._config._renderDistance
+			local originalDistance = cullThrottle._config.renderDistance
 			cullThrottle:_adjustDynamicRenderDistance()
 
-			expect(cullThrottle._config._renderDistance).toBeLessThan(originalDistance)
+			expect(cullThrottle._config.renderDistance).toBeLessThan(originalDistance)
 		end)
 
 		it("should increase render distance when performance is good", function()
-			cullThrottle:SetDynamicRenderDistance(true)
-			cullThrottle:SetRenderDistanceTarget(500)
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.01
 			cullThrottle._perfMetrics._searchDuration = 0.0001
@@ -2219,27 +2227,38 @@ describe("CullThrottle", function()
 			cullThrottle._perfMetrics._skippedSearch = { 0, 0, 0, 0 }
 			cullThrottle._perfMetrics._skippedIngest = { 0, 0, 0, 0 }
 
-			local originalDistance = cullThrottle._config._renderDistance
+			local originalDistance = cullThrottle._config.renderDistance
 			cullThrottle:_adjustDynamicRenderDistance()
 
-			expect(cullThrottle._config._renderDistance).toBeGreaterThan(originalDistance)
+			expect(cullThrottle._config.renderDistance).toBeGreaterThan(originalDistance)
 		end)
 
 		it("should respect min and max render distance limits", function()
-			cullThrottle:SetDynamicRenderDistance(true)
-			cullThrottle:SetRenderDistanceTarget(500)
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
-			cullThrottle._config._renderDistance = cullThrottle._config._minRenderDistance
+			cullThrottle._config.renderDistance = cullThrottle._config.minRenderDistance
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 1
 			cullThrottle:_adjustDynamicRenderDistance()
 
-			expect(cullThrottle._config._renderDistance).toBeGreaterThanOrEqual(cullThrottle._config._minRenderDistance)
+			expect(cullThrottle._config.renderDistance).toBeGreaterThanOrEqual(cullThrottle._config.minRenderDistance)
 
-			cullThrottle._config._renderDistance = cullThrottle._config._maxRenderDistance
+			cullThrottle._config.renderDistance = cullThrottle._config.maxRenderDistance
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.001
 			cullThrottle:_adjustDynamicRenderDistance()
 
-			expect(cullThrottle._config._renderDistance).toBeLessThanOrEqual(cullThrottle._config._maxRenderDistance)
+			expect(cullThrottle._config.renderDistance).toBeLessThanOrEqual(cullThrottle._config.maxRenderDistance)
+		end)
+
+		it("should not adjust render distance for a zero-width range", function()
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(500, 500))
+
+			cullThrottle._perfMetrics._averageObjectDeltaTime = 1
+			cullThrottle._perfMetrics._searchDuration = 0.01
+			cullThrottle._perfMetrics._ingestDuration = 0.01
+
+			cullThrottle:_adjustDynamicRenderDistance()
+
+			expect(cullThrottle._config.renderDistance).toBe(500)
 		end)
 	end)
 
