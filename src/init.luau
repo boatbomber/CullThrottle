@@ -594,6 +594,8 @@ end
 function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types.Voxel)
 	debug.profilebegin("ingestVoxel")
 	local cameraPos = CameraCache.Position
+	local cameraLookVector = CameraCache.CFrame.LookVector
+	local halfDiagFov = CameraCache.HalfDiagFOV
 	local renderDistance = self._config._renderDistance
 	local bestRefreshRate = self._config.bestRefreshRate
 	local worstRefreshRate = self._config.worstRefreshRate
@@ -617,10 +619,18 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 		end
 		objectData.lastCheckClock = now
 
-		local distance = vectorMagnitude(objectData.cframe.Position - cameraPos)
+		local dirToObject: Vector3 = objectData.cframe.Position - cameraPos
+		local distance = vectorMagnitude(dirToObject)
 		objectData.distance = distance
 		if distance > renderDistance then
 			-- Object is outside what we consider visible
+			continue
+		end
+
+		-- Cull objects that fall fully outside the view cone
+		local angle = math.acos(math.clamp(vectorDot(cameraLookVector, dirToObject.Unit), -1, 1))
+		local angularRadius = math.asin(math.min(objectData.radius / distance, 1))
+		if angle - angularRadius > halfDiagFov then
 			continue
 		end
 

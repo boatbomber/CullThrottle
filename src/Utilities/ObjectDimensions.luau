@@ -17,7 +17,7 @@ local MIN_SCREEN_SIZE_DISTANCE = 1e-4
 
 function ObjectDimensions.getScreenSize(distance: number, radius: number): number
 	-- Calculate the screen size using the precomputed tan(FoV/2)
-	return (radius / math.max(distance, MIN_SCREEN_SIZE_DISTANCE)) / CameraCache.HalfTanFOV
+	return (radius / math.max(distance, MIN_SCREEN_SIZE_DISTANCE)) / CameraCache.TanHalfVertFOV
 end
 
 --[[

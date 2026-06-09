@@ -16,7 +16,7 @@ describe("CameraCache", function()
 	afterEach(function()
 		-- CameraCache is a singleton, so restore it to the live camera after tests
 		-- that re-init it with nil or a fabricated viewport.
-		CameraCache:init(workspace.CurrentCamera)
+		CameraCache.init(workspace.CurrentCamera)
 	end)
 
 	describe("computeAspectRatio", function()
@@ -30,16 +30,32 @@ describe("CameraCache", function()
 		end)
 	end)
 
+	describe("computeTanHalfVerticalFOV", function()
+		local tanHalf70 = math.tan(math.rad(70 / 2))
+
+		it("narrows the max-axis FoV by the aspect ratio for a landscape viewport", function()
+			-- The longer axis is horizontal, so the vertical FoV is narrower.
+			local aspect = 1920 / 1080
+			expect(CameraCache.computeTanHalfVerticalFOV(70, aspect)).toBeCloseTo(tanHalf70 / aspect)
+		end)
+
+		it("uses the max-axis FoV directly for a portrait viewport", function()
+			-- The longer axis is already the vertical one, so no narrowing applies.
+			local aspect = 1080 / 1920
+			expect(CameraCache.computeTanHalfVerticalFOV(70, aspect)).toBeCloseTo(tanHalf70)
+		end)
+	end)
+
 	describe("init", function()
 		it("should not error when there is no camera", function()
 			expect(function()
-				CameraCache:init(nil)
+				CameraCache.init(nil)
 			end).never.toThrow()
 			expect(CameraCache.Object).toBeNil()
 		end)
 
 		it("should populate cached properties from a camera", function()
-			CameraCache:init(workspace.CurrentCamera)
+			CameraCache.init(workspace.CurrentCamera)
 
 			expect(CameraCache.Object).toBe(workspace.CurrentCamera)
 			expect(CameraCache.CFrame).toBeDefined()
@@ -54,13 +70,20 @@ describe("CameraCache", function()
 			camera.FieldOfView = 80
 			camera.Parent = workspace
 
-			CameraCache:init(camera)
+			CameraCache.init(camera)
 
 			expect(CameraCache.Object).toBe(camera)
 			expect(CameraCache.CFrame).toBe(camera.CFrame)
 			expect(CameraCache.Position).toBe(camera.CFrame.Position)
-			expect(CameraCache.FieldOfView).toBe(80)
-			expect(CameraCache.HalfTanFOV).toBeCloseTo(math.tan(math.rad(80 / 2)))
+			-- TanHalfVertFOV is the vertical tan(FoV/2) derived from the camera's
+			-- reliable max-axis FoV and the viewport aspect ratio.
+			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
+				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
+			)
+			-- HalfDiagFOV is the look-axis-to-corner angle: atan(tan(vert) * sqrt(aspect^2 + 1)).
+			expect(CameraCache.HalfDiagFOV).toBeCloseTo(
+				math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio ^ 2 + 1))
+			)
 
 			camera:Destroy()
 		end)
@@ -68,7 +91,7 @@ describe("CameraCache", function()
 		it("disconnects the previous camera's connections when re-initialized", function()
 			local cameraA = Instance.new("Camera")
 			cameraA.Parent = workspace
-			CameraCache:init(cameraA)
+			CameraCache.init(cameraA)
 
 			local oldConnections = {}
 			for _, connection in CameraCache._connections do
@@ -78,7 +101,7 @@ describe("CameraCache", function()
 
 			local cameraB = Instance.new("Camera")
 			cameraB.Parent = workspace
-			CameraCache:init(cameraB)
+			CameraCache.init(cameraB)
 
 			-- The first camera's listeners must be dropped, not left double-firing.
 			for _, connection in oldConnections do
@@ -95,7 +118,7 @@ describe("CameraCache", function()
 			local camera = Instance.new("Camera")
 			camera.CFrame = CFrame.new(0, 0, 0)
 			camera.Parent = workspace
-			CameraCache:init(camera)
+			CameraCache.init(camera)
 
 			local newCFrame = CFrame.new(10, 20, 30)
 			camera.CFrame = newCFrame
@@ -108,17 +131,22 @@ describe("CameraCache", function()
 			camera:Destroy()
 		end)
 
-		it("recomputes HalfTanFOV when the field of view changes", function()
+		it("recomputes TanHalfVertFOV when the field of view changes", function()
 			local camera = Instance.new("Camera")
 			camera.FieldOfView = 70
 			camera.Parent = workspace
-			CameraCache:init(camera)
+			CameraCache.init(camera)
 
 			camera.FieldOfView = 90
 			task.wait()
 
-			expect(CameraCache.FieldOfView).toBe(90)
-			expect(CameraCache.HalfTanFOV).toBeCloseTo(math.tan(math.rad(90 / 2)))
+			-- Recomputed from the new FoV: a stale cache would still reflect FoV 70.
+			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
+				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
+			)
+			expect(CameraCache.HalfDiagFOV).toBeCloseTo(
+				math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio ^ 2 + 1))
+			)
 
 			camera:Destroy()
 		end)
@@ -128,7 +156,7 @@ describe("CameraCache", function()
 		it("disconnects all change connections and clears the table", function()
 			local camera = Instance.new("Camera")
 			camera.Parent = workspace
-			CameraCache:init(camera)
+			CameraCache.init(camera)
 
 			local connections = {}
 			for _, connection in CameraCache._connections do
@@ -136,7 +164,7 @@ describe("CameraCache", function()
 			end
 			expect(#connections).toBeGreaterThan(0)
 
-			CameraCache:cleanup()
+			CameraCache.cleanup()
 
 			for _, connection in connections do
 				expect(connection.Connected).toBe(false)
@@ -176,7 +204,7 @@ describe("CameraCache", function()
 			camera.CFrame = CFrame.new(0, 0, 0)
 			camera.FieldOfView = 70
 			camera.Parent = workspace
-			CameraCache:init(camera)
+			CameraCache.init(camera)
 
 			local renderDistance = 500
 			local voxelSize = 100

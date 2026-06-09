@@ -268,7 +268,7 @@ if _G.__VISUALIZE__ then
 		end
 	end)
 
-	CameraCache:cleanup()
+	CameraCache.cleanup()
 	CameraCache.ViewportSize = Vector2.new(1920, 1080)
 	CameraCache.AspectRatio = CameraCache.ViewportSize.X / CameraCache.ViewportSize.Y
 

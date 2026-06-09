@@ -7,55 +7,62 @@
 local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
 
 local CameraCache = {
-	_connections = {},
+	_connections = {} :: { [string]: RBXScriptConnection },
 	Object = nil :: Camera?,
 	CFrame = CFrame.identity,
 	Position = Vector3.zero,
-	FieldOfView = 0,
-	HalfTanFOV = 0,
+	HalfDiagFOV = 0,
+	TanHalfVertFOV = 0,
 	ViewportSize = Vector2.zero,
 	AspectRatio = 0,
 }
 
 export type CameraCache = typeof(CameraCache)
 
-function CameraCache.init(self: CameraCache, camera: Camera?)
-	self:cleanup()
+function CameraCache.init(camera: Camera?)
+	CameraCache.cleanup()
 
-	self.Object = camera
+	CameraCache.Object = camera
 	if not camera then
 		-- The CurrentCamera change handler will re-init once one exists
 		return
 	end
 
-	self.CFrame = self.Object.CFrame
-	self.Position = self.CFrame.Position
-	self.FieldOfView = self.Object.FieldOfView
-	self.HalfTanFOV = math.tan(math.rad(self.FieldOfView / 2))
-	self.ViewportSize = self.Object.ViewportSize
-	self.AspectRatio = CameraCache.computeAspectRatio(self.ViewportSize)
+	CameraCache.cframeChanged()
+	CameraCache.viewportSizeChanged()
+	CameraCache.fovChanged()
 
-	self._connections.CFrameChanged = CameraCache.Object:GetPropertyChangedSignal("CFrame"):Connect(function()
-		CameraCache.CFrame = CameraCache.Object.CFrame
-		CameraCache.Position = CameraCache.CFrame.Position
-	end)
-	self._connections.FieldOfViewChanged = CameraCache.Object:GetPropertyChangedSignal("FieldOfView"):Connect(function()
-		CameraCache.FieldOfView = CameraCache.Object.FieldOfView
-		CameraCache.HalfTanFOV = math.tan(math.rad(CameraCache.FieldOfView / 2))
-	end)
-	self._connections.ViewportSizeChanged = CameraCache.Object
-		:GetPropertyChangedSignal("ViewportSize")
-		:Connect(function()
-			CameraCache.ViewportSize = CameraCache.Object.ViewportSize
-			CameraCache.AspectRatio = CameraCache.computeAspectRatio(CameraCache.ViewportSize)
-		end)
+	CameraCache._connections.CFrameChanged =
+		CameraCache.Object:GetPropertyChangedSignal("CFrame"):Connect(CameraCache.cframeChanged)
+	CameraCache._connections.ViewportSizeChanged =
+		CameraCache.Object:GetPropertyChangedSignal("ViewportSize"):Connect(CameraCache.viewportSizeChanged)
+	CameraCache._connections.FieldOfViewChanged =
+		CameraCache.Object:GetPropertyChangedSignal("MaxAxisFieldOfView"):Connect(CameraCache.fovChanged)
 end
 
-function CameraCache.cleanup(self: CameraCache)
-	for _, connection in self._connections do
+function CameraCache.cleanup()
+	for _, connection in CameraCache._connections do
 		connection:Disconnect()
 	end
-	self._connections = {}
+	CameraCache._connections = {}
+end
+
+function CameraCache.cframeChanged()
+	CameraCache.CFrame = CameraCache.Object.CFrame
+	CameraCache.Position = CameraCache.CFrame.Position
+end
+
+function CameraCache.viewportSizeChanged()
+	CameraCache.ViewportSize = CameraCache.Object.ViewportSize
+	CameraCache.AspectRatio = CameraCache.computeAspectRatio(CameraCache.ViewportSize)
+	CameraCache.fovChanged()
+end
+
+function CameraCache.fovChanged()
+	CameraCache.TanHalfVertFOV =
+		CameraCache.computeTanHalfVerticalFOV(CameraCache.Object.MaxAxisFieldOfView, CameraCache.AspectRatio)
+	CameraCache.HalfDiagFOV =
+		math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio * CameraCache.AspectRatio + 1))
 end
 
 function CameraCache.computeAspectRatio(viewportSize: Vector2): number
@@ -67,11 +74,15 @@ function CameraCache.computeAspectRatio(viewportSize: Vector2): number
 	return viewportSize.X / viewportSize.Y
 end
 
+function CameraCache.computeTanHalfVerticalFOV(maxAxisFieldOfView: number, aspectRatio: number): number
+	return math.tan(math.rad(maxAxisFieldOfView / 2)) / math.max(aspectRatio, 1)
+end
+
 function CameraCache.getPlanesAndBounds(renderDistance: number, voxelSize: number): ({ Vector3 }, Vector3, Vector3)
 	local cameraCFrame = CameraCache.CFrame
 	local cameraPos = CameraCache.Position
 
-	local farPlaneHeight2 = CameraCache.HalfTanFOV * renderDistance
+	local farPlaneHeight2 = CameraCache.TanHalfVertFOV * renderDistance
 	local farPlaneWidth2 = farPlaneHeight2 * CameraCache.AspectRatio
 	local farPlaneCFrame = cameraCFrame * CFrame.new(0, 0, -renderDistance)
 	local farPlaneTopLeft = farPlaneCFrame * Vector3.new(-farPlaneWidth2, farPlaneHeight2, 0)
@@ -139,9 +150,9 @@ function CameraCache.getPlanesAndBounds(renderDistance: number, voxelSize: numbe
 	return frustumPlanes, minBound, maxBound
 end
 
-CameraCache:init(workspace.CurrentCamera)
+CameraCache.init(workspace.CurrentCamera)
 workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-	CameraCache:init(workspace.CurrentCamera)
+	CameraCache.init(workspace.CurrentCamera)
 end)
 
 return CameraCache

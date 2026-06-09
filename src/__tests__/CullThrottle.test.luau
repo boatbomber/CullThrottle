@@ -1616,7 +1616,7 @@ describe("CullThrottle", function()
 			objectData.jitterOffset = 0
 			objectData.radius = radius
 			objectData.lastCheckClock = 0
-			objectData.cframe = CFrame.new(CameraCache.Position + Vector3.new(0, 0, distance))
+			objectData.cframe = CFrame.new(CameraCache.Position + CameraCache.CFrame.LookVector * distance)
 			-- elapsed is measured from "now" (os.clock) at ingest time.
 			objectData.lastUpdateClock = os.clock() - elapsed
 			return part
