@@ -560,6 +560,10 @@ function CullThrottle._isBoxInFrustum(
 	local center = Vector3.new((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2)
 	local extents = Vector3.new((maxX - minX) / 2, (maxY - minY) / 2, (maxZ - minZ) / 2)
 
+	-- We test the radius of the sphere that circumscribes the box
+	-- If the sphere is fully inside/outside, we can skip the more exact check
+	local sphereRadius = vectorMagnitude(extents)
+
 	local completelyInside = true
 
 	-- Check each frustum plane
@@ -569,20 +573,27 @@ function CullThrottle._isBoxInFrustum(
 		-- Compute the distance from box center to the plane
 		local dist = vectorDot(center - planePos, planeNormal)
 
-		-- Compute the projection interval radius of box onto the plane normal
-		local radius = math.abs(extents.X * planeNormal.X)
-			+ math.abs(extents.Y * planeNormal.Y)
-			+ math.abs(extents.Z * planeNormal.Z)
-
-		-- If the distance is greater than the radius, the box is outside the frustum
-		if dist > radius + EPSILON then
+		if dist > sphereRadius + EPSILON then
+			-- The circumscribing sphere is fully outside this plane, so the box is too
 			debug.profileend()
 			return false, false
-		end
+		elseif dist > -sphereRadius then
+			-- The box straddles this plane, so fall back to the exact projection
+			-- interval radius of the box onto the plane normal
+			local radius = math.abs(extents.X * planeNormal.X)
+				+ math.abs(extents.Y * planeNormal.Y)
+				+ math.abs(extents.Z * planeNormal.Z)
 
-		-- If the distance plus the radius is positive, the box is not completely inside this plane
-		if checkForCompletelyInside and dist + radius > EPSILON then
-			completelyInside = false
+			-- If the distance is greater than the radius, the box is outside the frustum
+			if dist > radius + EPSILON then
+				debug.profileend()
+				return false, false
+			end
+
+			-- If the distance plus the radius is positive, the box is not completely inside this plane
+			if checkForCompletelyInside and dist + radius > EPSILON then
+				completelyInside = false
+			end
 		end
 	end
 
@@ -593,9 +604,13 @@ end
 
 function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types.Voxel)
 	debug.profilebegin("ingestVoxel")
+	local cameraCFrame = CameraCache.CFrame
 	local cameraPos = CameraCache.Position
-	local cameraLookVector = CameraCache.CFrame.LookVector
-	local halfDiagFov = CameraCache.HalfDiagFOV
+	local cameraLookVector = cameraCFrame.LookVector
+	local cameraRightVector = cameraCFrame.RightVector
+	local cameraUpVector = cameraCFrame.UpVector
+	local halfHorizontalFov = CameraCache.HalfHorizontalFOV
+	local halfVerticalFov = CameraCache.HalfVerticalFOV
 	local renderDistance = self._config.renderDistance
 	local bestRefreshRate = self._config.bestRefreshRate
 	local worstRefreshRate = self._config.worstRefreshRate
@@ -627,11 +642,26 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 			continue
 		end
 
-		-- Cull objects that fall fully outside the view cone
-		local angle = math.acos(math.clamp(vectorDot(cameraLookVector, dirToObject.Unit), -1, 1))
-		local angularRadius = math.asin(math.min(objectData.radius / distance, 1))
-		if angle - angularRadius > halfDiagFov then
-			continue
+		-- Cull objects that fall fully outside the view frustum.
+		--
+		-- This only applies to objects whose center is in front of the camera.
+		-- Once the center passes behind the camera plane, a large object can still
+		-- wrap its body into view while the per-axis angle test no longer holds, so
+		-- we keep it. The voxel search already discards voxels fully behind us.
+		local forward = vectorDot(cameraLookVector, dirToObject)
+		if forward > 0 then
+			local right = vectorDot(cameraRightVector, dirToObject)
+			local up = vectorDot(cameraUpVector, dirToObject)
+			local radius = objectData.radius
+
+			local horizontalDistance = math.sqrt(right * right + forward * forward)
+			local verticalDistance = math.sqrt(up * up + forward * forward)
+			local horizontalAngle = math.atan2(math.abs(right), forward)
+				- math.asin(math.min(radius / horizontalDistance, 1))
+			local verticalAngle = math.atan2(math.abs(up), forward) - math.asin(math.min(radius / verticalDistance, 1))
+			if horizontalAngle > halfHorizontalFov or verticalAngle > halfVerticalFov then
+				continue
+			end
 		end
 
 		local screenSize = ObjectDimensions.getScreenSize(distance, objectData.radius)
@@ -1430,7 +1460,7 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	end
 
 	objectData.halfBoundingBox = boundingBox / 2
-	objectData.radius = math.max(boundingBox.X, boundingBox.Y, boundingBox.Z) / 2
+	objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
 
 	ObjectDimensions.subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
 		-- Update CFrame
@@ -1440,7 +1470,7 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	end, function(newBoundingBox: Vector3)
 		-- Update bounding box and radius
 		objectData.halfBoundingBox = newBoundingBox / 2
-		objectData.radius = math.max(newBoundingBox.X, newBoundingBox.Y, newBoundingBox.Z) / 2
+		objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
 
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end)

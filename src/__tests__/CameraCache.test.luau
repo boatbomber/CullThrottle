@@ -80,9 +80,9 @@ describe("CameraCache", function()
 			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
 				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
 			)
-			-- HalfDiagFOV is the look-axis-to-corner angle: atan(tan(vert) * sqrt(aspect^2 + 1)).
-			expect(CameraCache.HalfDiagFOV).toBeCloseTo(
-				math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio ^ 2 + 1))
+			expect(CameraCache.HalfVerticalFOV).toBeCloseTo(math.atan(CameraCache.TanHalfVertFOV))
+			expect(CameraCache.HalfHorizontalFOV).toBeCloseTo(
+				math.atan(CameraCache.TanHalfVertFOV * CameraCache.AspectRatio)
 			)
 
 			camera:Destroy()
@@ -144,8 +144,9 @@ describe("CameraCache", function()
 			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
 				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
 			)
-			expect(CameraCache.HalfDiagFOV).toBeCloseTo(
-				math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio ^ 2 + 1))
+			expect(CameraCache.HalfVerticalFOV).toBeCloseTo(math.atan(CameraCache.TanHalfVertFOV))
+			expect(CameraCache.HalfHorizontalFOV).toBeCloseTo(
+				math.atan(CameraCache.TanHalfVertFOV * CameraCache.AspectRatio)
 			)
 
 			camera:Destroy()

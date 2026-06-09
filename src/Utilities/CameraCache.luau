@@ -11,7 +11,8 @@ local CameraCache = {
 	Object = nil :: Camera?,
 	CFrame = CFrame.identity,
 	Position = Vector3.zero,
-	HalfDiagFOV = 0,
+	HalfHorizontalFOV = 0,
+	HalfVerticalFOV = 0,
 	TanHalfVertFOV = 0,
 	ViewportSize = Vector2.zero,
 	AspectRatio = 0,
@@ -61,8 +62,9 @@ end
 function CameraCache.fovChanged()
 	CameraCache.TanHalfVertFOV =
 		CameraCache.computeTanHalfVerticalFOV(CameraCache.Object.MaxAxisFieldOfView, CameraCache.AspectRatio)
-	CameraCache.HalfDiagFOV =
-		math.atan(CameraCache.TanHalfVertFOV * math.sqrt(CameraCache.AspectRatio * CameraCache.AspectRatio + 1))
+
+	CameraCache.HalfVerticalFOV = math.atan(CameraCache.TanHalfVertFOV)
+	CameraCache.HalfHorizontalFOV = math.atan(CameraCache.TanHalfVertFOV * CameraCache.AspectRatio)
 end
 
 function CameraCache.computeAspectRatio(viewportSize: Vector2): number

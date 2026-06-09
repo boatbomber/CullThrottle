@@ -215,7 +215,7 @@ describe("CullThrottle", function()
 			local objectData = cullThrottle._objects[part]
 
 			expect(objectData.halfBoundingBox).toBe(Vector3.new(5, 5, 5))
-			expect(objectData.radius).toBe(5)
+			expect(objectData.radius).toBeCloseTo(math.sqrt(5 ^ 2 + 5 ^ 2 + 5 ^ 2))
 
 			part:Destroy()
 		end)
@@ -1758,6 +1758,29 @@ describe("CullThrottle", function()
 			bigPart:Destroy()
 			smallPart:Destroy()
 		end)
+
+		it("keeps a large near object whose center is behind the camera", function()
+			-- The per-axis angle test is only valid in front of the camera. A big
+			-- object centered just behind the camera plane can still wrap its body
+			-- into view, so it must be kept rather than culled.
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
+			objectData.jitterOffset = 0
+			objectData.lastCheckClock = 0
+			objectData.lastUpdateClock = os.clock()
+			objectData.radius = 40
+			-- Local +Z is behind the camera (LookVector is -Z): 8 behind, 12 to the side.
+			objectData.cframe = CameraCache.CFrame * CFrame.new(12, 0, 8)
+
+			cullThrottle._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle:_ingestVoxel(os.clock(), { part })
+
+			-- Staged into the queue means it was kept, not culled.
+			expect(incomingPriority(part)).never.toBeNil()
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("Visibility events", function()
@@ -2272,7 +2295,7 @@ describe("CullThrottle", function()
 
 			local objectData = cullThrottle._objects[part]
 			expect(objectData).toBeDefined()
-			expect(objectData.radius).toBeLessThanOrEqual(0.001)
+			expect(objectData.radius).toBeLessThanOrEqual(0.01)
 
 			part:Destroy()
 		end)
