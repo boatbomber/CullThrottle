@@ -8,7 +8,23 @@
 local types = require(script.Parent.Parent.types)
 local CameraCache = require(script.Parent.CameraCache)
 
+local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
+
 local ObjectDimensions = {}
+
+-- Callbacks the owner (CullThrottle) provides so ObjectDimensions can keep an
+-- object's geometry and source wiring current without depending on the tracker.
+export type ObjectWatchCallbacks = {
+	-- The object's cframe/bounding box (or its resolved source) changed; the owner
+	-- should refresh any derived state, e.g. which voxels the object occupies.
+	onGeometryChanged: () -> (),
+	-- The object can no longer be tracked (its source was destroyed, or it was
+	-- reparented out of a trackable hierarchy) and should be removed.
+	onUntrackable: () -> (),
+	-- Whether the owner still tracks the object. A late ancestry signal on an
+	-- already-removed object is ignored.
+	isTracked: () -> boolean,
+}
 
 -- An object centered exactly on the camera has distance == 0, which would make
 -- screen size infinite and feed -inf into the priority math. Clamp distance to a
@@ -312,5 +328,124 @@ function ObjectDimensions.subscribeToDimensionChanges(
 		table.insert(objectData.changeConnections, connection)
 	end
 end
+
+-- wireObjectConnections and reresolveObjectSources are mutually recursive
+-- (a reparent re-resolves the object's sources, which rewires its listeners),
+-- so forward declare them.
+local wireObjectConnections: (Instance, types.ObjectData, ObjectWatchCallbacks) -> ()
+local reresolveObjectSources: (Instance, types.ObjectData, ObjectWatchCallbacks) -> ()
+
+--[[
+	Wire all of an object's change/lifecycle connections: dimension changes that
+	keep objectData's geometry current, destruction of the object or a resolved
+	source that auto-removes it, and ancestry changes that re-resolve its source.
+	Existing connections are torn down first so this can be called again to rewire.
+]]
+function wireObjectConnections(object: Instance, objectData: types.ObjectData, callbacks: ObjectWatchCallbacks)
+	-- Tear down any existing connections first so a rewire (after an ancestor-based
+	-- source changes) replaces them instead of leaking the old listeners.
+	for _, connection in objectData.changeConnections do
+		connection:Disconnect()
+	end
+	table.clear(objectData.changeConnections)
+
+	ObjectDimensions.subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
+		objectData.cframe = newCFrame
+		objectData.distance = vectorMagnitude(newCFrame.Position - CameraCache.Position)
+		callbacks.onGeometryChanged()
+	end, function(newBoundingBox: Vector3)
+		objectData.halfBoundingBox = newBoundingBox / 2
+		objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
+		callbacks.onGeometryChanged()
+	end)
+
+	-- Auto-remove when the tracked instance itself is destroyed.
+	table.insert(objectData.changeConnections, object.Destroying:Connect(callbacks.onUntrackable))
+
+	-- Some types resolve their cframe/bounding box from an ancestor: a light or
+	-- sound reads its parent part's position, an attachment or bone reads an
+	-- ancestor part for its bounding box. That ancestor can be destroyed (or the
+	-- object reparented off it) while the tracked instance lives on, after which we
+	-- would keep reading the source's frozen last value. Watch each resolved source
+	-- that isn't the object itself so we still auto-remove in that case.
+	local cframeSourceIsAncestor = objectData.cframeSource ~= object
+	local boundingBoxSourceIsAncestor = objectData.boundingBoxSource ~= object
+	if cframeSourceIsAncestor then
+		table.insert(objectData.changeConnections, objectData.cframeSource.Destroying:Connect(callbacks.onUntrackable))
+	end
+	if boundingBoxSourceIsAncestor and objectData.boundingBoxSource ~= objectData.cframeSource then
+		table.insert(
+			objectData.changeConnections,
+			objectData.boundingBoxSource.Destroying:Connect(callbacks.onUntrackable)
+		)
+	end
+
+	-- Reparenting the object can change which ancestor its source resolves to, so
+	-- re-resolve (and rewire onto the new sources) whenever its ancestry changes.
+	-- Only ancestor-sourced types can change this way; an object that is its own
+	-- source always resolves back to itself, so it needs no ancestry listener.
+	if cframeSourceIsAncestor or boundingBoxSourceIsAncestor then
+		table.insert(
+			objectData.changeConnections,
+			object.AncestryChanged:Connect(function()
+				reresolveObjectSources(object, objectData, callbacks)
+			end)
+		)
+	end
+end
+
+--[[
+	Re-resolve an object's cframe/bounding box sources after its ancestry changed.
+	If a source can no longer be resolved (or produce a value) the object is no
+	longer trackable and is removed; otherwise its geometry is refreshed off the
+	new sources and its listeners are rewired to match.
+]]
+function reresolveObjectSources(object: Instance, objectData: types.ObjectData, callbacks: ObjectWatchCallbacks)
+	-- Nothing to do for an object the owner has already stopped tracking.
+	if not callbacks.isTracked() then
+		return
+	end
+
+	local cframeSource, cframeType = ObjectDimensions.getObjectCFrameSource(object)
+	local boundingBoxSource, boundingBoxType = ObjectDimensions.getObjectBoundingBoxSource(object)
+
+	if not cframeSource or not cframeType or not boundingBoxSource or not boundingBoxType then
+		-- The object was reparented somewhere it can no longer be positioned or
+		-- sized (e.g. out of the world). It is no longer trackable, so drop it.
+		callbacks.onUntrackable()
+		return
+	end
+
+	if cframeSource == objectData.cframeSource and boundingBoxSource == objectData.boundingBoxSource then
+		-- Resolved sources are unchanged, so there's nothing to rewire.
+		return
+	end
+
+	objectData.cframeSource = cframeSource
+	objectData.cframeType = cframeType
+	objectData.boundingBoxSource = boundingBoxSource
+	objectData.boundingBoxType = boundingBoxType
+
+	local cframe = ObjectDimensions.getObjectCFrame(objectData)
+	local boundingBox = ObjectDimensions.getObjectBoundingBox(objectData)
+	if not cframe or not boundingBox then
+		-- The new source can't currently produce a cframe or bounding box (e.g. a
+		-- Beam that lost its attachments). Drop it rather than track stale data.
+		callbacks.onUntrackable()
+		return
+	end
+
+	objectData.cframe = cframe
+	objectData.distance = vectorMagnitude(cframe.Position - CameraCache.Position)
+	objectData.halfBoundingBox = boundingBox / 2
+	objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
+
+	-- Rewire the listeners onto the new sources, then refresh the object's voxels
+	-- so its position follows the new source instead of the stale one.
+	wireObjectConnections(object, objectData, callbacks)
+	callbacks.onGeometryChanged()
+end
+
+ObjectDimensions.wireObjectConnections = wireObjectConnections
 
 return ObjectDimensions

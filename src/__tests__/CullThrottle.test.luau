@@ -581,6 +581,100 @@ describe("CullThrottle", function()
 			connection:Disconnect()
 			part:Destroy()
 		end)
+
+		it("should remove the object from the voxel update queue", function()
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._objects[part]
+
+			-- Move the object so a voxel update is queued, mimicking the backlog
+			-- that builds up when voxel updates exceed their per-frame time budget.
+			objectData.cframe = CFrame.new(10000, 0, 0)
+			cullThrottle:_updateDesiredVoxelKeys(part, objectData)
+			cullThrottle._updateObjectVoxelsQueue:enqueueIncomingBatch()
+			expect(cullThrottle._updateObjectVoxelsQueue:contains(part)).toBe(true)
+
+			cullThrottle:RemoveObject(part)
+
+			-- The queue entry must be cleared so the removed instance isn't pinned
+			-- in the heap and contains() doesn't keep reporting it as still queued.
+			expect(cullThrottle._updateObjectVoxelsQueue:contains(part)).toBe(false)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("Ancestor source lifecycle", function()
+		it("re-resolves an ancestor-sourced object's source when it is reparented", function()
+			local partA = createMockPart(Vector3.new(0, 0, 0))
+			local partB = createMockPart(Vector3.new(500, 0, 0))
+			local sound = Instance.new("Sound")
+			sound.RollOffMaxDistance = 20
+			sound.Parent = partA
+
+			cullThrottle:AddObject(sound)
+			expect(cullThrottle._objects[sound].cframeSource).toBe(partA)
+
+			-- A Sound reads its position from its parent part, so reparenting it
+			-- must re-resolve the source and follow the new part's position rather
+			-- than stay frozen at the old one.
+			sound.Parent = partB
+			task.wait()
+
+			local objectData = cullThrottle._objects[sound]
+			expect(objectData).toBeDefined()
+			expect(objectData.cframeSource).toBe(partB)
+			expect(objectData.cframe.Position.X).toBeCloseTo(500)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("keeps tracking after the original source is destroyed once reparented away", function()
+			local partA = createMockPart(Vector3.new(0, 0, 0))
+			local partB = createMockPart(Vector3.new(500, 0, 0))
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = partA
+
+			cullThrottle:AddObject(light)
+
+			-- Move the light onto partB so its source re-resolves, then destroy the
+			-- now-unrelated partA. The light's source is partB now, so partA going
+			-- away must not remove it.
+			light.Parent = partB
+			task.wait()
+			partA:Destroy()
+			task.wait()
+
+			expect(cullThrottle._objects[light]).toBeDefined()
+			expect(cullThrottle._objects[light].cframeSource).toBe(partB)
+
+			partB:Destroy()
+		end)
+
+		it("auto-removes an ancestor-sourced object reparented out of a trackable hierarchy", function()
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = part
+
+			cullThrottle:AddObject(light)
+			expect(cullThrottle._objects[light]).toBeDefined()
+
+			-- Reparented under a Folder with no positional ancestor: the light can
+			-- no longer be positioned, so it must be dropped rather than tracked at
+			-- a stale spot.
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+			light.Parent = folder
+			task.wait()
+
+			expect(cullThrottle._objects[light]).toBeNil()
+
+			part:Destroy()
+			folder:Destroy()
+		end)
 	end)
 
 	describe("CaptureTag", function()

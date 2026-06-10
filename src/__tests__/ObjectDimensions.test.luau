@@ -33,6 +33,30 @@ local function makePart(): Part
 	return part
 end
 
+-- Builds the wireObjectConnections callbacks plus a state table the tests assert
+-- against: how many times each callback fired and the tracked flag isTracked reports.
+local function makeWatch(): (any, any)
+	local state = { geometryChanges = 0, untrackableCalls = 0, tracked = true }
+	local callbacks = {
+		onGeometryChanged = function()
+			state.geometryChanges += 1
+		end,
+		onUntrackable = function()
+			state.untrackableCalls += 1
+		end,
+		isTracked = function()
+			return state.tracked
+		end,
+	}
+	return callbacks, state
+end
+
+local function disconnectAll(data: any)
+	for _, connection in data.changeConnections do
+		connection:Disconnect()
+	end
+end
+
 describe("ObjectDimensions", function()
 	describe("getObjectCFrameSource / getObjectBoundingBoxSource", function()
 		it("resolves a BasePart as its own source", function()
@@ -340,6 +364,147 @@ describe("ObjectDimensions", function()
 			local data = { cframeSource = nil, cframeType = nil, changeConnections = {} }
 			local connections = ObjectDimensions.connectCFrameChangeEvent(data :: any, function() end)
 			expect(#connections).toBe(0)
+		end)
+	end)
+
+	describe("wireObjectConnections", function()
+		it("populates changeConnections", function()
+			local part = makePart()
+			local data = resolveData(part)
+			local callbacks = makeWatch()
+
+			ObjectDimensions.wireObjectConnections(part, data, callbacks)
+			expect(#data.changeConnections).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("calls onGeometryChanged and refreshes geometry when the object moves", function()
+			local part = makePart()
+			local data = resolveData(part)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(part, data, callbacks)
+
+			part.CFrame = CFrame.new(12, 0, 0)
+			task.wait()
+
+			expect(state.geometryChanges).toBeGreaterThan(0)
+			expect(data.cframe.Position).toBe(Vector3.new(12, 0, 0))
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("calls onUntrackable when the object is destroyed", function()
+			local part = makePart()
+			local data = resolveData(part)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(part, data, callbacks)
+
+			part:Destroy()
+			task.wait()
+
+			expect(state.untrackableCalls).toBeGreaterThan(0)
+		end)
+
+		it("re-resolves the source and refreshes geometry when an ancestor-sourced object is reparented", function()
+			local partA = makePart()
+			local partB = makePart()
+			partB.CFrame = CFrame.new(40, 0, 0)
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = partA
+
+			local data = resolveData(light)
+			expect(data.cframeSource).toBe(partA)
+
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(light, data, callbacks)
+
+			-- A light reads its position from its parent part, so moving it onto a
+			-- different part must re-resolve the source and follow the new position.
+			light.Parent = partB
+			task.wait()
+
+			expect(data.cframeSource).toBe(partB)
+			expect(data.cframe.Position).toBe(Vector3.new(40, 0, 0))
+			expect(state.geometryChanges).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("calls onUntrackable when the object is reparented out of a trackable hierarchy", function()
+			local part = makePart()
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = part
+
+			local data = resolveData(light)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(light, data, callbacks)
+
+			-- A Folder has no positional ancestor, so the light can no longer be
+			-- placed and must be reported untrackable rather than tracked stale.
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+			light.Parent = folder
+			task.wait()
+
+			expect(state.untrackableCalls).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+			folder:Destroy()
+		end)
+
+		it("ignores an ancestry change once the object is no longer tracked", function()
+			local partA = makePart()
+			local partB = makePart()
+			partB.CFrame = CFrame.new(40, 0, 0)
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = partA
+
+			local data = resolveData(light)
+			local callbacks, state = makeWatch()
+			state.tracked = false
+			ObjectDimensions.wireObjectConnections(light, data, callbacks)
+
+			-- isTracked() reports false, so a late ancestry signal must be ignored:
+			-- the source is left untouched and no geometry refresh fires.
+			light.Parent = partB
+			task.wait()
+
+			expect(data.cframeSource).toBe(partA)
+			expect(state.geometryChanges).toBe(0)
+
+			disconnectAll(data)
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("does not disrupt a self-sourced object when it is reparented", function()
+			local part = makePart()
+			local holder = makePart()
+
+			local data = resolveData(part)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(part, data, callbacks)
+
+			-- A BasePart is its own source, so it gets no ancestry listener and
+			-- reparenting it must neither re-resolve the source nor remove it.
+			part.Parent = holder
+			task.wait()
+
+			expect(state.untrackableCalls).toBe(0)
+			expect(data.cframeSource).toBe(part)
+
+			disconnectAll(data)
+			part:Destroy()
+			holder:Destroy()
 		end)
 	end)
 end)

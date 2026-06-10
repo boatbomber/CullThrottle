@@ -1609,25 +1609,17 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 	objectData.halfBoundingBox = boundingBox / 2
 	objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
 
-	ObjectDimensions.subscribeToDimensionChanges(objectData, function(newCFrame: CFrame)
-		-- Update CFrame
-		objectData.cframe = newCFrame
-		objectData.distance = vectorMagnitude(newCFrame.Position - CameraCache.Position)
-		self:_updateDesiredVoxelKeys(object, objectData)
-	end, function(newBoundingBox: Vector3)
-		-- Update bounding box and radius
-		objectData.halfBoundingBox = newBoundingBox / 2
-		objectData.radius = vectorMagnitude(objectData.halfBoundingBox)
-
-		self:_updateDesiredVoxelKeys(object, objectData)
-	end)
-
-	tableInsert(
-		objectData.changeConnections,
-		object.Destroying:Connect(function()
+	ObjectDimensions.wireObjectConnections(object, objectData, {
+		onGeometryChanged = function()
+			self:_updateDesiredVoxelKeys(object, objectData)
+		end,
+		onUntrackable = function()
 			self:RemoveObject(object)
-		end)
-	)
+		end,
+		isTracked = function()
+			return self._objects[object] ~= nil
+		end,
+	})
 
 	self:_updateDesiredVoxelKeys(object, objectData)
 
@@ -1678,6 +1670,11 @@ function CullThrottle.RemoveObject(self: CullThrottle, object: Instance)
 	-- (and already fired ObjectRemoved for). Removal is signalled by
 	-- ObjectRemoved, not ObjectExitedView.
 	self._objectVisibilityTimestamps[object] = nil
+
+	-- Drop any pending voxel-update entry. remove() only consults the heap, not the
+	-- not-yet-enqueued incoming batch, but an entry still in the batch is harmless:
+	-- it is enqueued and then discarded by the not-objectData guard next frame.
+	self._updateObjectVoxelsQueue:remove(object)
 
 	local physicsObjectIndex = tableFind(self._physicsObjects, object)
 	if physicsObjectIndex then
