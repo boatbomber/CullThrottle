@@ -141,6 +141,7 @@ type CullThrottleProto = {
 	_perfMetrics: {
 		_skippedSearch: { number },
 		_skippedIngest: { number },
+		_skippedFramesCursor: number,
 		_searchDuration: number,
 		_ingestDuration: number,
 		_averageObjectDeltaTime: number,
@@ -810,7 +811,8 @@ function CullThrottle._fastApproxIngestRemainingVoxels(self: CullThrottle, now: 
 
 	self._pendingEnteredViewSize = pendingEnteredViewSize
 
-	self._perfMetrics._skippedIngest[1] = 1 + visibleVoxelCount - startIndex
+	local perfMetrics = self._perfMetrics
+	perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor] = 1 + visibleVoxelCount - startIndex
 end
 
 local function partitionVoxelKeys(
@@ -1141,7 +1143,8 @@ function CullThrottle._reuseCachedVisibilityForRemainingVolumes(self: CullThrott
 		end
 	end
 
-	self._perfMetrics._skippedSearch[1] = skipped
+	local perfMetrics = self._perfMetrics
+	perfMetrics._skippedSearch[perfMetrics._skippedFramesCursor] = skipped
 	debug.profileend()
 end
 
@@ -1217,10 +1220,11 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	-- Clear any objects left over from last frame
 	self:_clearVisibleObjects()
 
-	self._perfMetrics._skippedIngest[SKIPPED_FRAMES_LOOKBACK] = nil
-	self._perfMetrics._skippedSearch[SKIPPED_FRAMES_LOOKBACK] = nil
-	tableInsert(self._perfMetrics._skippedIngest, 1, 0)
-	tableInsert(self._perfMetrics._skippedSearch, 1, 0)
+	local perfMetrics = self._perfMetrics
+	local cursor = (perfMetrics._skippedFramesCursor % SKIPPED_FRAMES_LOOKBACK) + 1
+	perfMetrics._skippedFramesCursor = cursor
+	perfMetrics._skippedIngest[cursor] = 0
+	perfMetrics._skippedSearch[cursor] = 0
 
 	local searchTimeBudget = self._config.searchTimeBudget
 	local ingestTimeBudget = self._config.ingestTimeBudget
@@ -1458,6 +1462,7 @@ function CullThrottle.new(): CullThrottle
 	self._perfMetrics = {
 		_skippedSearch = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
 		_skippedIngest = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
+		_skippedFramesCursor = 1,
 		_searchDuration = 0,
 		_ingestDuration = 0,
 		_averageObjectDeltaTime = self._config.bestRefreshPeriod,
@@ -2027,8 +2032,8 @@ function CullThrottle.GetPerformanceMetrics(self: CullThrottle): {
 	return {
 		searchDuration = perfMetrics._searchDuration,
 		ingestDuration = perfMetrics._ingestDuration,
-		skippedSearch = perfMetrics._skippedSearch[1],
-		skippedIngest = perfMetrics._skippedIngest[1],
+		skippedSearch = perfMetrics._skippedSearch[perfMetrics._skippedFramesCursor],
+		skippedIngest = perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor],
 		averageObjectDeltaTime = perfMetrics._averageObjectDeltaTime,
 	}
 end
