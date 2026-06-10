@@ -3,6 +3,13 @@
 local Config = {}
 Config.__index = Config
 
+-- multiVoxelRadiusThreshold is this fraction of the voxel size. An object whose
+-- radius exceeds it can straddle more than one voxel, so it is tracked in every
+-- voxel it overlaps instead of just the one holding its center. Both Config.new
+-- and CullThrottle:SetVoxelSize derive the threshold from this single ratio so
+-- they can't drift apart.
+Config.MULTI_VOXEL_RADIUS_RATIO = 0.25
+
 type ConfigurationProto = {
 	voxelSize: number,
 	multiVoxelRadiusThreshold: number,
@@ -14,10 +21,10 @@ type ConfigurationProto = {
 	updateTimeBudget: number,
 	ingestTimeBudget: number,
 
-	bestRefreshRate: number,
-	worstRefreshRate: number,
-	refreshRateRange: number,
-	refreshRateMidpoint: number,
+	bestRefreshPeriod: number,
+	worstRefreshPeriod: number,
+	refreshPeriodRange: number,
+	refreshPeriodMidpoint: number,
 
 	minRenderDistance: number,
 	maxRenderDistance: number,
@@ -34,7 +41,7 @@ function Config.new(): Config
 	local self = setmetatable({}, Config)
 
 	self.voxelSize = 100
-	self.multiVoxelRadiusThreshold = self.voxelSize * 0.25
+	self.multiVoxelRadiusThreshold = self.voxelSize * Config.MULTI_VOXEL_RADIUS_RATIO
 
 	self.computeVisibilityOnlyOnDemand = false
 	self.strictlyEnforceWorstRefreshRate = false
@@ -43,10 +50,10 @@ function Config.new(): Config
 	self.ingestTimeBudget = 1.2 / 1000
 	self.updateTimeBudget = 0.4 / 1000
 
-	self.bestRefreshRate = 1 / 60
-	self.worstRefreshRate = 1 / 15
-	self.refreshRateRange = self.worstRefreshRate - self.bestRefreshRate
-	self.refreshRateMidpoint = (self.bestRefreshRate + self.worstRefreshRate) / 2
+	self.bestRefreshPeriod = 1 / 60
+	self.worstRefreshPeriod = 1 / 15
+	self.refreshPeriodRange = self.worstRefreshPeriod - self.bestRefreshPeriod
+	self.refreshPeriodMidpoint = (self.bestRefreshPeriod + self.worstRefreshPeriod) / 2
 
 	self.minRenderDistance = 150
 	self.maxRenderDistance = 2000

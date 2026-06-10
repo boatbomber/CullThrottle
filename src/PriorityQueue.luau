@@ -12,18 +12,18 @@
 local PriorityQueue = {}
 PriorityQueue.__index = PriorityQueue
 
-type PriorityQueueProto = {
-	_items: { any },
+type PriorityQueueProto<T> = {
+	_items: { T },
 	_priorities: { number },
-	_indices: { [any]: number },
+	_indices: { [T]: number },
 	_size: number,
 
-	_incomingBatch: { items: { any }, priorities: { number }, size: number },
+	_incomingBatch: { items: { T }, priorities: { number }, size: number },
 }
 
-export type PriorityQueue = typeof(setmetatable({} :: PriorityQueueProto, PriorityQueue))
+export type PriorityQueue<T> = typeof(setmetatable({} :: PriorityQueueProto<T>, PriorityQueue))
 
-function PriorityQueue.new(): PriorityQueue
+function PriorityQueue.new<T>(): PriorityQueue<T>
 	local self = setmetatable({
 		_items = {},
 		_priorities = {},
@@ -35,14 +35,14 @@ function PriorityQueue.new(): PriorityQueue
 	return self
 end
 
-function PriorityQueue.addToIncomingBatch(self: PriorityQueue, item: any, priority: number): ()
+function PriorityQueue.addToIncomingBatch<T>(self: PriorityQueue<T>, item: T, priority: number): ()
 	local incomingBatch = self._incomingBatch
 	incomingBatch.size += 1
 	incomingBatch.items[incomingBatch.size] = item
 	incomingBatch.priorities[incomingBatch.size] = priority
 end
 
-function PriorityQueue.addMultipleToIncomingBatch(self: PriorityQueue, items: { any }, priorities: { number }): ()
+function PriorityQueue.addMultipleToIncomingBatch<T>(self: PriorityQueue<T>, items: { T }, priorities: { number }): ()
 	local incomingBatch = self._incomingBatch
 	local itemsCount = #items
 	table.move(items, 1, itemsCount, incomingBatch.size + 1, incomingBatch.items)
@@ -50,21 +50,21 @@ function PriorityQueue.addMultipleToIncomingBatch(self: PriorityQueue, items: { 
 	incomingBatch.size += itemsCount
 end
 
-function PriorityQueue.enqueueIncomingBatch(self: PriorityQueue): ()
+function PriorityQueue.enqueueIncomingBatch<T>(self: PriorityQueue<T>): ()
 	local incomingBatch = self._incomingBatch
 	if incomingBatch.size > 0 then
 		self:batchEnqueue(incomingBatch.items, incomingBatch.priorities)
 	end
 end
 
-function PriorityQueue.clearIncomingBatch(self: PriorityQueue): ()
+function PriorityQueue.clearIncomingBatch<T>(self: PriorityQueue<T>): ()
 	local incomingBatch = self._incomingBatch
 	incomingBatch.size = 0
 	table.clear(incomingBatch.items)
 	table.clear(incomingBatch.priorities)
 end
 
-function PriorityQueue.siftup(self: PriorityQueue, from: number)
+function PriorityQueue.siftup<T>(self: PriorityQueue<T>, from: number)
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local index = from
 	local parent = index // 2
@@ -78,7 +78,7 @@ function PriorityQueue.siftup(self: PriorityQueue, from: number)
 	return index
 end
 
-function PriorityQueue.siftdown(self: PriorityQueue, limit: number)
+function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 	local items, priorities, indices, size = self._items, self._priorities, self._indices, self._size
 	for index = limit, 1, -1 do
 		local left = index + index
@@ -104,7 +104,7 @@ function PriorityQueue.siftdown(self: PriorityQueue, limit: number)
 	end
 end
 
-function PriorityQueue.enqueue(self: PriorityQueue, item: any, priority: number): PriorityQueue
+function PriorityQueue.enqueue<T>(self: PriorityQueue<T>, item: T, priority: number): PriorityQueue<T>
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	if indices[item] ~= nil then
 		return self
@@ -116,7 +116,7 @@ function PriorityQueue.enqueue(self: PriorityQueue, item: any, priority: number)
 	return self
 end
 
-function PriorityQueue.batchEnqueue(self: PriorityQueue, itemsBatch: { any }, prioritiesBatch: { number }): ()
+function PriorityQueue.batchEnqueue<T>(self: PriorityQueue<T>, itemsBatch: { T }, prioritiesBatch: { number }): ()
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local size = self._size
 	for i = 1, #itemsBatch do
@@ -134,7 +134,7 @@ function PriorityQueue.batchEnqueue(self: PriorityQueue, itemsBatch: { any }, pr
 	end
 end
 
-function PriorityQueue.remove(self: PriorityQueue, item: any): boolean
+function PriorityQueue.remove<T>(self: PriorityQueue<T>, item: T): boolean
 	local index = self._indices[item]
 	if index == nil then
 		return false
@@ -160,7 +160,7 @@ function PriorityQueue.remove(self: PriorityQueue, item: any): boolean
 	return true
 end
 
-function PriorityQueue.update(self: PriorityQueue, item: any, priority: number): boolean
+function PriorityQueue.update<T>(self: PriorityQueue<T>, item: T, priority: number): boolean
 	local ok = self:remove(item)
 	if not ok then
 		return false
@@ -170,7 +170,7 @@ function PriorityQueue.update(self: PriorityQueue, item: any, priority: number):
 	return true
 end
 
-function PriorityQueue.dequeue(self: PriorityQueue): (any, number)
+function PriorityQueue.dequeue<T>(self: PriorityQueue<T>): (T, number)
 	local size = self._size
 
 	assert(size > 0, "Heap is empty")
@@ -195,34 +195,34 @@ function PriorityQueue.dequeue(self: PriorityQueue): (any, number)
 	return item, priority
 end
 
-function PriorityQueue.peek(self: PriorityQueue): (any, number)
+function PriorityQueue.peek<T>(self: PriorityQueue<T>): (T, number)
 	return self._items[1], self._priorities[1]
 end
 
-function PriorityQueue.peekPriority(self: PriorityQueue): number?
+function PriorityQueue.peekPriority<T>(self: PriorityQueue<T>): number?
 	return self._priorities[1]
 end
 
-function PriorityQueue.items(self: PriorityQueue): { any }
+function PriorityQueue.items<T>(self: PriorityQueue<T>): { T }
 	return self._items
 end
 
-function PriorityQueue.clear(self: PriorityQueue): ()
+function PriorityQueue.clear<T>(self: PriorityQueue<T>): ()
 	table.clear(self._indices)
 	table.clear(self._items)
 	table.clear(self._priorities)
 	self._size = 0
 end
 
-function PriorityQueue.len(self: PriorityQueue): number
+function PriorityQueue.len<T>(self: PriorityQueue<T>): number
 	return self._size
 end
 
-function PriorityQueue.contains(self: PriorityQueue, item: any): boolean
+function PriorityQueue.contains<T>(self: PriorityQueue<T>, item: T): boolean
 	return self._indices[item] ~= nil
 end
 
-function PriorityQueue.isEmpty(self: PriorityQueue): boolean
+function PriorityQueue.isEmpty<T>(self: PriorityQueue<T>): boolean
 	return self._size <= 0
 end
 

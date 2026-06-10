@@ -1025,8 +1025,8 @@ describe("CullThrottle", function()
 
 			cullThrottle:SetRefreshRates(NumberRange.new(worstHz, bestHz))
 
-			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / bestHz)
-			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / worstHz)
+			expect(cullThrottle._config.bestRefreshPeriod).toBeCloseTo(1 / bestHz)
+			expect(cullThrottle._config.worstRefreshPeriod).toBeCloseTo(1 / worstHz)
 		end)
 
 		it("should derive a positive range and midpoint from the periods", function()
@@ -1038,17 +1038,17 @@ describe("CullThrottle", function()
 			local bestPeriod = 1 / bestHz
 			local worstPeriod = 1 / worstHz
 
-			expect(cullThrottle._config.refreshRateRange).toBeCloseTo(worstPeriod - bestPeriod)
-			expect(cullThrottle._config.refreshRateRange > 0).toBe(true)
-			expect(cullThrottle._config.refreshRateMidpoint).toBeCloseTo((bestPeriod + worstPeriod) / 2)
+			expect(cullThrottle._config.refreshPeriodRange).toBeCloseTo(worstPeriod - bestPeriod)
+			expect(cullThrottle._config.refreshPeriodRange > 0).toBe(true)
+			expect(cullThrottle._config.refreshPeriodMidpoint).toBeCloseTo((bestPeriod + worstPeriod) / 2)
 		end)
 
 		it("should accept equal best and worst rates", function()
 			cullThrottle:SetRefreshRates(NumberRange.new(20, 20))
 
-			expect(cullThrottle._config.bestRefreshRate).toBeCloseTo(1 / 20)
-			expect(cullThrottle._config.worstRefreshRate).toBeCloseTo(1 / 20)
-			expect(cullThrottle._config.refreshRateRange).toBeCloseTo(0)
+			expect(cullThrottle._config.bestRefreshPeriod).toBeCloseTo(1 / 20)
+			expect(cullThrottle._config.worstRefreshPeriod).toBeCloseTo(1 / 20)
+			expect(cullThrottle._config.refreshPeriodRange).toBeCloseTo(0)
 		end)
 
 		it("should reject non-positive rates", function()
@@ -1810,7 +1810,7 @@ describe("CullThrottle", function()
 		end)
 
 		it("pushes over-refreshed objects far down the queue", function()
-			-- elapsed 0 is well under bestRefreshRate, so this is the over-refresh
+			-- elapsed 0 is well under bestRefreshPeriod, so this is the over-refresh
 			-- branch, scaled by OVER_REFRESH_PRIORITY_SCALE (1e6). A small, distant
 			-- object keeps screen size < 1 so the scaled value stays large.
 			local part = stageObject(300, 0.5, 0)
@@ -1852,7 +1852,7 @@ describe("CullThrottle", function()
 		end)
 
 		it("gives overdue objects p0 priority sorted by screen size", function()
-			-- elapsed far past worstRefreshRate puts both in the p0 band.
+			-- elapsed far past worstRefreshPeriod puts both in the p0 band.
 			local smallPart = stageObject(100, 0.5, 100)
 			local bigPart = stageObject(100, 5, 100)
 

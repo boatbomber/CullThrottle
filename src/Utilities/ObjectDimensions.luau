@@ -31,6 +31,14 @@ export type ObjectWatchCallbacks = {
 -- tiny positive minimum; objects this close fill the view and sort first anyway.
 local MIN_SCREEN_SIZE_DISTANCE = 1e-4
 
+-- A Beam derives both its position and bounding box from its two attachments, so
+-- the same warning is emitted from the getter and the change-event wiring for each.
+-- Share the strings so the two pairs can't drift apart.
+local BEAM_NO_ATTACHMENTS_POSITION_WARNING =
+	"[CullThrottle] Cannot determine position of Beam since it does not have attachments"
+local BEAM_NO_ATTACHMENTS_BOUNDING_BOX_WARNING =
+	"[CullThrottle] Cannot determine bounding box of Beam since it does not have attachments"
+
 function ObjectDimensions.getScreenSize(distance: number, radius: number): number
 	-- Calculate the screen size using the precomputed tan(FoV/2)
 	return (radius / math.max(distance, MIN_SCREEN_SIZE_DISTANCE)) / CameraCache.TanHalfVertFOV
@@ -41,7 +49,7 @@ end
     This allows us to cache the way we get the object's CFrame
     and avoid having to check the object's type every time.
 ]]
-function ObjectDimensions.getObjectCFrameSource(object: Instance): (Instance?, string?)
+function ObjectDimensions.getObjectCFrameSource(object: Instance): (Instance?, types.CFrameSourceType?)
 	if object == workspace then
 		-- Workspace technically inherits Model,
 		-- but the origin vector isn't useful here
@@ -65,7 +73,7 @@ function ObjectDimensions.getObjectCFrameSource(object: Instance): (Instance?, s
 	end
 end
 
-function ObjectDimensions.getObjectBoundingBoxSource(object: Instance): (Instance?, string?)
+function ObjectDimensions.getObjectBoundingBoxSource(object: Instance): (Instance?, types.BoundingBoxSourceType?)
 	if object == workspace then
 		-- Workspace technically inherits Model,
 		-- but the origin vector isn't useful here
@@ -104,7 +112,7 @@ function ObjectDimensions.getObjectCFrame(objectData: types.ObjectData): CFrame?
 	elseif sourceType == "Beam" then
 		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
-			warn("[CullThrottle] Cannot determine position of Beam since it does not have attachments")
+			warn(BEAM_NO_ATTACHMENTS_POSITION_WARNING)
 			return nil
 		end
 		return attachment0.WorldCFrame:Lerp(attachment1.WorldCFrame, 0.5)
@@ -125,7 +133,7 @@ function ObjectDimensions.getObjectBoundingBox(objectData: types.ObjectData): Ve
 	elseif sourceType == "Beam" then
 		local attachment0, attachment1 = (object :: Beam).Attachment0, (object :: Beam).Attachment1
 		if not attachment0 or not attachment1 then
-			warn("[CullThrottle] Cannot determine bounding box of Beam since it does not have attachments")
+			warn(BEAM_NO_ATTACHMENTS_BOUNDING_BOX_WARNING)
 			return nil
 		end
 
@@ -200,7 +208,7 @@ function ObjectDimensions.connectCFrameChangeEvent(
 		-- Beams are roughly located between their attachments
 		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
-			warn("[CullThrottle] Cannot determine position of Beam since it does not have attachments")
+			warn(BEAM_NO_ATTACHMENTS_POSITION_WARNING)
 			return connections
 		end
 		table.insert(
@@ -264,7 +272,7 @@ function ObjectDimensions.connectBoundingBoxChangeEvent(
 		-- Beams sized between their attachments with their defined width
 		local attachment0, attachment1 = typedObject.Attachment0, typedObject.Attachment1
 		if not attachment0 or not attachment1 then
-			warn("[CullThrottle] Cannot determine bounding box of Beam since it does not have attachments")
+			warn(BEAM_NO_ATTACHMENTS_BOUNDING_BOX_WARNING)
 			return connections
 		end
 
@@ -422,9 +430,9 @@ function reresolveObjectSources(object: Instance, objectData: types.ObjectData, 
 	end
 
 	objectData.cframeSource = cframeSource
-	objectData.cframeType = cframeType
+	objectData.cframeType = cframeType :: types.CFrameSourceType
 	objectData.boundingBoxSource = boundingBoxSource
-	objectData.boundingBoxType = boundingBoxType
+	objectData.boundingBoxType = boundingBoxType :: types.BoundingBoxSourceType
 
 	local cframe = ObjectDimensions.getObjectCFrame(objectData)
 	local boundingBox = ObjectDimensions.getObjectBoundingBox(objectData)

@@ -6,6 +6,10 @@ export type CoarseVoxelKey = Vector3
 
 export type Voxel = { Instance }
 
+export type CFrameSourceType = "BasePart" | "Model" | "Bone" | "Attachment" | "Beam"
+
+export type BoundingBoxSourceType = "BasePart" | "Model" | "Beam" | "Light" | "Sound"
+
 export type ObjectData = {
 	cframe: CFrame,
 	distance: number,
@@ -18,9 +22,9 @@ export type ObjectData = {
 	jitterOffset: number,
 	changeConnections: { RBXScriptConnection },
 	cframeSource: Instance,
-	cframeType: string,
+	cframeType: CFrameSourceType,
 	boundingBoxSource: Instance,
-	boundingBoxType: string,
+	boundingBoxType: BoundingBoxSourceType,
 }
 
 return nil

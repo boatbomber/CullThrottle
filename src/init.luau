@@ -32,10 +32,16 @@ local tableClone = table.clone
 
 local EPSILON = 1e-4
 local P0_THRESHOLD = 0.90
+-- p0 (must-refresh) objects may run the update budget over by this factor so a
+-- frame full of them still mostly keeps up. strictlyEnforceWorstRefreshRate
+-- overrides this with an effectively unbounded budget instead.
+local P0_UPDATE_BUDGET_OVERRUN = 1.15
 local RESIZE_TABLES_RATE = 5
 local SKIPPED_FRAMES_LOOKBACK = 4
 local LAST_VISIBILITY_GRACE_PERIOD = 0.2
+local LAST_VISIBILITY_GRACE_JITTER = 0.05
 local NEARBY_DISTANCE_THRESHOLD = 30
+local OBJECT_REFRESH_JITTER = 0.002
 
 -- The visibility search collects occupied voxel keys once per frame. To avoid
 -- touching empty cells, occupied voxel keys are also bucketed into a coarse grid
@@ -52,6 +58,10 @@ local AXIS_Z = 3
 -- 0.05 ms, so the combined voxel maintenance is capped at ~0.1 ms per frame.
 local PHYSICS_POLL_TIME_BUDGET = 5e-5
 local VOXEL_MAINTENANCE_TIME_BUDGET = 5e-5
+-- Changing the voxel size must reslot every object before the next frame rather
+-- than amortizing it, so SetVoxelSize uses this effectively unbounded budget (a
+-- whole 5 seconds, versus the sub-millisecond steady-state maintenance above).
+local FULL_RESLOT_TIME_BUDGET = 5
 
 -- Dynamic render distance is an adaptive controller to avoid bouncing up and down.
 local DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT = 1.3
@@ -104,8 +114,8 @@ type CullThrottleProto = {
 	_objects: { [Instance]: types.ObjectData },
 	_objectCount: number,
 	_physicsObjects: { Instance },
-	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue,
-	_visibleObjectsQueue: PriorityQueue.PriorityQueue,
+	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue<Instance>,
+	_visibleObjectsQueue: PriorityQueue.PriorityQueue<Instance>,
 	_visibleVoxelKeys: { types.VoxelKey },
 	_visibleVoxelCount: number,
 	_pendingVoxelKeys: { types.VoxelKey },
@@ -660,9 +670,9 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 	local halfHorizontalFov = CameraCache.HalfHorizontalFOV
 	local halfVerticalFov = CameraCache.HalfVerticalFOV
 	local renderDistance = self._config.renderDistance
-	local bestRefreshRate = self._config.bestRefreshRate
-	local worstRefreshRate = self._config.worstRefreshRate
-	local refreshRateRange = self._config.refreshRateRange
+	local bestRefreshPeriod = self._config.bestRefreshPeriod
+	local worstRefreshPeriod = self._config.worstRefreshPeriod
+	local refreshPeriodRange = self._config.refreshPeriodRange
 
 	local objectVisibilityTimestamps = self._objectVisibilityTimestamps
 	local visibleObjectsQueue = self._visibleObjectsQueue
@@ -718,10 +728,10 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 
 		local objectPriority = 0
 
-		if jitteredElapsed <= bestRefreshRate then
+		if jitteredElapsed <= bestRefreshPeriod then
 			-- This was refreshed within the best rate, so push it far down the queue.
 			objectPriority = P0_THRESHOLD + (1 - math.min(screenSize, 1)) * OVER_REFRESH_PRIORITY_SCALE
-		elseif jitteredElapsed >= worstRefreshRate then
+		elseif jitteredElapsed >= worstRefreshPeriod then
 			-- To maintain the worst refresh rate, make this p0 priority
 			-- Sort these p0s by screen size
 			objectPriority = P0_THRESHOLD - screenSize
@@ -732,7 +742,7 @@ function CullThrottle._ingestVoxel(self: CullThrottle, now: number, voxel: types
 			-- Determine the fair object priority
 			local screenSizePriority = SCREEN_SIZE_PRIORITY_WEIGHT * (1 - screenSize)
 			local refreshPriority = REFRESH_RATE_PRIORITY_WEIGHT
-				* (1 - (jitteredElapsed - bestRefreshRate) / refreshRateRange)
+				* (1 - (jitteredElapsed - bestRefreshPeriod) / refreshPeriodRange)
 			local distancePriority = DISTANCE_PRIORITY_WEIGHT * (distance / renderDistance)
 
 			objectPriority = screenSizePriority + refreshPriority + distancePriority
@@ -953,7 +963,8 @@ function CullThrottle._searchVolume(
 	local searchVoxelKeys = self._searchVoxelKeys
 
 	-- We add jitter so that we don't end up with every voxel ending grace on the same frame
-	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD * (1 + (math.random() * 0.1 - 0.05))
+	local JITTERED_LAST_VISIBILITY_GRACE_PERIOD = LAST_VISIBILITY_GRACE_PERIOD
+		* (1 + (math.random() * 2 - 1) * LAST_VISIBILITY_GRACE_JITTER)
 
 	-- Special case for volumes of a single voxel
 	if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
@@ -1367,7 +1378,7 @@ function CullThrottle._adjustDynamicRenderDistance(self: CullThrottle)
 	local load = math.max(
 		(perfMetrics._searchDuration / config.searchTimeBudget) * DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT,
 		(perfMetrics._ingestDuration / config.ingestTimeBudget) * DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT,
-		(perfMetrics._averageObjectDeltaTime / config.refreshRateMidpoint) * DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT
+		(perfMetrics._averageObjectDeltaTime / config.refreshPeriodMidpoint) * DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT
 	)
 
 	-- -1 shrink, 0 hold (within the deadband), 1 grow
@@ -1449,7 +1460,7 @@ function CullThrottle.new(): CullThrottle
 		_skippedIngest = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
 		_searchDuration = 0,
 		_ingestDuration = 0,
-		_averageObjectDeltaTime = self._config.bestRefreshRate,
+		_averageObjectDeltaTime = self._config.bestRefreshPeriod,
 		_getAverage = function(values: { number }): number
 			local sum = 0
 			for _, value in values do
@@ -1585,12 +1596,12 @@ function CullThrottle.AddObject(self: CullThrottle, object: Instance)
 		desiredVoxelKeys = {},
 		lastCheckClock = 0,
 		lastUpdateClock = 0,
-		jitterOffset = math.random(-1000, 1000) / 500000,
+		jitterOffset = (math.random() * 2 - 1) * OBJECT_REFRESH_JITTER,
 		changeConnections = {},
 		cframeSource = cframeSource,
-		cframeType = cframeType,
+		cframeType = cframeType :: types.CFrameSourceType,
 		boundingBoxSource = boundingBoxSource,
-		boundingBoxType = boundingBoxType,
+		boundingBoxType = boundingBoxType :: types.BoundingBoxSourceType,
 	}
 
 	local cframe = ObjectDimensions.getObjectCFrame(objectData)
@@ -1786,7 +1797,9 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 	local updateTimeBudget = self._config.updateTimeBudget
 	-- p0s can go a little over budget.
 	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
-	local p0UpdateTimeBudget = if self._config.strictlyEnforceWorstRefreshRate then 1 else updateTimeBudget * 1.15
+	local p0UpdateTimeBudget = if self._config.strictlyEnforceWorstRefreshRate
+		then 1
+		else updateTimeBudget * P0_UPDATE_BUDGET_OVERRUN
 
 	local updatedObjects = 0
 	local sumOfObjectDeltaTimes = 0
@@ -1806,7 +1819,8 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			return finish()
 		end
 
-		local budget = if queue:peekPriority() < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
+		local topPriority = queue:peekPriority()
+		local budget = if topPriority and topPriority < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
 		if os.clock() - updateStartClock >= budget then
 			-- Out of time, can't update the rest this frame.
 			-- That's okay, they'll be higher priority next time.
@@ -1850,7 +1864,7 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	end
 
 	self._config.voxelSize = voxelSize
-	self._config.multiVoxelRadiusThreshold = voxelSize * 0.25
+	self._config.multiVoxelRadiusThreshold = voxelSize * Config.MULTI_VOXEL_RADIUS_RATIO
 
 	-- We need to move all the objects around to their new voxels
 	self._voxels = {}
@@ -1860,7 +1874,7 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 		self:_updateDesiredVoxelKeys(object, objectData)
 	end
 
-	self:_updateObjectVoxels(5, os.clock())
+	self:_updateObjectVoxels(FULL_RESLOT_TIME_BUDGET, os.clock())
 end
 
 function CullThrottle.SetRenderDistanceRange(self: CullThrottle, renderDistanceRange: NumberRange)
@@ -1916,10 +1930,10 @@ function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRa
 	local worstPeriod = 1 / worstHz
 
 	local config = self._config
-	config.bestRefreshRate = bestPeriod
-	config.worstRefreshRate = worstPeriod
-	config.refreshRateRange = worstPeriod - bestPeriod
-	config.refreshRateMidpoint = (worstPeriod + bestPeriod) / 2
+	config.bestRefreshPeriod = bestPeriod
+	config.worstRefreshPeriod = worstPeriod
+	config.refreshPeriodRange = worstPeriod - bestPeriod
+	config.refreshPeriodMidpoint = (worstPeriod + bestPeriod) / 2
 end
 
 function CullThrottle.SetComputeVisibilityOnlyOnDemand(self: CullThrottle, computeVisibilityOnlyOnDemand: boolean)
@@ -1960,7 +1974,7 @@ function CullThrottle.GetRefreshRates(self: CullThrottle): NumberRange
 	-- leaking the internal unit (keeps the Hz-only contract symmetric). The worst
 	-- (least frequent) rate is the lower number, so it is the range's Min.
 	local config = self._config
-	return NumberRange.new(1 / config.worstRefreshRate, 1 / config.bestRefreshRate)
+	return NumberRange.new(1 / config.worstRefreshPeriod, 1 / config.bestRefreshPeriod)
 end
 
 function CullThrottle.GetComputeVisibilityOnlyOnDemand(self: CullThrottle): boolean
