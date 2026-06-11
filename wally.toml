@@ -28,6 +28,7 @@ exclude = [
     "demo",
     "dist/run-tests.server.luau",
     "dist/src/__tests__",
+    "dist/src/jest.config.luau",
 ]
 
 [dev-dependencies]
