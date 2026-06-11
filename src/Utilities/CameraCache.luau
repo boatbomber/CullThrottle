@@ -1,3 +1,5 @@
+--!strict
+
 --[[
     We use this singleton to cache the properties we're interested in.
 	This way, we can avoid reading from the DataModel every frame,
@@ -8,7 +10,7 @@ local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
 
 local CameraCache = {
 	_connections = {} :: { [string]: RBXScriptConnection },
-	Object = nil :: Camera?,
+	Object = workspace.CurrentCamera,
 	-- This gets bumped whenever the camera or its projection changes shape
 	-- (camera replaced, FOV, viewport/aspect). Rigid motion (CFrame changes)
 	-- does not bump it. Consumers holding state derived from the frustum planes
@@ -36,24 +38,24 @@ export type CameraCache = typeof(CameraCache)
 ]]
 function CameraCache.init(camera: Camera?)
 	CameraCache.cleanup()
-
-	CameraCache.Generation += 1
-	CameraCache.Object = camera
 	if not camera then
 		-- The CurrentCamera change handler will re-init once one exists.
 		return
 	end
+
+	CameraCache.Generation += 1
+	CameraCache.Object = camera
 
 	CameraCache.cframeChanged()
 	CameraCache.viewportSizeChanged()
 	CameraCache.fovChanged()
 
 	CameraCache._connections.CFrameChanged =
-		CameraCache.Object:GetPropertyChangedSignal("CFrame"):Connect(CameraCache.cframeChanged)
+		camera:GetPropertyChangedSignal("CFrame"):Connect(CameraCache.cframeChanged)
 	CameraCache._connections.ViewportSizeChanged =
-		CameraCache.Object:GetPropertyChangedSignal("ViewportSize"):Connect(CameraCache.viewportSizeChanged)
+		camera:GetPropertyChangedSignal("ViewportSize"):Connect(CameraCache.viewportSizeChanged)
 	CameraCache._connections.FieldOfViewChanged =
-		CameraCache.Object:GetPropertyChangedSignal("MaxAxisFieldOfView"):Connect(CameraCache.fovChanged)
+		camera:GetPropertyChangedSignal("MaxAxisFieldOfView"):Connect(CameraCache.fovChanged)
 end
 
 --[[
@@ -68,7 +70,8 @@ end
 
 --[[
 	Refreshes the cached CFrame and Position from the camera. This is rigid
-	motion only, so the generation is not bumped.
+	motion only, so the generation is not bumped. It only runs while a camera
+	is wired up, so the cast is safe.
 ]]
 function CameraCache.cframeChanged()
 	CameraCache.CFrame = CameraCache.Object.CFrame
@@ -77,7 +80,8 @@ end
 
 --[[
 	Refreshes the cached viewport size and aspect ratio, then recomputes the
-	FOV terms (which depend on the aspect ratio).
+	FOV terms (which depend on the aspect ratio). It only runs while a camera
+	is wired up, so the cast is safe.
 ]]
 function CameraCache.viewportSizeChanged()
 	CameraCache.ViewportSize = CameraCache.Object.ViewportSize
@@ -88,11 +92,14 @@ end
 --[[
 	Recomputes every cached FOV-derived term and bumps the generation, since a
 	projection change invalidates any state derived from the frustum planes.
+	It only runs while a camera is wired up, so the cast is safe.
 ]]
 function CameraCache.fovChanged()
 	CameraCache.Generation += 1
-	CameraCache.TanHalfVertFOV =
-		CameraCache.computeTanHalfVerticalFOV(CameraCache.Object.MaxAxisFieldOfView, CameraCache.AspectRatio)
+	CameraCache.TanHalfVertFOV = CameraCache.computeTanHalfVerticalFOV(
+		(CameraCache.Object :: Camera).MaxAxisFieldOfView,
+		CameraCache.AspectRatio
+	)
 
 	CameraCache.HalfVerticalFOV = math.atan(CameraCache.TanHalfVertFOV)
 	CameraCache.HalfHorizontalFOV = math.atan(CameraCache.TanHalfVertFOV * CameraCache.AspectRatio)
