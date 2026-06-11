@@ -19,14 +19,15 @@ include = [
 # See https://github.com/UpliftGames/wally/issues/70
 exclude = [
     "*.json",
+    "*.md",
+    "*.toml",
+    "*.rbxm",
+    "*.rbxl",
     "scripts",
     "src",
     "demo",
     "dist/run-tests.server.luau",
-    "*.rbxm",
-    "*.rbxl",
-    "rokit.toml",
-    "selene.toml",
+    "dist/src/__tests__",
 ]
 
 [dev-dependencies]
