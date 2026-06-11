@@ -1,13 +1,12 @@
 --!strict
 --!native
 --[[
-    PriorityQueue by Ilya Kolbin
-    url: github.com/iskolbin/priorityqueue
+    This is PriorityQueue by Ilya Kolbin, from github.com/iskolbin/priorityqueue.
 
-    Adapted for Luau by boatbomber
+    It was adapted for Luau by boatbomber.
 
     Lowest priority values come first.
---]]
+]]
 
 local PriorityQueue = {}
 PriorityQueue.__index = PriorityQueue
@@ -23,6 +22,9 @@ type PriorityQueueProto<T> = {
 
 export type PriorityQueue<T> = typeof(setmetatable({} :: PriorityQueueProto<T>, PriorityQueue))
 
+--[[
+	Builds an empty queue with an empty incoming batch.
+]]
 function PriorityQueue.new<T>(): PriorityQueue<T>
 	local self = setmetatable({
 		_items = {},
@@ -35,6 +37,10 @@ function PriorityQueue.new<T>(): PriorityQueue<T>
 	return self
 end
 
+--[[
+	Appends one item to the incoming batch, a cheap staging array that only
+	gets heapified when enqueueIncomingBatch runs.
+]]
 function PriorityQueue.addToIncomingBatch<T>(self: PriorityQueue<T>, item: T, priority: number): ()
 	local incomingBatch = self._incomingBatch
 	incomingBatch.size += 1
@@ -42,6 +48,10 @@ function PriorityQueue.addToIncomingBatch<T>(self: PriorityQueue<T>, item: T, pr
 	incomingBatch.priorities[incomingBatch.size] = priority
 end
 
+--[[
+	Appends parallel arrays of items and priorities to the incoming batch in
+	one bulk move.
+]]
 function PriorityQueue.addMultipleToIncomingBatch<T>(self: PriorityQueue<T>, items: { T }, priorities: { number }): ()
 	local incomingBatch = self._incomingBatch
 	local itemsCount = #items
@@ -50,6 +60,10 @@ function PriorityQueue.addMultipleToIncomingBatch<T>(self: PriorityQueue<T>, ite
 	incomingBatch.size += itemsCount
 end
 
+--[[
+	Heapifies everything staged in the incoming batch into the queue proper.
+	The batch is left intact, so pair this with clearIncomingBatch.
+]]
 function PriorityQueue.enqueueIncomingBatch<T>(self: PriorityQueue<T>): ()
 	local incomingBatch = self._incomingBatch
 	if incomingBatch.size > 0 then
@@ -57,6 +71,9 @@ function PriorityQueue.enqueueIncomingBatch<T>(self: PriorityQueue<T>): ()
 	end
 end
 
+--[[
+	Empties the incoming batch without touching the queue proper.
+]]
 function PriorityQueue.clearIncomingBatch<T>(self: PriorityQueue<T>): ()
 	local incomingBatch = self._incomingBatch
 	incomingBatch.size = 0
@@ -64,6 +81,10 @@ function PriorityQueue.clearIncomingBatch<T>(self: PriorityQueue<T>): ()
 	table.clear(incomingBatch.priorities)
 end
 
+--[[
+	Bubbles the element at `from` up toward the root until the min-heap
+	property holds again, returning its final index.
+]]
 function PriorityQueue.siftup<T>(self: PriorityQueue<T>, from: number)
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local index = from
@@ -78,6 +99,10 @@ function PriorityQueue.siftup<T>(self: PriorityQueue<T>, from: number)
 	return index
 end
 
+--[[
+	Sinks every element from `limit` down to the root into place. Called with
+	size // 2, this is the classic O(n) bottom-up heapify.
+]]
 function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 	local items, priorities, indices, size = self._items, self._priorities, self._indices, self._size
 	for index = limit, 1, -1 do
@@ -104,6 +129,10 @@ function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 	end
 end
 
+--[[
+	Inserts one item with the given priority. An item already in the queue is
+	left untouched.
+]]
 function PriorityQueue.enqueue<T>(self: PriorityQueue<T>, item: T, priority: number): PriorityQueue<T>
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	if indices[item] ~= nil then
@@ -116,6 +145,11 @@ function PriorityQueue.enqueue<T>(self: PriorityQueue<T>, item: T, priority: num
 	return self
 end
 
+--[[
+	Inserts a whole batch (parallel item/priority arrays, skipping nils and
+	duplicates) and restores the heap with one bottom-up siftdown, which beats
+	per-item siftup for large batches.
+]]
 function PriorityQueue.batchEnqueue<T>(self: PriorityQueue<T>, itemsBatch: { T }, prioritiesBatch: { number }): ()
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local size = self._size
@@ -134,6 +168,11 @@ function PriorityQueue.batchEnqueue<T>(self: PriorityQueue<T>, itemsBatch: { T }
 	end
 end
 
+--[[
+	Removes one item from anywhere in the queue (swapping the last element
+	into its slot and re-sifting), returning whether it was present. Items
+	still in the incoming batch are not consulted.
+]]
 function PriorityQueue.remove<T>(self: PriorityQueue<T>, item: T): boolean
 	local index = self._indices[item]
 	if index == nil then
@@ -154,12 +193,18 @@ function PriorityQueue.remove<T>(self: PriorityQueue<T>, item: T): boolean
 		size = size - 1
 		self._size = size
 		if size > 1 then
+			-- The swapped-in element can violate the heap in either direction,
+			-- so we bubble it up first and then sink from wherever it landed.
 			self:siftdown(self:siftup(index))
 		end
 	end
 	return true
 end
 
+--[[
+	Re-prioritizes an item already in the queue (a remove and then an enqueue),
+	returning false when it wasn't present.
+]]
 function PriorityQueue.update<T>(self: PriorityQueue<T>, item: T, priority: number): boolean
 	local ok = self:remove(item)
 	if not ok then
@@ -170,6 +215,10 @@ function PriorityQueue.update<T>(self: PriorityQueue<T>, item: T, priority: numb
 	return true
 end
 
+--[[
+	Pops and returns (item, priority) for the lowest-priority-value item.
+	Asserts on an empty queue.
+]]
 function PriorityQueue.dequeue<T>(self: PriorityQueue<T>): (T, number)
 	local size = self._size
 
@@ -195,18 +244,30 @@ function PriorityQueue.dequeue<T>(self: PriorityQueue<T>): (T, number)
 	return item, priority
 end
 
+--[[
+	Returns (item, priority) for the queue front without removing it.
+]]
 function PriorityQueue.peek<T>(self: PriorityQueue<T>): (T, number)
 	return self._items[1], self._priorities[1]
 end
 
+--[[
+	Returns the priority at the queue front, or nil when empty.
+]]
 function PriorityQueue.peekPriority<T>(self: PriorityQueue<T>): number?
 	return self._priorities[1]
 end
 
+--[[
+	Returns the live backing array of queued items, in heap (not priority) order.
+]]
 function PriorityQueue.items<T>(self: PriorityQueue<T>): { T }
 	return self._items
 end
 
+--[[
+	Empties the queue proper. The incoming batch is untouched.
+]]
 function PriorityQueue.clear<T>(self: PriorityQueue<T>): ()
 	table.clear(self._indices)
 	table.clear(self._items)
@@ -214,14 +275,23 @@ function PriorityQueue.clear<T>(self: PriorityQueue<T>): ()
 	self._size = 0
 end
 
+--[[
+	Returns how many items are in the queue proper.
+]]
 function PriorityQueue.len<T>(self: PriorityQueue<T>): number
 	return self._size
 end
 
+--[[
+	Returns whether the item is in the queue proper (not the incoming batch).
+]]
 function PriorityQueue.contains<T>(self: PriorityQueue<T>, item: T): boolean
 	return self._indices[item] ~= nil
 end
 
+--[[
+	Returns whether the queue proper is empty.
+]]
 function PriorityQueue.isEmpty<T>(self: PriorityQueue<T>): boolean
 	return self._size <= 0
 end

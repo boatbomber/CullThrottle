@@ -76,7 +76,7 @@ Magic! (jk, I'll write a nice explanation soon tm)
 
 3. **Anchor your BaseParts.** If your part is moved by Roblox's physics engine, it will not fire the cframe changed event when it moves. This means that you'll need to add it with AddPhysicsObject to have CullThrottle poll the object for its position. This has a noticeable performance impact, and can even lead to incorrect visibilities if the object moves too quickly.
 
-4. **Use tags.** CollectionService tags are a powerful way to group objects together and manage them with CullThrottle. You can add and remove tags at runtime, and CullThrottle will automatically track the objects with those tags. It will automatically add BaseParts as physics objects if they are not anchored, so don't forget #3!
+4. **Use tags.** CollectionService tags are a powerful way to group objects together and manage them with CullThrottle. You can add and remove tags at runtime, and CullThrottle will automatically track the objects with those tags. It will automatically add BaseParts as physics objects if they are not anchored at the moment they're captured, so don't forget #3! It will not switch modes if anchored changes after it was already added.
 
 ## Supported Object Types
 
@@ -141,6 +141,8 @@ CullThrottle:CaptureTag(tag: string)
 ```
 
 Adds all objects with a given tag to CullThrottle's tracking. Listens to the InstanceAdded and InstanceRemoved events for this tag, adding and removing objects automatically.
+
+Unanchored BaseParts are added as physics objects. This routing happens once, when the object is captured: changing a part's Anchored property later does not move it between static and physics tracking. Re-toggle the tag (or remove and re-add the object) if its anchored state changes.
 
 **IMPORTANT:** It will add the object as a physics object if it is a non-anchored BasePart. Be sure to anchor your objects before they get picked up by InstanceAdded if you do not want this behavior.
 

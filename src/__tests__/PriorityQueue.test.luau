@@ -311,8 +311,8 @@ describe("PriorityQueue", function()
 			queue:enqueue("c", 3)
 
 			-- Raising a's priority should move it to the back. The other update tests
-			-- only decrease priority (bubbling toward the root); this exercises the
-			-- opposite, sink, direction.
+			-- only decrease priority (bubbling toward the root), so this one exercises
+			-- the opposite sink direction.
 			queue:update("a", 10)
 
 			expect((queue:peek())).toBe("b")
@@ -518,7 +518,6 @@ describe("PriorityQueue", function()
 
 			queue:dequeue()
 
-			-- The returned set tracks live membership, dropping the dequeued item.
 			local remaining = queue:items()
 			expect(#remaining).toBe(1)
 			expect(remaining).toContain("a")
@@ -675,10 +674,10 @@ describe("PriorityQueue", function()
 		end)
 
 		it("maintains the min-heap invariant across random insert/remove/update/dequeue", function()
-			-- A property test: brute-force the heap with thousands of random ops and
-			-- assert the parent <= children invariant holds after every one. This is
-			-- the highest-value guard for a heap and exercises the remove/update
-			-- mutation paths the targeted tests can't fully cover.
+			-- This is a property test that brute-forces the heap with thousands of
+			-- random ops and asserts the parent <= children invariant holds after
+			-- every one. It's the highest-value guard for a heap and exercises the
+			-- remove/update mutation paths the targeted tests can't fully cover.
 			local function heapIsValid(): boolean
 				local priorities = queue._priorities
 				for index = 2, queue._size do
@@ -689,7 +688,7 @@ describe("PriorityQueue", function()
 				return true
 			end
 
-			-- Track present items in an array + index map for O(1) random pick/remove.
+			-- Track present items in an array plus an index map for O(1) random pick/remove.
 			local presentList, presentIndex = {}, {}
 			local function addPresent(item)
 				table.insert(presentList, item)

@@ -1,13 +1,21 @@
 --!strict
 
+--[[
+	This is the mutable runtime configuration a CullThrottle instance reads
+	each frame. It's built with the library defaults and mutated in place by
+	the Set* methods on CullThrottle. Fields with derived companions (the
+	multi-voxel threshold, the refresh period range and midpoint, and the
+	render distance midpoint and live baseline) are only ever written through
+	the set methods below, which both Config.new and the facade setters call,
+	so each derivation lives in one place.
+]]
+
 local Config = {}
 Config.__index = Config
 
--- multiVoxelRadiusThreshold is this fraction of the voxel size. An object whose
+-- The multiVoxelRadiusThreshold is this fraction of the voxel size. An object whose
 -- radius exceeds it can straddle more than one voxel, so it is tracked in every
--- voxel it overlaps instead of just the one holding its center. Both Config.new
--- and CullThrottle:SetVoxelSize derive the threshold from this single ratio so
--- they can't drift apart.
+-- voxel it overlaps instead of just the one holding its center.
 Config.MULTI_VOXEL_RADIUS_RATIO = 0.25
 
 type ConfigurationProto = {
@@ -29,19 +37,17 @@ type ConfigurationProto = {
 	minRenderDistance: number,
 	maxRenderDistance: number,
 	renderDistanceMidpoint: number,
-	dynamicRenderDistance: boolean,
 	renderDistance: number,
-	renderDistanceStep: number,
-	renderDistanceDirection: number,
 }
 
 export type Config = typeof(setmetatable({} :: ConfigurationProto, Config))
 
+--[[
+	Builds a config holding the library defaults. The fields with derived
+	companions go through the same set methods the facade setters use.
+]]
 function Config.new(): Config
-	local self = setmetatable({}, Config)
-
-	self.voxelSize = 100
-	self.multiVoxelRadiusThreshold = self.voxelSize * Config.MULTI_VOXEL_RADIUS_RATIO
+	local self: Config = setmetatable({}, Config) :: any
 
 	self.computeVisibilityOnlyOnDemand = false
 	self.strictlyEnforceWorstRefreshRate = false
@@ -50,20 +56,42 @@ function Config.new(): Config
 	self.ingestTimeBudget = 1.2 / 1000
 	self.updateTimeBudget = 0.4 / 1000
 
-	self.bestRefreshPeriod = 1 / 60
-	self.worstRefreshPeriod = 1 / 15
-	self.refreshPeriodRange = self.worstRefreshPeriod - self.bestRefreshPeriod
-	self.refreshPeriodMidpoint = (self.bestRefreshPeriod + self.worstRefreshPeriod) / 2
-
-	self.minRenderDistance = 150
-	self.maxRenderDistance = 2000
-	self.renderDistanceMidpoint = (self.minRenderDistance + self.maxRenderDistance) / 2
-	self.dynamicRenderDistance = self.minRenderDistance ~= self.maxRenderDistance
-	self.renderDistance = self.renderDistanceMidpoint
-	self.renderDistanceStep = 0.03
-	self.renderDistanceDirection = 0
+	self:setVoxelSize(100)
+	self:setRefreshPeriods(1 / 60, 1 / 15)
+	self:setRenderDistanceRange(150, 2000)
 
 	return self
+end
+
+--[[
+	Sets the voxel grid cell size and derives the multi-voxel radius threshold
+	from it.
+]]
+function Config.setVoxelSize(self: Config, voxelSize: number)
+	self.voxelSize = voxelSize
+	self.multiVoxelRadiusThreshold = voxelSize * Config.MULTI_VOXEL_RADIUS_RATIO
+end
+
+--[[
+	Sets the best (most frequent) and worst refresh periods, in seconds between
+	refreshes, and derives their range and midpoint.
+]]
+function Config.setRefreshPeriods(self: Config, bestRefreshPeriod: number, worstRefreshPeriod: number)
+	self.bestRefreshPeriod = bestRefreshPeriod
+	self.worstRefreshPeriod = worstRefreshPeriod
+	self.refreshPeriodRange = worstRefreshPeriod - bestRefreshPeriod
+	self.refreshPeriodMidpoint = (bestRefreshPeriod + worstRefreshPeriod) / 2
+end
+
+--[[
+	Sets the [min, max] render distance bounds, derives their midpoint, and
+	resets the live distance to that baseline.
+]]
+function Config.setRenderDistanceRange(self: Config, minRenderDistance: number, maxRenderDistance: number)
+	self.minRenderDistance = minRenderDistance
+	self.maxRenderDistance = maxRenderDistance
+	self.renderDistanceMidpoint = (minRenderDistance + maxRenderDistance) / 2
+	self.renderDistance = self.renderDistanceMidpoint
 end
 
 return Config

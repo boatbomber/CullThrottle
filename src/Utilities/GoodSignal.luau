@@ -76,6 +76,12 @@ function Connection.new(signal: any, fn: any): Connection
 end
 
 function Connection.Disconnect(self: Connection)
+	-- Disconnecting twice must be a no-op. Without this guard the count below
+	-- would be decremented again, undercounting the remaining live handlers.
+	if not self._connected then
+		return
+	end
+
 	self._connected = false
 	self._signal._connectionCount -= 1
 
@@ -137,8 +143,14 @@ function Signal.Connect(self: Signal, fn: (...any) -> ()): Connection
 end
 
 -- Disconnect all handlers. Since we use a linked list it suffices to clear the
--- reference to the head handler.
+-- reference to the head handler, but each node is also marked disconnected so
+-- a Disconnect call on one of them later doesn't drive the count negative.
 function Signal.DisconnectAll(self: Signal)
+	local item = self._handlerListHead
+	while item do
+		item._connected = false
+		item = item._next
+	end
 	self._connectionCount = 0
 	self._handlerListHead = false
 end

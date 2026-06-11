@@ -1,10 +1,13 @@
 local Blocks = {}
 
+--[[
+	Creates `count` randomly placed, randomly sized and oriented blocks within
+	the region. The blocks aren't parented, so the caller decides where they go.
+]]
 function Blocks.createCluster(clusterRegion: Region3, count: number): { BasePart }
 	local blocks = {}
 
 	for _ = 1, count do
-		-- Get a random point within the cluster region
 		local point = clusterRegion.CFrame:PointToWorldSpace(
 			Vector3.new(
 				math.random(-clusterRegion.Size.X / 2, clusterRegion.Size.X / 2),
@@ -13,7 +16,6 @@ function Blocks.createCluster(clusterRegion: Region3, count: number): { BasePart
 			)
 		)
 
-		-- Create a new block
 		local block = Instance.new("Part")
 		block.Name = "Block"
 		block.Size = Vector3.one * math.random(1, 20)
@@ -36,6 +38,10 @@ function Blocks.createCluster(clusterRegion: Region3, count: number): { BasePart
 	return blocks
 end
 
+--[[
+	Scatters `clusterCount` randomly sized cluster regions around the demo area
+	and fills each with blocks, returning all the blocks as one flat list.
+]]
 function Blocks.generateBlockClusters(clusterCount: number, blocksPerCluster: number): { BasePart }
 	local blocks = {}
 

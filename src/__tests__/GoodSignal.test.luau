@@ -67,6 +67,19 @@ describe("GoodSignal", function()
 			expect(signal._connectionCount).toBe(0)
 		end)
 
+		it("keeps the connection count intact when a connection is disconnected twice", function()
+			local c1 = signal:Connect(function() end)
+			signal:Connect(function() end)
+
+			-- The second disconnect must be a no-op. If it decremented again, the
+			-- count would read zero while a live handler remains, and anything
+			-- gating work on the count would wrongly see no demand.
+			c1:Disconnect()
+			c1:Disconnect()
+
+			expect(signal._connectionCount).toBe(1)
+		end)
+
 		it("does not run a handler after it is disconnected", function()
 			local count = 0
 			local connection = signal:Connect(function()
@@ -101,6 +114,19 @@ describe("GoodSignal", function()
 			signal:Fire()
 
 			expect(count).toBe(0)
+			expect(signal._connectionCount).toBe(0)
+		end)
+
+		it("makes a later Disconnect on a swept connection a no-op", function()
+			local connection = signal:Connect(function() end)
+
+			signal:DisconnectAll()
+
+			-- Disconnecting a connection the sweep already covered must not
+			-- decrement the count again and drive it negative.
+			connection:Disconnect()
+
+			expect(connection._connected).toBe(false)
 			expect(signal._connectionCount).toBe(0)
 		end)
 	end)

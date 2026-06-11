@@ -8,10 +8,12 @@ local it = JestGlobals.it
 local expect = JestGlobals.expect
 
 local CullThrottle = Packages:WaitForChild("CullThrottle")
-local ObjectDimensions = require(CullThrottle:WaitForChild("Utilities"):WaitForChild("ObjectDimensions"))
+local ObjectDimensions = require(CullThrottle:WaitForChild("ObjectDimensions"))
 
--- Builds the minimal objectData the dimension getters/connectors read, resolving
--- the cframe/bounding box sources the same way AddObject does.
+--[[
+	Builds the minimal objectData the dimension getters/connectors read, resolving
+	the cframe/bounding box sources the same way AddObject does.
+]]
 local function resolveData(object: Instance): any
 	local cframeSource, cframeType = ObjectDimensions.getObjectCFrameSource(object)
 	local boundingBoxSource, boundingBoxType = ObjectDimensions.getObjectBoundingBoxSource(object)
@@ -24,6 +26,9 @@ local function resolveData(object: Instance): any
 	}
 end
 
+--[[
+	Creates an anchored 4x4x4 part at the origin, parented to workspace.
+]]
 local function makePart(): Part
 	local part = Instance.new("Part")
 	part.Anchored = true
@@ -33,8 +38,11 @@ local function makePart(): Part
 	return part
 end
 
--- Builds the wireObjectConnections callbacks plus a state table the tests assert
--- against: how many times each callback fired and the tracked flag isTracked reports.
+--[[
+	Builds the wireObjectConnections callbacks plus a state table the tests assert
+	against, tracking how many times each callback fired and the tracked flag
+	isTracked reports.
+]]
 local function makeWatch(): (any, any)
 	local state = { geometryChanges = 0, untrackableCalls = 0, tracked = true }
 	local callbacks = {
@@ -51,6 +59,9 @@ local function makeWatch(): (any, any)
 	return callbacks, state
 end
 
+--[[
+	Disconnects every change connection an objectData holds.
+]]
 local function disconnectAll(data: any)
 	for _, connection in data.changeConnections do
 		connection:Disconnect()
@@ -247,7 +258,7 @@ describe("ObjectDimensions", function()
 			beam.Width1 = 4
 			beam.Parent = part
 
-			-- width = max(Width0, Width1) = 4; length = attachment span = 10
+			-- The width is max(Width0, Width1) = 4 and the length is the attachment span of 10.
 			expect(ObjectDimensions.getObjectBoundingBox(resolveData(beam))).toBe(Vector3.new(4, 4, 10))
 
 			part:Destroy()
@@ -328,6 +339,56 @@ describe("ObjectDimensions", function()
 			task.wait()
 
 			expect(received).toBe(Vector3.one * 20)
+
+			for _, connection in connections do
+				connection:Disconnect()
+			end
+			part:Destroy()
+		end)
+
+		it("fires the cframe callback when an attachment moves", function()
+			local part = makePart()
+			local attachment = Instance.new("Attachment")
+			attachment.Position = Vector3.new(0, 0, 0)
+			attachment.Parent = part
+
+			local received
+			local connections = ObjectDimensions.connectCFrameChangeEvent(resolveData(attachment), function(cframe)
+				received = cframe
+			end)
+
+			-- WorldCFrame is derived and never fires a property signal, so the
+			-- wiring must catch the stored properties that assignments actually
+			-- write, while still reporting the world-space frame.
+			attachment.Position = Vector3.new(3, 0, 0)
+			task.wait()
+
+			expect((received :: CFrame).Position).toBe(Vector3.new(3, 0, 0))
+
+			for _, connection in connections do
+				connection:Disconnect()
+			end
+			part:Destroy()
+		end)
+
+		it("fires the cframe callback when a bone's stored cframe changes", function()
+			local part = makePart()
+			local bone = Instance.new("Bone")
+			bone.Parent = part
+
+			local received
+			local connections = ObjectDimensions.connectCFrameChangeEvent(resolveData(bone), function(cframe)
+				received = cframe
+			end)
+
+			-- TransformedWorldCFrame is derived the same way WorldCFrame is, so
+			-- the wiring must catch the stored CFrame while reporting the
+			-- world-space result. The Transform property fires no changed signal
+			-- at all, so the stored CFrame is the only observable move.
+			bone.CFrame = CFrame.new(0, 5, 0)
+			task.wait()
+
+			expect((received :: CFrame).Position).toBe(Vector3.new(0, 5, 0))
 
 			for _, connection in connections do
 				connection:Disconnect()
@@ -473,8 +534,8 @@ describe("ObjectDimensions", function()
 			state.tracked = false
 			ObjectDimensions.wireObjectConnections(light, data, callbacks)
 
-			-- isTracked() reports false, so a late ancestry signal must be ignored:
-			-- the source is left untouched and no geometry refresh fires.
+			-- isTracked() reports false, so a late ancestry signal must be ignored.
+			-- The source is left untouched and no geometry refresh fires.
 			light.Parent = partB
 			task.wait()
 
@@ -505,6 +566,179 @@ describe("ObjectDimensions", function()
 			disconnectAll(data)
 			part:Destroy()
 			holder:Destroy()
+		end)
+
+		it("follows the new primary part after a model's primary part is replaced", function()
+			local model = Instance.new("Model")
+			local partA = Instance.new("Part")
+			partA.Anchored = true
+			partA.Size = Vector3.new(4, 4, 4)
+			partA.CFrame = CFrame.new(0, 0, 0)
+			partA.Parent = model
+			local partB = Instance.new("Part")
+			partB.Anchored = true
+			partB.Size = Vector3.new(4, 4, 4)
+			partB.CFrame = CFrame.new(0, 0, 0)
+			partB.Parent = model
+			model.PrimaryPart = partA
+			model.Parent = workspace
+
+			local data = resolveData(model)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(model, data, callbacks)
+
+			-- The pivot listener was wired to partA, so swapping the primary part
+			-- must rewire it onto partB for the model's geometry to stay live.
+			model.PrimaryPart = partB
+			task.wait()
+
+			partB.CFrame = CFrame.new(25, 0, 0)
+			task.wait()
+
+			expect(state.geometryChanges).toBeGreaterThan(0)
+			expect(data.cframe.Position).toBe(Vector3.new(25, 0, 0))
+			expect(state.untrackableCalls).toBe(0)
+
+			disconnectAll(data)
+			model:Destroy()
+		end)
+
+		it("falls back to the world pivot when a model's primary part is destroyed", function()
+			local model = Instance.new("Model")
+			local partA = Instance.new("Part")
+			partA.Anchored = true
+			partA.Size = Vector3.new(4, 4, 4)
+			partA.CFrame = CFrame.new(0, 0, 0)
+			partA.Parent = model
+			local partB = Instance.new("Part")
+			partB.Anchored = true
+			partB.Size = Vector3.new(4, 4, 4)
+			partB.CFrame = CFrame.new(0, 0, 0)
+			partB.Parent = model
+			model.PrimaryPart = partA
+			model.Parent = workspace
+
+			local data = resolveData(model)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(model, data, callbacks)
+
+			-- Destroying the primary part clears the PrimaryPart property. The
+			-- model itself lives on, so it must stay tracked and follow its
+			-- WorldPivot instead of freezing at the dead part's last cframe.
+			partA:Destroy()
+			task.wait()
+
+			expect(state.untrackableCalls).toBe(0)
+
+			model.WorldPivot = CFrame.new(7, 0, 0)
+			task.wait()
+
+			expect(data.cframe.Position).toBe(Vector3.new(7, 0, 0))
+
+			disconnectAll(data)
+			model:Destroy()
+		end)
+
+		it("follows a beam's replacement attachment", function()
+			local part = makePart()
+			local a0 = Instance.new("Attachment")
+			a0.Position = Vector3.new(0, 0, 0)
+			a0.Parent = part
+			local a1 = Instance.new("Attachment")
+			a1.Position = Vector3.new(10, 0, 0)
+			a1.Parent = part
+			local beam = Instance.new("Beam")
+			beam.Attachment0 = a0
+			beam.Attachment1 = a1
+			beam.Parent = part
+
+			local data = resolveData(beam)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
+
+			-- The geometry listeners were wired to a0 and a1, so swapping in a2
+			-- must refresh the midpoint and rewire onto it.
+			local a2 = Instance.new("Attachment")
+			a2.Position = Vector3.new(20, 0, 0)
+			a2.Parent = part
+			beam.Attachment0 = a2
+			task.wait()
+
+			expect(data.cframe.Position).toBe(Vector3.new(15, 0, 0))
+
+			-- A second swap exercises the attachment watch that the first rewire
+			-- itself wired, proving the rewiring is self-sustaining. The midpoint
+			-- of a0 at the origin and a1 at 10 is 5.
+			beam.Attachment0 = a0
+			task.wait()
+
+			expect(data.cframe.Position).toBe(Vector3.new(5, 0, 0))
+			expect(state.untrackableCalls).toBe(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("follows a beam's attachments as they move", function()
+			local part = makePart()
+			local a0 = Instance.new("Attachment")
+			a0.Position = Vector3.new(0, 0, 0)
+			a0.Parent = part
+			local a1 = Instance.new("Attachment")
+			a1.Position = Vector3.new(10, 0, 0)
+			a1.Parent = part
+			local beam = Instance.new("Beam")
+			beam.Attachment0 = a0
+			beam.Attachment1 = a1
+			beam.Parent = part
+
+			local data = resolveData(beam)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
+
+			-- Moving an attachment must refresh both the beam's midpoint cframe
+			-- and its bounding box span. The world-space setter writes through to
+			-- the stored CFrame, which is the property the wiring listens to.
+			a1.WorldCFrame = CFrame.new(30, 0, 0)
+			task.wait()
+
+			expect(data.cframe.Position).toBe(Vector3.new(15, 0, 0))
+			-- The default beam width is 1 and the span is now 30, so the half
+			-- bounding box is half of (1, 1, 30).
+			expect(data.halfBoundingBox).toBe(Vector3.new(0.5, 0.5, 15))
+			expect(state.geometryChanges).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("drops a beam when one of its attachments is destroyed", function()
+			local part = makePart()
+			local a0 = Instance.new("Attachment")
+			a0.Position = Vector3.new(0, 0, 0)
+			a0.Parent = part
+			local a1 = Instance.new("Attachment")
+			a1.Position = Vector3.new(10, 0, 0)
+			a1.Parent = part
+			local beam = Instance.new("Beam")
+			beam.Attachment0 = a0
+			beam.Attachment1 = a1
+			beam.Parent = part
+
+			local data = resolveData(beam)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
+
+			-- Destroying an attachment clears the beam's reference to it. The beam
+			-- can no longer produce geometry, so it must be reported untrackable
+			-- rather than left frozen at its last midpoint.
+			a0:Destroy()
+			task.wait()
+
+			expect(state.untrackableCalls).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
 		end)
 	end)
 end)

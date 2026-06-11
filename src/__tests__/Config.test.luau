@@ -32,15 +32,19 @@ describe("Config", function()
 		end)
 
 		it("derives the computed fields from the public defaults", function()
-			-- The default render distance range is [150, 2000], so its midpoint is the
-			-- live distance's starting baseline and dynamic adjustment is active.
+			-- The default render distance range is [150, 2000], so its midpoint is
+			-- the live distance's starting baseline.
 			expect(config.minRenderDistance).toBe(150)
 			expect(config.maxRenderDistance).toBe(2000)
 			expect(config.renderDistanceMidpoint).toBe((150 + 2000) / 2)
 			expect(config.renderDistance).toBe((150 + 2000) / 2)
-			expect(config.dynamicRenderDistance).toBe(true)
-			expect(config.renderDistanceStep).toBeCloseTo(0.03)
-			expect(config.renderDistanceDirection).toBe(0)
+
+			-- The multi-voxel threshold is a quarter of the default 100 voxel size,
+			-- and the refresh period range and midpoint come from the default
+			-- 15 to 60 Hz rates.
+			expect(config.multiVoxelRadiusThreshold).toBe(25)
+			expect(config.refreshPeriodRange).toBeCloseTo(1 / 15 - 1 / 60)
+			expect(config.refreshPeriodMidpoint).toBeCloseTo((1 / 60 + 1 / 15) / 2)
 		end)
 
 		it("returns independent instances", function()
@@ -50,7 +54,6 @@ describe("Config", function()
 			a.voxelSize = 999
 			a.renderDistance = 12345
 
-			-- Mutating one config must not bleed into another.
 			expect(b.voxelSize).never.toBe(a.voxelSize)
 			expect(b.renderDistance).never.toBe(a.renderDistance)
 		end)

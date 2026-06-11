@@ -25,7 +25,7 @@ describe("CameraCache", function()
 		end)
 
 		it("should not divide by zero for a zero-height viewport", function()
-			-- Must be finite (0), never inf/NaN, or it would poison the frustum bounds
+			-- This must be finite (0) and never inf/NaN, or it would poison the frustum bounds.
 			expect(CameraCache.computeAspectRatio(Vector2.new(800, 0))).toBe(0)
 		end)
 	end)
@@ -60,7 +60,7 @@ describe("CameraCache", function()
 			expect(CameraCache.Object).toBe(workspace.CurrentCamera)
 			expect(CameraCache.CFrame).toBeDefined()
 			expect(CameraCache.Position).toBeDefined()
-			-- AspectRatio is a finite number (equals itself rules out NaN)
+			-- NaN is the one value that doesn't equal itself, so this rules out a NaN aspect ratio.
 			expect(CameraCache.AspectRatio == CameraCache.AspectRatio).toBe(true)
 		end)
 
@@ -75,8 +75,8 @@ describe("CameraCache", function()
 			expect(CameraCache.Object).toBe(camera)
 			expect(CameraCache.CFrame).toBe(camera.CFrame)
 			expect(CameraCache.Position).toBe(camera.CFrame.Position)
-			-- TanHalfVertFOV is the vertical tan(FoV/2) derived from the camera's
-			-- reliable max-axis FoV and the viewport aspect ratio.
+			-- TanHalfVertFOV is the vertical tan(FoV/2), derived from the camera's
+			-- max-axis FoV narrowed by the viewport aspect ratio.
 			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
 				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
 			)
@@ -140,7 +140,7 @@ describe("CameraCache", function()
 			camera.FieldOfView = 90
 			task.wait()
 
-			-- Recomputed from the new FoV: a stale cache would still reflect FoV 70.
+			-- This is recomputed from the new FoV. A stale cache would still reflect FoV 70.
 			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
 				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
 			)
@@ -211,7 +211,7 @@ describe("CameraCache", function()
 			local voxelSize = 100
 			local planes, minBound, maxBound = CameraCache.getPlanesAndBounds(renderDistance, voxelSize)
 
-			-- Four side planes plus the far plane, each stored as a (position, normal) pair.
+			-- We get four side planes plus the far plane, each stored as a (position, normal) pair.
 			expect(#planes).toBe(10)
 			expect(typeof(minBound)).toBe("Vector3")
 			expect(typeof(maxBound)).toBe("Vector3")

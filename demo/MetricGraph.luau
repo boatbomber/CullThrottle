@@ -21,6 +21,10 @@ type MetricGraphProto = {
 
 export type MetricGraph = typeof(setmetatable({} :: MetricGraphProto, MetricGraph))
 
+--[[
+	Builds the graph's gui (title, min/max/current/average labels, and one bar
+	per datapoint) around the given backing data array and value range.
+]]
 function MetricGraph.new(title: string, data: { number }, min: number, max: number, formatStr: string?): MetricGraph
 	local self = setmetatable({
 		Min = min,
@@ -129,6 +133,10 @@ function MetricGraph.new(title: string, data: { number }, min: number, max: numb
 	return self
 end
 
+--[[
+	Redraws every bar and label from the current backing data, widening the
+	displayed range when the data exceeds the configured min/max.
+]]
 function MetricGraph.refresh(self: MetricGraph)
 	local trueMin, trueMax = math.min(table.unpack(self._data)), math.max(table.unpack(self._data))
 	local min, max = math.min(self.Min, trueMin), math.max(self.Max, trueMax)
@@ -145,6 +153,8 @@ function MetricGraph.refresh(self: MetricGraph)
 		local line = self._lineFrames[i]
 		if line then
 			line.Size = UDim2.fromScale(1 / #self._data, height)
+			-- The color is keyed to the configured range rather than the widened one, so
+			-- out-of-range values just peg at the hot or cold end of the heatmap.
 			line.BackgroundColor3 = Utility.getHeatmapColor((datapoint - self.Min) / (self.Max - self.Min))
 		end
 		if i == #self._data then
@@ -155,6 +165,10 @@ function MetricGraph.refresh(self: MetricGraph)
 	self._avgLabel.Text = string.format(self.FormatStr, sum / #self._data)
 end
 
+--[[
+	Pushes one datapoint into the rolling window (dropping the oldest) and
+	redraws.
+]]
 function MetricGraph.measure(self: MetricGraph, datapoint: number)
 	table.insert(self._data, datapoint)
 	table.remove(self._data, 1)
