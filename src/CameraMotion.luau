@@ -5,11 +5,13 @@
 --[[
 	This module owns the camera-motion accumulators every cached visibility
 	verdict is proven against. _accumT (translation, in voxel units), _accumR
-	(rotation, radians, full axis-angle so roll counts) and _accumF (render
-	distance changes) only ever grow, so a verdict that stores the accumulator
-	reading past which it can no longer be trusted is validated with a single
-	comparison. When no motion bound can relate the old frustum to the new one,
-	the caches flush and the accumulators re-anchor at zero instead.
+	(rotation, radians, covering full axis-angle turns so roll counts, plus
+	projection half-angle swings since FOV and aspect changes rotate the side
+	planes about the camera) and _accumF (render distance changes) only ever
+	grow, so a verdict that stores the accumulator reading past which it can no
+	longer be trusted is validated with a single comparison. When no motion
+	bound can relate the old frustum to the new one, the caches flush and the
+	accumulators re-anchor at zero instead.
 ]]
 
 local Config = require(script.Parent.Config)
@@ -45,6 +47,8 @@ type CameraMotionProto = {
 	_accumF: number,
 	_lastCameraCFrame: CFrame,
 	_lastRenderDistanceVoxels: number,
+	_lastHalfVerticalFOV: number,
+	_lastHalfHorizontalFOV: number,
 	_lastCameraGeneration: number,
 }
 
@@ -63,6 +67,8 @@ function CameraMotion.new(config: Config.Config, visibilityCache: VisibilityCach
 		_accumF = 0,
 		_lastCameraCFrame = CameraCache.CFrame,
 		_lastRenderDistanceVoxels = config.renderDistance / config.voxelSize,
+		_lastHalfVerticalFOV = CameraCache.HalfVerticalFOV,
+		_lastHalfHorizontalFOV = CameraCache.HalfHorizontalFOV,
 		_lastCameraGeneration = CameraCache.Generation,
 	}, CameraMotion)
 
@@ -74,8 +80,8 @@ end
 	to the camera's current pose. Resetting the accumulators without clearing
 	the caches would resurrect old proofs, so the two always happen together.
 	This is needed when no motion bound can relate the old planes to the new
-	ones, meaning a projection change (FOV, viewport, camera replaced) or a
-	voxel size change (every cached quantity is in voxel units).
+	ones, meaning the camera itself was replaced or the voxel size changed
+	(every cached quantity is in voxel units).
 ]]
 function CameraMotion.flushVisibilityCache(self: CameraMotion)
 	self._visibilityCache:clear()
@@ -84,14 +90,16 @@ function CameraMotion.flushVisibilityCache(self: CameraMotion)
 	self._accumF = 0
 	self._lastCameraCFrame = CameraCache.CFrame
 	self._lastRenderDistanceVoxels = self._config.renderDistance / self._config.voxelSize
+	self._lastHalfVerticalFOV = CameraCache.HalfVerticalFOV
+	self._lastHalfHorizontalFOV = CameraCache.HalfHorizontalFOV
 	self._lastCameraGeneration = CameraCache.Generation
 end
 
 --[[
 	Advances the motion accumulators by how far the camera moved since the last
 	processed frame. Only endpoint poses matter for the bound, so gaps between
-	processed frames (computeVisibilityOnlyOnDemand) are covered. A projection
-	change has no motion bound at all, so it flushes instead.
+	processed frames (computeVisibilityOnlyOnDemand) are covered. A camera swap
+	has no motion bound at all, so it flushes instead.
 ]]
 function CameraMotion.accumulate(self: CameraMotion)
 	if CameraCache.Generation ~= self._lastCameraGeneration then
@@ -112,6 +120,22 @@ function CameraMotion.accumulate(self: CameraMotion)
 		self._accumT += vectorMagnitude(cameraCFrame.Position - lastCameraCFrame.Position) / voxelSize
 		self._accumR += rotation
 		self._lastCameraCFrame = cameraCFrame
+	end
+
+	-- A projection change rotates each side plane about the camera by the
+	-- change in that axis's half-angle and leaves the far plane alone, so it
+	-- sweeps the planes no farther than a camera rotation of the larger
+	-- half-angle delta would. That lets it charge the rotation accumulator
+	-- instead of flushing the caches.
+	local halfVerticalFOV = CameraCache.HalfVerticalFOV
+	local halfHorizontalFOV = CameraCache.HalfHorizontalFOV
+	if halfVerticalFOV ~= self._lastHalfVerticalFOV or halfHorizontalFOV ~= self._lastHalfHorizontalFOV then
+		self._accumR += math.max(
+			math.abs(halfVerticalFOV - self._lastHalfVerticalFOV),
+			math.abs(halfHorizontalFOV - self._lastHalfHorizontalFOV)
+		)
+		self._lastHalfVerticalFOV = halfVerticalFOV
+		self._lastHalfHorizontalFOV = halfHorizontalFOV
 	end
 
 	local farDelta = math.abs(renderDistanceVoxels - self._lastRenderDistanceVoxels)

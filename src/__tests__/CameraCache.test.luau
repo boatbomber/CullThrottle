@@ -137,7 +137,7 @@ describe("CameraCache", function()
 	end)
 
 	describe("Generation", function()
-		it("bumps when the field of view changes and not when the camera moves", function()
+		it("holds still for camera motion and field of view changes", function()
 			local camera = makeCamera()
 			camera.FieldOfView = 70
 			CameraCache.init(camera)
@@ -150,11 +150,14 @@ describe("CameraCache", function()
 			task.wait()
 			expect(CameraCache.Generation).toBe(generationBefore)
 
-			-- A projection change has no motion bound at all, so it must bump or
-			-- consumers would trust proofs measured against the old planes.
+			-- A projection change swings the side planes by at most the half-angle
+			-- deltas, which CameraMotion charges as rotation, so the generation
+			-- must hold still here too while the cached trig refreshes.
+			local halfVerticalBefore = CameraCache.HalfVerticalFOV
 			camera.FieldOfView = 90
 			task.wait()
-			expect(CameraCache.Generation).toBeGreaterThan(generationBefore)
+			expect(CameraCache.Generation).toBe(generationBefore)
+			expect(CameraCache.HalfVerticalFOV).toBeGreaterThan(halfVerticalBefore)
 		end)
 
 		it("bumps when the cache is pointed at a camera", function()
@@ -204,9 +207,9 @@ describe("CameraCache", function()
 
 			-- Poison the cached values, then drive the viewport handler directly
 			-- (ViewportSize itself is read-only in a headless run). It must rebuild
-			-- the aspect ratio from the camera's real viewport, reflow the FOV
-			-- terms through it, and bump the generation since the projection's
-			-- shape is in play.
+			-- the aspect ratio from the camera's real viewport and reflow the FOV
+			-- terms through it. The generation holds still because a projection
+			-- reshape is bounded as motion through the half-angle deltas.
 			CameraCache.AspectRatio = -123
 			CameraCache.TanHalfVertFOV = -123
 			local generationBefore = CameraCache.Generation
@@ -219,7 +222,7 @@ describe("CameraCache", function()
 			expect(CameraCache.TanHalfVertFOV).toBeCloseTo(
 				math.tan(math.rad(camera.MaxAxisFieldOfView / 2)) / math.max(CameraCache.AspectRatio, 1)
 			)
-			expect(CameraCache.Generation).toBeGreaterThan(generationBefore)
+			expect(CameraCache.Generation).toBe(generationBefore)
 		end)
 	end)
 

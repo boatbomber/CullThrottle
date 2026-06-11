@@ -165,7 +165,57 @@ describe("CameraMotion", function()
 		expect(motion._accumR).toBe(63)
 	end)
 
-	it("flushes all cached proofs when the camera projection changes", function()
+	it("charges a field of view change to the rotation accumulator and keeps cached proofs", function()
+		local visibilityCache = cullThrottle._visibilityCache
+		local proofKey = Vector3.new(1, 1, 1)
+		visibilityCache._voxelProofs[proofKey] = Vector3.new(100, -1, 1)
+		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
+			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
+		local motion = cullThrottle._motion
+		motion._accumT = 5
+
+		-- A real field of view change swings each side plane about the camera by
+		-- its half-angle delta, so the rotation accumulator must absorb the
+		-- larger of the two deltas while every cached proof survives. The change
+		-- signal fires deferred, so let it land before accumulating.
+		local halfVerticalBefore = CameraCache.HalfVerticalFOV
+		local halfHorizontalBefore = CameraCache.HalfHorizontalFOV
+		local camera = workspace.CurrentCamera
+		camera.FieldOfView = if camera.FieldOfView == 80 then 70 else 80
+		task.wait()
+		motion:accumulate()
+
+		local expectedCharge = math.max(
+			math.abs(CameraCache.HalfVerticalFOV - halfVerticalBefore),
+			math.abs(CameraCache.HalfHorizontalFOV - halfHorizontalBefore)
+		)
+		expect(expectedCharge).toBeGreaterThan(0)
+		expect(motion._accumR).toBeCloseTo(expectedCharge, 5)
+		expect(motion._accumT).toBeCloseTo(5, 5)
+		expect(visibilityCache._voxelProofs[proofKey]).toBe(Vector3.new(100, -1, 1))
+		expect(visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)]).toBeDefined()
+
+		-- A settled projection must not keep charging on later frames.
+		motion:accumulate()
+		expect(motion._accumR).toBeCloseTo(expectedCharge, 5)
+	end)
+
+	it("charges the larger projection half-angle delta to the rotation accumulator", function()
+		local motion = cullThrottle._motion
+
+		-- Pretend the projection's half-angles were different last frame, the way
+		-- a viewport resize reshapes the aspect ratio. Each plane pair only
+		-- swings by its own axis's change, so the larger delta bounds the worst
+		-- plane and is what the accumulator must absorb.
+		motion._lastHalfVerticalFOV = CameraCache.HalfVerticalFOV - 0.1
+		motion._lastHalfHorizontalFOV = CameraCache.HalfHorizontalFOV + 0.04
+		motion:accumulate()
+
+		expect(motion._accumR).toBeCloseTo(0.1, 5)
+		expect(motion._accumT).toBeCloseTo(0, 5)
+	end)
+
+	it("flushes all cached proofs when the camera is replaced", function()
 		local visibilityCache = cullThrottle._visibilityCache
 		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
 		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = Vector3.new(-1, 100, 1)
@@ -173,13 +223,10 @@ describe("CameraMotion", function()
 			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		cullThrottle._motion._accumT = 5
 
-		-- A real field of view change reshapes the projection, which no motion
-		-- bound can relate to the old planes, so CameraCache bumps its
-		-- generation. The change signal fires deferred, so let it land before
-		-- accumulating.
-		local camera = workspace.CurrentCamera
-		camera.FieldOfView = if camera.FieldOfView == 80 then 70 else 80
-		task.wait()
+		-- Re-initializing the cache stands in for a camera swap, which bumps the
+		-- generation. No motion bound relates the two cameras, so everything
+		-- flushes and re-anchors.
+		CameraCache.init(workspace.CurrentCamera)
 		cullThrottle._motion:accumulate()
 
 		expect(next(visibilityCache._voxelProofs)).toBeNil()
@@ -187,8 +234,8 @@ describe("CameraMotion", function()
 		expect(cullThrottle._motion._accumT).toBe(0)
 
 		-- The flush re-anchors to the new generation, so accumulating again with
-		-- a settled projection must keep a freshly cached proof instead of
-		-- flushing forever.
+		-- the same camera must keep a freshly cached proof instead of flushing
+		-- forever.
 		visibilityCache._voxelProofs[Vector3.new(3, 3, 3)] = Vector3.new(100, -1, 1)
 		cullThrottle._motion:accumulate()
 		expect(visibilityCache._voxelProofs[Vector3.new(3, 3, 3)]).toBe(Vector3.new(100, -1, 1))

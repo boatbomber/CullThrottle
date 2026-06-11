@@ -11,11 +11,13 @@ local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
 local CameraCache = {
 	_connections = {} :: { [string]: RBXScriptConnection },
 	Object = workspace.CurrentCamera,
-	-- This gets bumped whenever the camera or its projection changes shape
-	-- (camera replaced, FOV, viewport/aspect). Rigid motion (CFrame changes)
-	-- does not bump it. Consumers holding state derived from the frustum planes
-	-- must discard that state when they observe a new generation, because no
-	-- motion bound relates planes across a projection change.
+	-- This gets bumped whenever the cache is pointed at a different camera
+	-- (replaced or vanished). Rigid motion and projection changes do not bump
+	-- it, because both have motion bounds. A FOV or viewport change rotates the
+	-- side planes about the camera by at most the half-angle deltas, which
+	-- CameraMotion charges to its rotation accumulator. Consumers holding state
+	-- derived from the frustum planes must discard that state when they observe
+	-- a new generation, because no bound relates planes across a camera swap.
 	Generation = 0,
 	CFrame = CFrame.identity,
 	Position = Vector3.zero,
@@ -90,12 +92,14 @@ function CameraCache.viewportSizeChanged()
 end
 
 --[[
-	Recomputes every cached FOV-derived term and bumps the generation, since a
-	projection change invalidates any state derived from the frustum planes.
-	It only runs while a camera is wired up, so the cast is safe.
+	Recomputes every cached FOV-derived term. A projection change swings each
+	side plane about the camera by the change in that axis's half-angle and
+	leaves the far plane alone, so consumers can bound it as motion through the
+	refreshed half-angle fields instead of discarding frustum-derived state,
+	and the generation stays put. It only runs while a camera is wired up, so
+	the cast is safe.
 ]]
 function CameraCache.fovChanged()
-	CameraCache.Generation += 1
 	CameraCache.TanHalfVertFOV = CameraCache.computeTanHalfVerticalFOV(
 		(CameraCache.Object :: Camera).MaxAxisFieldOfView,
 		CameraCache.AspectRatio

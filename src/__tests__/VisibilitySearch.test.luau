@@ -143,8 +143,10 @@ end
 
 describe("VisibilitySearch", function()
 	local cullThrottle
+	local originalFieldOfView
 
 	beforeEach(function()
+		originalFieldOfView = workspace.CurrentCamera.FieldOfView
 		cullThrottle = CullThrottle.new()
 	end)
 
@@ -156,6 +158,15 @@ describe("VisibilitySearch", function()
 			cullThrottle:Destroy()
 		end
 		cullThrottle = nil
+
+		-- Tests that reshape the live camera's projection restore it here so a
+		-- failure can't leak the change. The restore fires the projection change
+		-- signal deferred, so let it land before the next test reads the camera.
+		local camera = workspace.CurrentCamera
+		if camera.FieldOfView ~= originalFieldOfView then
+			camera.FieldOfView = originalFieldOfView
+			task.wait()
+		end
 	end)
 
 	describe("Volume search", function()
@@ -657,6 +668,57 @@ describe("VisibilitySearch", function()
 				secondCount += 1
 			end
 			expect(secondCount).toBe(firstCount)
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("keeps proofs with enough clearance across a small field of view change", function()
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 5 do
+				local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -100 * i)).Position)
+				cullThrottle:AddObject(part)
+				table.insert(parts, part)
+			end
+
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+
+			local search = cullThrottle._search
+			local getBoxTests = countBoxTests()
+			cullThrottle:_findVisibleObjects(os.clock())
+			local coldBoxTests = getBoxTests()
+
+			local firstSet = {}
+			local firstCount = 0
+			for i = 1, search._visibleVoxelCount do
+				firstSet[search._pendingVoxelKeys[i]] = true
+				firstCount += 1
+			end
+			expect(firstCount).toBeGreaterThan(0)
+
+			-- Nudge the field of view a couple of degrees wider. The side planes
+			-- only swing by the half-angle deltas, so proofs minted with more
+			-- clearance than that motion must survive, and the warm pass must
+			-- trust them instead of re-testing every box from scratch. The change
+			-- signal fires deferred, so let it land before the next pass.
+			camera.FieldOfView += 2
+			task.wait()
+
+			cullThrottle:_findVisibleObjects(os.clock())
+			local warmBoxTests = getBoxTests() - coldBoxTests
+
+			-- Widening the frustum cannot cull anything that was visible, and the
+			-- objects sit dead ahead, so the visible set must come back unchanged.
+			local secondCount = 0
+			for i = 1, search._visibleVoxelCount do
+				expect(firstSet[search._pendingVoxelKeys[i]]).toBe(true)
+				secondCount += 1
+			end
+			expect(secondCount).toBe(firstCount)
+			expect(warmBoxTests).toBeLessThan(coldBoxTests)
 
 			for _, part in parts do
 				part:Destroy()
