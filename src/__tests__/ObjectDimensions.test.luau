@@ -135,6 +135,81 @@ describe("ObjectDimensions", function()
 
 			part:Destroy()
 		end)
+
+		it("walks multiple non-spatial levels to find an ancestor part", function()
+			local part = makePart()
+			local folder = Instance.new("Folder")
+			folder.Parent = part
+			local sound = Instance.new("Sound")
+			sound.Parent = folder
+
+			-- Neither the sound nor the folder above it can be positioned, so the
+			-- walk has to recurse through both before landing on the part.
+			local cs, ct = ObjectDimensions.getObjectCFrameSource(sound)
+			expect(cs).toBe(part)
+			expect(ct).toBe("BasePart")
+
+			part:Destroy()
+		end)
+
+		it("splits an attachment's sources between itself and its ancestor part", function()
+			local part = makePart()
+			local attachment = Instance.new("Attachment")
+			attachment.Parent = part
+
+			-- An attachment carries its own world cframe but has no size, so its
+			-- two sources resolve to different instances.
+			local cs, ct = ObjectDimensions.getObjectCFrameSource(attachment)
+			expect(cs).toBe(attachment)
+			expect(ct).toBe("Attachment")
+
+			local bs, bt = ObjectDimensions.getObjectBoundingBoxSource(attachment)
+			expect(bs).toBe(part)
+			expect(bt).toBe("BasePart")
+
+			part:Destroy()
+		end)
+
+		it("splits a bone's sources between itself and its ancestor part", function()
+			local part = makePart()
+			local bone = Instance.new("Bone")
+			bone.Parent = part
+
+			-- A bone carries its own deformed world cframe but has no size, so
+			-- its bounding box walks up to the part.
+			local cs, ct = ObjectDimensions.getObjectCFrameSource(bone)
+			expect(cs).toBe(bone)
+			expect(ct).toBe("Bone")
+
+			local bs, bt = ObjectDimensions.getObjectBoundingBoxSource(bone)
+			expect(bs).toBe(part)
+			expect(bt).toBe("BasePart")
+
+			part:Destroy()
+		end)
+
+		it("resolves a sound's cframe to the attachment it sits in", function()
+			local part = makePart()
+			part.CFrame = CFrame.new(10, 0, 0)
+			local attachment = Instance.new("Attachment")
+			attachment.Position = Vector3.new(0, 5, 0)
+			attachment.Parent = part
+			local sound = Instance.new("Sound")
+			sound.RollOffMaxDistance = 20
+			sound.Parent = attachment
+
+			-- The ancestor walk stops at the first class it understands, which
+			-- here is the attachment rather than the part above it, so the sound
+			-- follows the attachment's world cframe.
+			local cs, ct = ObjectDimensions.getObjectCFrameSource(sound)
+			expect(cs).toBe(attachment)
+			expect(ct).toBe("Attachment")
+
+			local cframe = ObjectDimensions.getObjectCFrame(resolveData(sound)) :: CFrame
+			expect(cframe.Position).toBe(Vector3.new(10, 5, 0))
+
+			part:Destroy()
+		end)
 	end)
 
 	describe("getObjectCFrame", function()
@@ -180,11 +255,17 @@ describe("ObjectDimensions", function()
 		it("reads a Bone's transformed world cframe", function()
 			local part = makePart()
 			local bone = Instance.new("Bone")
+			bone.CFrame = CFrame.new(0, 5, 0)
 			bone.Parent = part
 			local data = resolveData(bone)
 
 			expect(data.cframeType).toBe("Bone")
-			expect(typeof(ObjectDimensions.getObjectCFrame(data))).toBe("CFrame")
+
+			-- With the part at the origin and no animation transform, the bone's
+			-- world cframe is exactly its stored offset, so anything else means the
+			-- getter read the wrong property.
+			local cframe = ObjectDimensions.getObjectCFrame(data) :: CFrame
+			expect(cframe.Position).toBe(Vector3.new(0, 5, 0))
 
 			part:Destroy()
 		end)
@@ -282,6 +363,19 @@ describe("ObjectDimensions", function()
 			sound.Parent = part
 
 			expect(ObjectDimensions.getObjectBoundingBox(resolveData(sound))).toBe(Vector3.one * 25)
+
+			part:Destroy()
+		end)
+
+		it("reads a bone's bounding box from its nearest ancestor part", function()
+			local part = makePart()
+			part.Size = Vector3.new(6, 2, 8)
+			local bone = Instance.new("Bone")
+			bone.Parent = part
+
+			-- A bone has no size of its own, so its bounding box is the ancestor
+			-- part's.
+			expect(ObjectDimensions.getObjectBoundingBox(resolveData(bone))).toBe(Vector3.new(6, 2, 8))
 
 			part:Destroy()
 		end)
@@ -413,11 +507,54 @@ describe("ObjectDimensions", function()
 			model.WorldPivot = CFrame.new(3, 0, 0)
 			task.wait()
 
-			expect(received).toBeDefined()
+			expect((received :: CFrame).Position).toBe(Vector3.new(3, 0, 0))
 
 			for _, connection in connections do
 				connection:Disconnect()
 			end
+			model:Destroy()
+		end)
+
+		it("fires the bounding box callback when a model gains or loses a descendant", function()
+			local model = Instance.new("Model")
+			local primary = Instance.new("Part")
+			primary.Anchored = true
+			primary.Size = Vector3.new(4, 4, 4)
+			primary.CFrame = CFrame.new(0, 0, 0)
+			primary.Parent = model
+			model.PrimaryPart = primary
+			model.Parent = workspace
+
+			local received
+			local connections = ObjectDimensions.connectBoundingBoxChangeEvent(resolveData(model), function(boundingBox)
+				received = boundingBox
+			end)
+
+			-- Parenting a far-offset part into the model must report the grown box,
+			-- spanning from the primary part's -2 to the wing's 22 on X.
+			local wing = Instance.new("Part")
+			wing.Anchored = true
+			wing.Size = Vector3.new(4, 4, 4)
+			wing.CFrame = CFrame.new(20, 0, 0)
+			wing.Parent = model
+			task.wait()
+
+			expect(received).toBeDefined()
+			expect((received :: Vector3).X).toBeCloseTo(24)
+
+			-- Removal must refresh the box too. DescendantRemoving fires before the
+			-- part actually leaves, so the reported size isn't pinned here, only
+			-- that the wiring delivered a real box.
+			received = nil
+			wing.Parent = workspace
+			task.wait()
+
+			expect(typeof(received)).toBe("Vector3")
+
+			for _, connection in connections do
+				connection:Disconnect()
+			end
+			wing:Destroy()
 			model:Destroy()
 		end)
 
@@ -547,6 +684,38 @@ describe("ObjectDimensions", function()
 			partB:Destroy()
 		end)
 
+		it("leaves the wiring intact when an ancestry change resolves to the same sources", function()
+			local holder = makePart()
+			local part = makePart()
+			local light = Instance.new("PointLight")
+			light.Range = 16
+			light.Parent = part
+
+			local data = resolveData(light)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(light, data, callbacks)
+			local connections = table.clone(data.changeConnections)
+
+			-- Reparenting the part fires AncestryChanged on the light, but the
+			-- walk still resolves the same part and the light itself, so the
+			-- re-resolve must return early without rewiring or dropping anything.
+			part.Parent = holder
+			task.wait()
+
+			expect(state.untrackableCalls).toBe(0)
+			expect(data.cframeSource).toBe(part)
+			expect(data.boundingBoxSource).toBe(light)
+			expect(#data.changeConnections).toBe(#connections)
+			for i, connection in connections do
+				expect(data.changeConnections[i]).toBe(connection)
+				expect(connection.Connected).toBe(true)
+			end
+
+			disconnectAll(data)
+			part:Destroy()
+			holder:Destroy()
+		end)
+
 		it("does not disrupt a self-sourced object when it is reparented", function()
 			local part = makePart()
 			local holder = makePart()
@@ -597,6 +766,114 @@ describe("ObjectDimensions", function()
 
 			expect(state.geometryChanges).toBeGreaterThan(0)
 			expect(data.cframe.Position).toBe(Vector3.new(25, 0, 0))
+			expect(state.untrackableCalls).toBe(0)
+
+			disconnectAll(data)
+			model:Destroy()
+		end)
+
+		it("disconnects the old listeners when a rewire replaces them", function()
+			local model = Instance.new("Model")
+			local partA = Instance.new("Part")
+			partA.Anchored = true
+			partA.Size = Vector3.new(4, 4, 4)
+			partA.CFrame = CFrame.new(0, 0, 0)
+			partA.Parent = model
+			local partB = Instance.new("Part")
+			partB.Anchored = true
+			partB.Size = Vector3.new(4, 4, 4)
+			partB.CFrame = CFrame.new(0, 0, 0)
+			partB.Parent = model
+			model.PrimaryPart = partA
+			model.Parent = workspace
+
+			local data = resolveData(model)
+			local callbacks = makeWatch()
+			ObjectDimensions.wireObjectConnections(model, data, callbacks)
+
+			local oldConnections = table.clone(data.changeConnections)
+			local oldCount = #data.changeConnections
+
+			model.PrimaryPart = partB
+			task.wait()
+
+			-- A rewire follows the new providers correctly even with the old
+			-- listeners leaked, since stale listeners recompute from current
+			-- sources. The teardown is only observable here, where every
+			-- pre-rewire connection must come back dead.
+			for _, connection in oldConnections do
+				expect(connection.Connected).toBe(false)
+			end
+
+			-- And the rewire replaces the set rather than growing it per rewire.
+			expect(#data.changeConnections).toBe(oldCount)
+
+			disconnectAll(data)
+			model:Destroy()
+		end)
+
+		it("ignores a primary part change once the object is no longer tracked", function()
+			local model = Instance.new("Model")
+			local partA = Instance.new("Part")
+			partA.Anchored = true
+			partA.Size = Vector3.new(4, 4, 4)
+			partA.CFrame = CFrame.new(0, 0, 0)
+			partA.Parent = model
+			local partB = Instance.new("Part")
+			partB.Anchored = true
+			partB.Size = Vector3.new(4, 4, 4)
+			partB.CFrame = CFrame.new(30, 0, 0)
+			partB.Parent = model
+			model.PrimaryPart = partA
+			model.Parent = workspace
+
+			local data = resolveData(model)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(model, data, callbacks)
+			local connections = table.clone(data.changeConnections)
+			state.tracked = false
+
+			-- A late PrimaryPart change for an object the owner already removed
+			-- must be swallowed by the tracked check rather than refreshing
+			-- geometry or rewiring listeners for it.
+			model.PrimaryPart = partB
+			task.wait()
+
+			expect(state.geometryChanges).toBe(0)
+			expect(state.untrackableCalls).toBe(0)
+			expect(#data.changeConnections).toBe(#connections)
+			for i, connection in connections do
+				expect(data.changeConnections[i]).toBe(connection)
+			end
+
+			disconnectAll(data)
+			model:Destroy()
+		end)
+
+		it("rewires onto a primary part assigned to a previously primaryless model", function()
+			local model = Instance.new("Model")
+			local part = Instance.new("Part")
+			part.Anchored = true
+			part.Size = Vector3.new(4, 4, 4)
+			part.CFrame = CFrame.new(0, 0, 0)
+			part.Parent = model
+			-- PrimaryPart deliberately starts unset, so the model is tracked
+			-- through its WorldPivot.
+			model.Parent = workspace
+
+			local data = resolveData(model)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(model, data, callbacks)
+
+			-- The PrimaryPart watch is wired unconditionally, so assigning one
+			-- later must rewire the model onto it and follow its movement.
+			model.PrimaryPart = part
+			task.wait()
+
+			part.CFrame = CFrame.new(9, 0, 0)
+			task.wait()
+
+			expect(data.cframe.Position).toBe(Vector3.new(9, 0, 0))
 			expect(state.untrackableCalls).toBe(0)
 
 			disconnectAll(data)
@@ -703,9 +980,72 @@ describe("ObjectDimensions", function()
 			task.wait()
 
 			expect(data.cframe.Position).toBe(Vector3.new(15, 0, 0))
-			-- The default beam width is 1 and the span is now 30, so the half
-			-- bounding box is half of (1, 1, 30).
-			expect(data.halfBoundingBox).toBe(Vector3.new(0.5, 0.5, 15))
+			-- The box is the beam's widest width square in cross section by the
+			-- attachment span of 30 in length. The width is read off the live
+			-- beam so a platform default change can't break this pin.
+			local width = math.max(beam.Width0, beam.Width1)
+			expect(data.halfBoundingBox).toBe(Vector3.new(width, width, 30) / 2)
+			expect(state.geometryChanges).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("refreshes a beam's stored bounding box when its widths change", function()
+			local part = makePart()
+			local a0 = Instance.new("Attachment")
+			a0.Position = Vector3.new(0, 0, 0)
+			a0.Parent = part
+			local a1 = Instance.new("Attachment")
+			a1.Position = Vector3.new(10, 0, 0)
+			a1.Parent = part
+			local beam = Instance.new("Beam")
+			beam.Attachment0 = a0
+			beam.Attachment1 = a1
+			beam.Width0 = 2
+			beam.Width1 = 2
+			beam.Parent = part
+
+			local data = resolveData(beam)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
+
+			-- Growing Width0 makes it the widest width, so the stored cross
+			-- section must follow it while the length stays at the attachment
+			-- span of 10.
+			beam.Width0 = 6
+			task.wait()
+
+			expect(data.halfBoundingBox).toBe(Vector3.new(3, 3, 5))
+			expect(data.radius).toBeCloseTo(math.sqrt(3 ^ 2 + 3 ^ 2 + 5 ^ 2))
+
+			-- Width1 carries its own subscription, so growing it past Width0 must
+			-- refresh the box again.
+			beam.Width1 = 8
+			task.wait()
+
+			expect(data.halfBoundingBox).toBe(Vector3.new(4, 4, 5))
+			expect(state.geometryChanges).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("refreshes a sound's stored bounding box when its rolloff max distance changes", function()
+			local part = makePart()
+			local sound = Instance.new("Sound")
+			sound.RollOffMaxDistance = 10
+			sound.Parent = part
+
+			local data = resolveData(sound)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(sound, data, callbacks)
+
+			sound.RollOffMaxDistance = 24
+			task.wait()
+
+			expect(data.halfBoundingBox).toBe(Vector3.one * 12)
+			expect(data.radius).toBeCloseTo(math.sqrt(12 ^ 2 * 3))
 			expect(state.geometryChanges).toBeGreaterThan(0)
 
 			disconnectAll(data)
@@ -729,10 +1069,42 @@ describe("ObjectDimensions", function()
 			local callbacks, state = makeWatch()
 			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
 
-			-- Destroying an attachment clears the beam's reference to it. The beam
-			-- can no longer produce geometry, so it must be reported untrackable
-			-- rather than left frozen at its last midpoint.
+			-- Destroying an attachment neither clears the beam's reference to it
+			-- nor fires the attachment property signal, which is exactly why the
+			-- wiring keeps a dedicated Destroying watch on each attachment. The
+			-- beam can't produce real geometry with a dead attachment, so it must
+			-- be reported untrackable rather than left frozen at its last midpoint.
 			a0:Destroy()
+			task.wait()
+
+			expect(state.untrackableCalls).toBeGreaterThan(0)
+
+			disconnectAll(data)
+			part:Destroy()
+		end)
+
+		it("drops a beam when its attachment reference is cleared to nil", function()
+			local part = makePart()
+			local a0 = Instance.new("Attachment")
+			a0.Position = Vector3.new(0, 0, 0)
+			a0.Parent = part
+			local a1 = Instance.new("Attachment")
+			a1.Position = Vector3.new(10, 0, 0)
+			a1.Parent = part
+			local beam = Instance.new("Beam")
+			beam.Attachment0 = a0
+			beam.Attachment1 = a1
+			beam.Parent = part
+
+			local data = resolveData(beam)
+			local callbacks, state = makeWatch()
+			ObjectDimensions.wireObjectConnections(beam, data, callbacks)
+
+			-- Clearing the reference drives the property-signal route, a different
+			-- path than the Destroying watch the previous test exercises, since
+			-- destruction never fires the property signal. The beam can't produce
+			-- geometry with a nil attachment, so it must be reported untrackable.
+			beam.Attachment0 = nil
 			task.wait()
 
 			expect(state.untrackableCalls).toBeGreaterThan(0)

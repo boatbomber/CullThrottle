@@ -11,12 +11,25 @@ local afterEach = JestGlobals.afterEach
 
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
+local Ingest = require(CullThrottlePackage:WaitForChild("Ingest"))
 
 local TestHelpers = require(script.Parent.TestHelpers)
 local createMockPart = TestHelpers.createMockPart
-local stubObjectData = TestHelpers.stubObjectData
 
-describe("CullThrottle", function()
+--[[
+	Spins on os.clock without yielding until the given deadline has passed.
+	Yielding would hand the real frame loop a chance to process visibility and
+	clear the update queue mid-test, so the budget probes burn the time in
+	place instead.
+]]
+local function busyWaitUntil(deadline: number)
+	local spins = 0
+	while os.clock() < deadline do
+		spins += 1
+	end
+end
+
+describe("CullThrottle queries", function()
 	local cullThrottle
 
 	beforeEach(function()
@@ -36,86 +49,6 @@ describe("CullThrottle", function()
 			expect(#visibleObjects).toBe(0)
 		end)
 
-		it("should return visible objects after processing", function()
-			local part = createMockPart(Vector3.new(0, 0, 0))
-			cullThrottle:AddObject(part)
-
-			cullThrottle:_processObjectVisibility(os.clock())
-
-			local visibleObjects = cullThrottle:GetVisibleObjects()
-			expect(type(visibleObjects)).toBe("table")
-
-			part:Destroy()
-		end)
-
-		it("should not duplicate a multi-voxel object under fast-approximation fallback", function()
-			cullThrottle:SetVoxelSize(100)
-
-			-- A long part occupies several voxel buckets, so the fast-approximation
-			-- path would emit it once per voxel if it didn't deduplicate.
-			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
-			cullThrottle:AddObject(part)
-			local objectData = cullThrottle._lifecycle._objects[part]
-
-			local visibleVoxelKeys = {}
-			for voxelKey in objectData.voxelKeys do
-				table.insert(visibleVoxelKeys, voxelKey)
-			end
-			cullThrottle._search._visibleVoxelKeys = visibleVoxelKeys
-			cullThrottle._search._visibleVoxelCount = #visibleVoxelKeys
-
-			-- Drive the fast-approximation path directly over every occupied voxel.
-			cullThrottle._ingest:fastApproxIngestRemainingVoxels(os.clock(), 1)
-
-			local items = cullThrottle._ingest._visibleObjectsQueue._incomingBatch.items
-			local occurrences = 0
-			for _, object in items do
-				if object == part then
-					occurrences += 1
-				end
-			end
-
-			expect(#visibleVoxelKeys).toBeGreaterThan(1)
-			expect(occurrences).toBe(1)
-
-			part:Destroy()
-		end)
-
-		it("should not re-add an object the precise ingest pass already handled", function()
-			cullThrottle:SetVoxelSize(100)
-
-			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(500, 20, 20))
-			cullThrottle:AddObject(part)
-			local objectData = cullThrottle._lifecycle._objects[part]
-
-			local now = os.clock()
-			-- Simulate the precise ingest pass having already handled this object
-			-- this frame (it spans both a precisely-ingested and a fast-path voxel).
-			objectData.lastCheckClock = now
-			cullThrottle._ingest._visibleObjectsQueue:addToIncomingBatch(part, 0)
-
-			local visibleVoxelKeys = {}
-			for voxelKey in objectData.voxelKeys do
-				table.insert(visibleVoxelKeys, voxelKey)
-			end
-			cullThrottle._search._visibleVoxelKeys = visibleVoxelKeys
-			cullThrottle._search._visibleVoxelCount = #visibleVoxelKeys
-
-			cullThrottle._ingest:fastApproxIngestRemainingVoxels(now, 1)
-
-			local items = cullThrottle._ingest._visibleObjectsQueue._incomingBatch.items
-			local occurrences = 0
-			for _, object in items do
-				if object == part then
-					occurrences += 1
-				end
-			end
-
-			expect(occurrences).toBe(1)
-
-			part:Destroy()
-		end)
-
 		it("returns objects in the frustum and excludes ones behind or beyond render distance", function()
 			-- Place objects relative to the live camera so the real frustum pass,
 			-- not a hand-built plane set, decides what is visible.
@@ -131,8 +64,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(farPart)
 
 			-- Give it generous budgets so the search and precise ingest run to completion.
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 
 			local visibleObjects = cullThrottle:GetVisibleObjects()
 
@@ -152,8 +84,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(keptPart)
 			cullThrottle:AddObject(removedPart)
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			-- Removal never scrubs the staged visibility batch, and the same-frame
@@ -168,55 +99,58 @@ describe("CullThrottle", function()
 			keptPart:Destroy()
 			removedPart:Destroy()
 		end)
+
+		it("still returns the visible snapshot after the update iterator drained the queue", function()
+			local camera = workspace.CurrentCamera
+			local partA = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
+			local partB = createMockPart((camera.CFrame * CFrame.new(6, 0, -80)).Position)
+			cullThrottle:AddObject(partA)
+			cullThrottle:AddObject(partB)
+
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			for _ in cullThrottle:IterateObjectsToUpdate() do
+				local _
+			end
+
+			-- The iterator consumes the queue, but the staged batch it was built
+			-- from survives until the next frame, so the snapshot must still
+			-- reflect everything visible this frame.
+			local visibleObjects = cullThrottle:GetVisibleObjects()
+			expect(table.find(visibleObjects, partA)).never.toBeNil()
+			expect(table.find(visibleObjects, partB)).never.toBeNil()
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
 	end)
 
 	describe("IterateObjectsToUpdate", function()
-		it("should iterate through visible objects", function()
-			local part1 = createMockPart(Vector3.new(0, 0, 0))
-			local part2 = createMockPart(Vector3.new(10, 10, 10))
+		it("yields every visible object with its update data", function()
+			local camera = workspace.CurrentCamera
+			local part1 = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
+			local part2 = createMockPart((camera.CFrame * CFrame.new(6, 0, -80)).Position)
 
 			cullThrottle:AddObject(part1)
 			cullThrottle:AddObject(part2)
 
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
-			cullThrottle:_fillVisibleObjectsQueue()
 
-			local iterator = cullThrottle:IterateObjectsToUpdate()
-			local count = 0
-
-			for object, deltaTime, distance, cframe in iterator do
-				if object then
-					count = count + 1
-					expect(deltaTime).toBeDefined()
-					expect(distance).toBeDefined()
-					expect(cframe).toBeDefined()
-				end
-			end
-
-			expect(count).toBeGreaterThanOrEqual(0)
-
-			part1:Destroy()
-			part2:Destroy()
-		end)
-
-		it("should return object data in iterator", function()
-			local part = createMockPart(Vector3.new(50, 50, 50))
-			cullThrottle:AddObject(part)
-
-			cullThrottle:_processObjectVisibility(os.clock())
-			cullThrottle:_fillVisibleObjectsQueue()
-
-			local iterator = cullThrottle:IterateObjectsToUpdate()
-			local object, deltaTime, distance, cframe = iterator()
-
-			if object then
-				expect(object).toBe(part)
+			local yielded = {}
+			for object, deltaTime, distance, cframe in cullThrottle:IterateObjectsToUpdate() do
+				yielded[object] = true
 				expect(type(deltaTime)).toBe("number")
 				expect(type(distance)).toBe("number")
 				expect(typeof(cframe)).toBe("CFrame")
 			end
 
-			part:Destroy()
+			expect(yielded[part1]).toBe(true)
+			expect(yielded[part2]).toBe(true)
+
+			part1:Destroy()
+			part2:Destroy()
 		end)
 
 		it("yields a visible object with its real distance and cframe", function()
@@ -226,9 +160,7 @@ describe("CullThrottle", function()
 
 			-- Give it generous budgets so the search runs to completion and the update
 			-- loop doesn't bail before reaching the object.
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
-			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			local seen
@@ -256,9 +188,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(midPart)
 			cullThrottle:AddObject(farPart)
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
-			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			-- Creating the iterator heapifies the queue with all three parts, so
@@ -289,9 +219,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(partA)
 			cullThrottle:AddObject(partB)
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
-			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			local firstCount = 0
@@ -321,9 +249,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(partA)
 			cullThrottle:AddObject(partB)
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
-			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			-- Give the objects a known half-second delta so the committed average
@@ -352,9 +278,7 @@ describe("CullThrottle", function()
 			cullThrottle:AddObject(partA)
 			cullThrottle:AddObject(partB)
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
-			cullThrottle._config.updateTimeBudget = 1
+			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			cullThrottle._lifecycle._objects[partA].lastUpdateClock = os.clock() - 0.5
@@ -387,19 +311,15 @@ describe("CullThrottle", function()
 				parts[i] = part
 			end
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
 			-- A zero update budget (and no strict enforcement) means even the first
 			-- dequeue is already over budget, so nothing should be iterated.
-			cullThrottle._config.updateTimeBudget = 0
+			cullThrottle:SetTimeBudgets(1, 1, 0)
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(false)
 			cullThrottle:_processObjectVisibility(os.clock())
 
 			local count = 0
-			for object in cullThrottle:IterateObjectsToUpdate() do
-				if object then
-					count += 1
-				end
+			for _ in cullThrottle:IterateObjectsToUpdate() do
+				count += 1
 			end
 
 			expect(count).toBe(0)
@@ -420,11 +340,9 @@ describe("CullThrottle", function()
 			-- priority band (the band is decided at ingest time, not at iteration).
 			cullThrottle._lifecycle._objects[part].lastUpdateClock = os.clock() - 100
 
-			cullThrottle._config.searchTimeBudget = 1
-			cullThrottle._config.ingestTimeBudget = 1
 			-- The normal budget is exhausted immediately, but strict enforcement
 			-- raises the p0 budget so worst-rate objects still update.
-			cullThrottle._config.updateTimeBudget = 0
+			cullThrottle:SetTimeBudgets(1, 1, 0)
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
 			cullThrottle:_processObjectVisibility(os.clock())
 
@@ -439,27 +357,197 @@ describe("CullThrottle", function()
 
 			part:Destroy()
 		end)
+
+		it("holds overdue p0 objects to the scaled update budget when enforcement is lax", function()
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -80)).Position)
+			cullThrottle:AddObject(part)
+
+			-- The object is overdue, so ingest places it in the p0 priority band.
+			cullThrottle._lifecycle._objects[part].lastUpdateClock = os.clock() - 100
+
+			-- Without strict enforcement a p0 object only gets the normal budget
+			-- scaled by the overrun factor, and zero scaled by any factor is still
+			-- zero, so even the overdue object must not be yielded. This is what
+			-- separates the lax overrun from the strict flag's unbounded budget.
+			cullThrottle:SetTimeBudgets(1, 1, 0)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(false)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			local seenOverdue = false
+			for object in cullThrottle:IterateObjectsToUpdate() do
+				if object == part then
+					seenOverdue = true
+				end
+			end
+
+			expect(seenOverdue).toBe(false)
+
+			part:Destroy()
+		end)
+
+		it("lets p0 objects overrun a nonzero update budget by the allowance and no further", function()
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 3 do
+				local part = createMockPart((camera.CFrame * CFrame.new((i - 2) * 6, 0, -80)).Position)
+				cullThrottle:AddObject(part)
+				parts[i] = part
+			end
+
+			-- Every object is overdue before ingest so all of them land in the p0
+			-- priority band.
+			for _, part in parts do
+				cullThrottle._lifecycle._objects[part].lastUpdateClock = os.clock() - 100
+			end
+
+			-- A 10ms budget makes the overrun allowance (15 percent, so 11.5ms)
+			-- wide enough to probe between the two cutoffs without flakes.
+			local updateBudget = 0.01
+			cullThrottle:SetTimeBudgets(1, 1, updateBudget)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(false)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- The iterator anchors its budget clock when it is created, so this
+			-- reference clock is taken right beside it. The extra parens truncate
+			-- the iterator's multiple return values to just the object.
+			local startClock = os.clock()
+			local iterator = cullThrottle:IterateObjectsToUpdate()
+
+			-- The first object comes out well inside the base budget.
+			expect((iterator())).toBeDefined()
+
+			-- Just past the base budget but inside the overrun allowance, a p0
+			-- object must still come out. Holding the budget to the base amount
+			-- here would erase the documented allowance.
+			busyWaitUntil(startClock + updateBudget * 1.05)
+			expect((iterator())).toBeDefined()
+
+			-- Past the overrun allowance, even p0 objects stop.
+			busyWaitUntil(startClock + updateBudget * 1.3)
+			expect((iterator())).toBeNil()
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("holds a priority exactly at the p0 threshold to the plain update budget", function()
+			-- The part sits far beyond render distance so the real passes are
+			-- guaranteed to cull it, leaving the queue holding exactly the
+			-- handpicked entry below.
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, 5000)).Position)
+			cullThrottle:AddObject(part)
+
+			-- Strict enforcement raises the p0 budget to effectively unbounded,
+			-- making the two budgets maximally distinguishable.
+			cullThrottle:SetTimeBudgets(0, 0, 0)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- The queue is staged directly with a handpicked priority because the
+			-- boundary matters here. The iterator's overrun comparison is strict,
+			-- so a priority exactly at the threshold takes the plain (zero)
+			-- budget, and the edge is reachable since an overdue object with zero
+			-- screen size prices at exactly the threshold.
+			cullThrottle._ingest._visibleObjectsQueue:addToIncomingBatch(part, Ingest.P0_THRESHOLD)
+
+			local count = 0
+			for _ in cullThrottle:IterateObjectsToUpdate() do
+				count += 1
+			end
+
+			expect(count).toBe(0)
+
+			part:Destroy()
+		end)
+
+		it("grants the raised p0 budget to a priority strictly under the threshold", function()
+			-- Like the exactly-at case, the part sits beyond render distance so
+			-- only the handpicked entry reaches the queue.
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, 5000)).Position)
+			cullThrottle:AddObject(part)
+
+			cullThrottle:SetTimeBudgets(0, 0, 0)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- This priority sits a hair under the threshold, so unlike the
+			-- exactly-at case it counts as p0 and gets the raised budget, which
+			-- is what lets it come out despite the plain budget being zero.
+			cullThrottle._ingest._visibleObjectsQueue:addToIncomingBatch(part, Ingest.P0_THRESHOLD - 0.01)
+
+			local yielded = {}
+			for object in cullThrottle:IterateObjectsToUpdate() do
+				yielded[object] = true
+			end
+
+			expect(yielded[part]).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("excludes objects unseen for over a second from the delta time average", function()
+			local camera = workspace.CurrentCamera
+			local stalePart = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
+			local freshPart = createMockPart((camera.CFrame * CFrame.new(6, 0, -80)).Position)
+			cullThrottle:AddObject(stalePart)
+			cullThrottle:AddObject(freshPart)
+
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- A delta over a second reflects time the object spent out of view,
+			-- not its real refresh cadence, so only the fresh part's delta should
+			-- reach the average. Folding the stale one in would drag the average
+			-- to ~50 and mislead the render distance controller.
+			cullThrottle._lifecycle._objects[stalePart].lastUpdateClock = os.clock() - 100
+			cullThrottle._lifecycle._objects[freshPart].lastUpdateClock = os.clock() - 0.5
+
+			for _ in cullThrottle:IterateObjectsToUpdate() do
+				local _
+			end
+
+			-- The commit lands at the start of the next processed frame.
+			cullThrottle._processedVisibilityThisFrame = false
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(0.5, 1)
+
+			stalePart:Destroy()
+			freshPart:Destroy()
+		end)
 	end)
 
 	describe("Performance metrics", function()
-		it("should track average object delta time", function()
-			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeDefined()
-			expect(type(cullThrottle._perfMetrics._averageObjectDeltaTime)).toBe("number")
+		it("seeds the average object delta time with the best refresh period", function()
+			-- The seed feeds the render distance controller before any real
+			-- updates have been committed, so a fresh instance starts at the
+			-- default best refresh period.
+			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(1 / 60)
 		end)
 
-		it("should calculate average correctly", function()
-			local values = { 1, 2, 3, 4 }
-			local average = cullThrottle._perfMetrics._getAverage(values)
-			expect(average).toBe(2.5)
+		it("averages over the lookback window length, not the input length", function()
+			-- The helper only ever sees the fixed-length skipped-frame ring
+			-- buffers, so it divides by the lookback window length. A three-value
+			-- input makes a divide-by-input-length mistake produce a different
+			-- answer.
+			local average = cullThrottle._perfMetrics._getAverage({ 2, 4, 6 })
+			expect(average).toBe(3)
 		end)
 
-		it("should track search and ingest durations", function()
+		it("records fresh search and ingest durations each visibility pass", function()
+			-- Both durations get planted with an impossible value first, so the
+			-- assertions can only pass if the pass overwrote them.
+			cullThrottle._perfMetrics._searchDuration = -1
+			cullThrottle._perfMetrics._ingestDuration = -1
+
 			cullThrottle:_findVisibleObjects(os.clock())
 
-			expect(cullThrottle._perfMetrics._searchDuration).toBeDefined()
-			expect(type(cullThrottle._perfMetrics._searchDuration)).toBe("number")
-			expect(cullThrottle._perfMetrics._ingestDuration).toBeDefined()
-			expect(type(cullThrottle._perfMetrics._ingestDuration)).toBe("number")
+			expect(cullThrottle._perfMetrics._searchDuration).toBeGreaterThanOrEqual(0)
+			expect(cullThrottle._perfMetrics._ingestDuration).toBeGreaterThanOrEqual(0)
 		end)
 	end)
 
@@ -504,12 +592,6 @@ describe("CullThrottle", function()
 			expect(cullThrottle._lifecycle._objects[part]).toBeNil()
 
 			part:Destroy()
-		end)
-
-		it("should handle empty voxel operations", function()
-			expect(function()
-				cullThrottle._grid:removeFromVoxel(Vector3.new(999, 999, 999), stubObjectData(Instance.new("Part")))
-			end).never.toThrow()
 		end)
 
 		it("should handle processing with no objects", function()

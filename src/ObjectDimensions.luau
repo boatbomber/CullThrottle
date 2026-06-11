@@ -432,7 +432,10 @@ function wireObjectConnections(object: Instance, objectData: types.ObjectData, c
 	-- we re-resolve (and rewire onto the new sources) whenever its ancestry
 	-- changes. Only ancestor-sourced types can change this way. An object that is
 	-- its own source always resolves back to itself, so it needs no ancestry
-	-- listener.
+	-- listener. That split shows under Parent = nil. An ancestor-sourced object
+	-- reparented out of the world can no longer resolve a source and is dropped,
+	-- while a self-sourced one stays tracked at its last location, so consumers
+	-- pooling parts that way should remove them explicitly.
 	if cframeSourceIsAncestor or boundingBoxSourceIsAncestor then
 		table.insert(
 			objectData.changeConnections,

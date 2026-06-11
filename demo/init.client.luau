@@ -1,4 +1,4 @@
-math.randomseed(1) -- Constant seed for reproducibility
+math.randomseed(1) -- A constant seed keeps runs reproducible.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -13,10 +13,13 @@ local Blocks = require(script.Blocks)
 local MetricGraph = require(script.MetricGraph)
 local Utility = require(script.Utility)
 
+-- Blocks rest at this color while out of view. The exited-view handler resets
+-- them to it, and the heatmap tint takes over while a block is updating.
 local INVISIBLE_COLOR = Color3.fromRGB(77, 127, 182)
+-- Every block carries this CollectionService tag, and CaptureTag tracks the lot.
 local TAG = "FloatingBlock"
 
--- Let's make some blocks to run effects on
+-- Let's make some blocks to run effects on.
 local BlocksFolder = Instance.new("Folder")
 BlocksFolder.Name = "Blocks"
 
@@ -42,7 +45,7 @@ FloatingBlocksUpdater:CaptureTag(TAG)
 local refreshRates = FloatingBlocksUpdater:GetRefreshRates()
 local bestRefreshHz, worstRefreshHz = refreshRates.Max, refreshRates.Min
 
--- Change colors of blocks to indicate visibility
+-- We change the colors of blocks to indicate visibility.
 -- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
 -- 	block.Color = VISIBLE_COLOR
 -- end)
@@ -59,14 +62,18 @@ RunService.PreAnimation:Connect(function()
 	table.clear(blocks)
 	table.clear(cframes)
 	table.clear(alphas)
-	table.clear(objectDeltas) -- For the debug graphs
+	table.clear(objectDeltas) -- This one is for the debug graphs.
 
 	local now = os.clock()
 	for block, dt in FloatingBlocksUpdater:IterateObjectsToUpdate() do
+		-- Alpha lands at 1 for a block refreshing at the best rate and 0 at the worst,
+		-- which is what the heatmap tint shows.
 		local alpha = math.clamp(math.map(dt, 1 / bestRefreshHz, 1 / worstRefreshHz, 1, 0), 0, 1)
 		table.insert(alphas, alpha)
 
 		table.insert(objectDeltas, dt)
+		-- The raw dt was recorded for the graphs first, since this cap on long gaps
+		-- and the 3x speedup are only meant for the animation.
 		dt = math.min(dt, 1 / 15) * 3
 
 		local metadata = blockMetadata[block]
@@ -89,9 +96,9 @@ RunService.PreAnimation:Connect(function()
 	end
 end)
 
-----------------------------------------------------------------------------------
--- The rest of this is debug/dev stuff
+-- The rest of this is debug/dev stuff.
 
+-- CullThrottle reads this global too, and in dev builds it draws its debug visuals while the flag is on.
 _G.__VISUALIZE__ = false
 
 local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
@@ -229,6 +236,7 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	skippedIngestGraph:measure(perfMetrics.skippedIngest)
 	renderDistanceGraph:measure(renderDistance)
 	objectsVisibleGraph:measure(visibleObjectCount)
+	-- The updated graph borrows the visible graph's peak as its max so the two graphs share a scale.
 	objectsUpdatedGraph.Max = math.max(table.unpack(objectsVisibleGraph._data))
 	objectsUpdatedGraph:measure(updatedObjectCount)
 	p05ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.05)] or math.huge))
@@ -236,15 +244,15 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	p95ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.95)] or math.huge))
 	gameRefreshRateGraph:measure(1 / gameDelta)
 
-	-- Adjust fog to visualize render distance
-	-- (Not when VISUALIZE is true because then we need to see the entire scene)
+	-- We adjust the fog to visualize the render distance, but not when VISUALIZE
+	-- is true because then we need to see the entire scene.
 	if not _G.__VISUALIZE__ then
 		game:GetService("Lighting").FogEnd = renderDistance * 2
 		game:GetService("Lighting").FogStart = renderDistance
 	end
 end)
 
--- Use a fake camera to get a third person view
+-- We use a fake camera to get a third person view.
 if _G.__VISUALIZE__ then
 	local testCam = Instance.new("Part")
 	testCam.Name = "_CullThrottleTestCam"
@@ -269,6 +277,7 @@ if _G.__VISUALIZE__ then
 		end
 	end)
 
+	-- Unhooking CameraCache from the real camera lets this fake camera's values stick.
 	CameraCache.cleanup()
 	CameraCache.ViewportSize = Vector2.new(1920, 1080)
 	CameraCache.AspectRatio = CameraCache.ViewportSize.X / CameraCache.ViewportSize.Y

@@ -18,9 +18,10 @@ describe("Config", function()
 			config = Config.new()
 		end)
 
-		it("uses the documented public defaults", function()
-			-- These defaults are the library's out-of-the-box contract, so pin them
-			-- directly rather than only through Set/Get round-trips that overwrite them.
+		it("uses the expected out-of-the-box defaults", function()
+			-- The README promises "reasonable defaults" without naming values, so
+			-- these pins record the deliberate tuning choices directly rather than
+			-- only through Set/Get round-trips that overwrite them.
 			expect(config.voxelSize).toBe(100)
 			expect(config.searchTimeBudget).toBeCloseTo(0.8 / 1000)
 			expect(config.ingestTimeBudget).toBeCloseTo(1.2 / 1000)
@@ -39,12 +40,14 @@ describe("Config", function()
 			expect(config.renderDistanceMidpoint).toBe((150 + 2000) / 2)
 			expect(config.renderDistance).toBe((150 + 2000) / 2)
 
-			-- The multi-voxel threshold is a quarter of the default 100 voxel size,
-			-- and the refresh period range and midpoint come from the default
-			-- 15 to 60 Hz rates.
+			-- The multi-voxel threshold is a quarter of the default 100 voxel size.
+			-- The default rates are 15 to 60 Hz, so the periods are 1/15 and 1/60
+			-- seconds, which puts the range at 0.05 and the midpoint near 0.0417.
+			-- The expectations are literal numbers so a wrong derivation formula
+			-- can't satisfy a restatement of itself.
 			expect(config.multiVoxelRadiusThreshold).toBe(25)
-			expect(config.refreshPeriodRange).toBeCloseTo(1 / 15 - 1 / 60)
-			expect(config.refreshPeriodMidpoint).toBeCloseTo((1 / 60 + 1 / 15) / 2)
+			expect(config.refreshPeriodRange).toBeCloseTo(0.05, 5)
+			expect(config.refreshPeriodMidpoint).toBeCloseTo(0.0416667, 5)
 		end)
 
 		it("returns independent instances", function()

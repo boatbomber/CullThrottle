@@ -94,6 +94,8 @@ CullThrottle tracks each object using two things: a **position** (a CFrame) and 
 
 CullThrottle also subscribes to the relevant change signals for whichever source it picked (for example a `BasePart`'s `Size`, a light's `Range`, or a beam's `Width0`/`Width1` and attachment positions), so the position and bounding box stay current as those properties change.
 
+Setting an object's `Parent` to `nil` behaves differently depending on where its sources live. An object whose position or bounding box comes from an ancestor (a light, sound, attachment, or bone) can no longer resolve that source and is dropped from tracking. An object that supplies its own geometry (a `BasePart` or `Model`) stays tracked at its last location, since leaving the world fires no destruction signal. If you pool parts by setting `Parent = nil`, remove them from CullThrottle explicitly.
+
 ## API
 
 ### Constructor
@@ -145,6 +147,8 @@ Adds all objects with a given tag to CullThrottle's tracking. Listens to the Ins
 Unanchored BaseParts are added as physics objects. This routing happens once, when the object is captured: changing a part's Anchored property later does not move it between static and physics tracking. Re-toggle the tag (or remove and re-add the object) if its anchored state changes.
 
 **IMPORTANT:** It will add the object as a physics object if it is a non-anchored BasePart. Be sure to anchor your objects before they get picked up by InstanceAdded if you do not want this behavior.
+
+**IMPORTANT:** Tracking does not record how an object arrived. When an object loses the last captured tag it carries, it is removed from tracking even if it was also added directly with AddObject. Re-add such an object after the tag toggle if you want it to stay tracked.
 
 ```Luau
 CullThrottle:ReleaseTag(tag: string)

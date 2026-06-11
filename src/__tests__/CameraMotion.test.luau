@@ -11,13 +11,16 @@ local afterEach = JestGlobals.afterEach
 
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
+local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
 local Utilities = CullThrottlePackage:WaitForChild("Utilities")
 local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
 describe("CameraMotion", function()
 	local cullThrottle
+	local originalFieldOfView
 
 	beforeEach(function()
+		originalFieldOfView = workspace.CurrentCamera.FieldOfView
 		cullThrottle = CullThrottle.new()
 	end)
 
@@ -26,6 +29,16 @@ describe("CameraMotion", function()
 			cullThrottle:Destroy()
 		end
 		cullThrottle = nil
+
+		-- Tests that reshape the live camera's projection restore it here so a
+		-- failure can't leak the change. The restore fires the projection change
+		-- signal deferred, so let it land before the next test captures the
+		-- camera generation.
+		local camera = workspace.CurrentCamera
+		if camera.FieldOfView ~= originalFieldOfView then
+			camera.FieldOfView = originalFieldOfView
+			task.wait()
+		end
 	end)
 
 	it("accumulates translation, rotation, and render distance motion separately", function()
@@ -60,17 +73,96 @@ describe("CameraMotion", function()
 		expect(motion._accumF).toBe(f)
 	end)
 
+	it("charges pure roll to the rotation accumulator", function()
+		local motion = cullThrottle._motion
+
+		-- Roll spins about the look axis, leaving the look vector unchanged while
+		-- still swinging the side plane normals, so it must charge the rotation
+		-- accumulator like any other turn. A cheaper look-vector-angle measure
+		-- would read this as zero motion and trust stale proofs.
+		motion._lastCameraCFrame = CameraCache.CFrame * CFrame.Angles(0, 0, math.rad(30))
+		motion:accumulate()
+
+		expect(motion._accumR).toBeCloseTo(math.rad(30), 5)
+		expect(motion._accumT).toBeCloseTo(0, 5)
+	end)
+
+	it("charges a render distance shrink to the far accumulator", function()
+		cullThrottle:SetVoxelSize(100)
+		local motion = cullThrottle._motion
+
+		-- A shrinking far plane can cull a previously visible bucket, so the
+		-- shrink must charge the accumulator by its magnitude just like growth.
+		cullThrottle._config.renderDistance -= 50
+		motion:accumulate()
+
+		expect(motion._accumF).toBeCloseTo(0.5, 5)
+	end)
+
 	it("flushes to re-anchor the accumulators before f32 precision can decay", function()
 		-- Proof expiries are stored as f32 vector components, so the
 		-- accumulators are re-anchored at zero (with a full flush) once
 		-- enough total motion accumulates.
-		cullThrottle._visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
-		cullThrottle._motion._accumR = 65
+		local visibilityCache = cullThrottle._visibilityCache
+		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
+		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
+			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
+		local motion = cullThrottle._motion
+		motion._accumT = 3
+		motion._accumF = 2
+		motion._accumR = 65
 
-		cullThrottle._motion:accumulate()
+		motion:accumulate()
+
+		expect(next(visibilityCache._voxelProofs)).toBeNil()
+		expect(next(visibilityCache._bucketVerdicts)).toBeNil()
+		expect(motion._accumT).toBe(0)
+		expect(motion._accumR).toBe(0)
+		expect(motion._accumF).toBe(0)
+
+		-- The flush re-anchors the pose, far plane, and generation to right now,
+		-- so an immediate second accumulate must observe no phantom motion.
+		motion:accumulate()
+		expect(motion._accumT).toBe(0)
+		expect(motion._accumR).toBe(0)
+		expect(motion._accumF).toBe(0)
+	end)
+
+	it("flushes when translation and render distance changes together cross the limit", function()
+		-- The translation flush limit counts voxels of translation plus render
+		-- distance change, so two accumulators each below the limit on their own
+		-- must still flush once their sum crosses it.
+		local motion = cullThrottle._motion
+		cullThrottle._visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
+		motion._accumT = 9000
+		motion._accumF = 8000
+
+		motion:accumulate()
 
 		expect(next(cullThrottle._visibilityCache._voxelProofs)).toBeNil()
-		expect(cullThrottle._motion._accumR).toBe(0)
+		expect(motion._accumT).toBe(0)
+		expect(motion._accumF).toBe(0)
+	end)
+
+	it("does not flush while the accumulators stay under their limits", function()
+		local motion = cullThrottle._motion
+		local proofKey = Vector3.new(1, 1, 1)
+		cullThrottle._visibilityCache._voxelProofs[proofKey] = Vector3.new(100, -1, 1)
+		motion._accumT = 9000
+		motion._accumF = 7300
+		motion._accumR = 63
+
+		motion:accumulate()
+
+		-- The limits are f32 precision guards, not correctness bounds, so they
+		-- must not fire early. A rotation of 63 radians sits just under its
+		-- limit, the translation plus render distance sum of 16300 sits just
+		-- under its own, and the cached proof must survive with every
+		-- accumulator keeping its reading rather than re-anchoring to zero.
+		expect(cullThrottle._visibilityCache._voxelProofs[proofKey]).toBe(Vector3.new(100, -1, 1))
+		expect(motion._accumT).toBe(9000)
+		expect(motion._accumF).toBe(7300)
+		expect(motion._accumR).toBe(63)
 	end)
 
 	it("flushes all cached proofs when the camera projection changes", function()
@@ -78,18 +170,28 @@ describe("CameraMotion", function()
 		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
 		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = Vector3.new(-1, 100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
-			{ state = 1, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
+			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		cullThrottle._motion._accumT = 5
 
-		-- Simulate an observed CameraCache generation bump (FOV, viewport, or
-		-- camera replacement).
-		cullThrottle._motion._lastCameraGeneration -= 1
+		-- A real field of view change reshapes the projection, which no motion
+		-- bound can relate to the old planes, so CameraCache bumps its
+		-- generation. The change signal fires deferred, so let it land before
+		-- accumulating.
+		local camera = workspace.CurrentCamera
+		camera.FieldOfView = if camera.FieldOfView == 80 then 70 else 80
+		task.wait()
 		cullThrottle._motion:accumulate()
 
 		expect(next(visibilityCache._voxelProofs)).toBeNil()
 		expect(next(visibilityCache._bucketVerdicts)).toBeNil()
 		expect(cullThrottle._motion._accumT).toBe(0)
-		expect(cullThrottle._motion._lastCameraGeneration).toBe(CameraCache.Generation)
+
+		-- The flush re-anchors to the new generation, so accumulating again with
+		-- a settled projection must keep a freshly cached proof instead of
+		-- flushing forever.
+		visibilityCache._voxelProofs[Vector3.new(3, 3, 3)] = Vector3.new(100, -1, 1)
+		cullThrottle._motion:accumulate()
+		expect(visibilityCache._voxelProofs[Vector3.new(3, 3, 3)]).toBe(Vector3.new(100, -1, 1))
 	end)
 
 	it("flushes all cached proofs when the voxel size changes", function()
@@ -97,7 +199,7 @@ describe("CameraMotion", function()
 		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
 		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = Vector3.new(-1, 100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
-			{ state = 1, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
+			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		cullThrottle._motion._accumT = 5
 
 		cullThrottle:SetVoxelSize(100)

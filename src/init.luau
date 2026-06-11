@@ -63,10 +63,10 @@ local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
 type CullThrottleProto = {
-	ObjectEnteredView: GoodSignal.Signal,
-	ObjectExitedView: GoodSignal.Signal,
-	ObjectAdded: GoodSignal.Signal,
-	ObjectRemoved: GoodSignal.Signal,
+	ObjectEnteredView: GoodSignal.Signal<Instance>,
+	ObjectExitedView: GoodSignal.Signal<Instance>,
+	ObjectAdded: GoodSignal.Signal<Instance>,
+	ObjectRemoved: GoodSignal.Signal<Instance>,
 
 	_config: Config.Config,
 	_perfMetrics: types.PerfMetrics,
@@ -214,6 +214,30 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 end
 
 --[[
+	This is the per-frame entry point the PreRender connection drives. It
+	resets the once-per-frame guard, periodically rebuilds the reusable
+	buffers, and runs the visibility pipeline unless on-demand mode is on and
+	nothing demands it. A connected view signal counts as demand, since
+	entered/exited can only fire if visibility gets computed.
+]]
+function CullThrottle._onPreRender(self: CullThrottle, now: number)
+	self._processedVisibilityThisFrame = false
+
+	if now - self._lastTableResize > RESIZE_TABLES_PERIOD then
+		self._lastTableResize = now
+		self:_resizeTables()
+	end
+
+	if
+		self._config.computeVisibilityOnlyOnDemand == false
+		or self.ObjectEnteredView:HasConnections()
+		or self.ObjectExitedView:HasConnections()
+	then
+		self:_processObjectVisibility(now)
+	end
+end
+
+--[[
 	Everything below this point is the public API.
 ]]
 
@@ -239,6 +263,9 @@ function CullThrottle.new(): CullThrottle
 		_skippedFramesCursor = 1,
 		_searchDuration = 0,
 		_ingestDuration = 0,
+		-- Seeding the average at the best refresh period reads as full headroom,
+		-- so a fresh instance's render distance controller grows on its first
+		-- adjustment and keeps growing until real measurements take over.
 		_averageObjectDeltaTime = self._config.bestRefreshPeriod,
 		_sumOfObjectDeltaTimes = 0,
 		_updatedObjectCount = 0,
@@ -269,24 +296,7 @@ function CullThrottle.new(): CullThrottle
 	self._processedVisibilityThisFrame = false
 	self._filledVisibleObjectsQueue = false
 	self._renderConnection = RunService.PreRender:Connect(function()
-		self._processedVisibilityThisFrame = false
-
-		local now = os.clock()
-
-		if now - self._lastTableResize > RESIZE_TABLES_PERIOD then
-			self._lastTableResize = now
-			self:_resizeTables()
-		end
-
-		-- In on-demand mode a connected view signal still counts as demand,
-		-- since entered/exited can only fire if visibility gets computed.
-		if
-			self._config.computeVisibilityOnlyOnDemand == false
-			or self.ObjectEnteredView._connectionCount > 0
-			or self.ObjectExitedView._connectionCount > 0
-		then
-			self:_processObjectVisibility(now)
-		end
+		self:_onPreRender(os.clock())
 	end)
 
 	return self
@@ -458,9 +468,11 @@ end
 	and reslots all tracked objects into the new grid before the next frame.
 ]]
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
-	if voxelSize <= 0 then
+	if not (voxelSize > 0) then
 		-- A zero voxel size divides by zero in the voxel coordinate math, and a
-		-- negative one makes no sense for a grid.
+		-- negative one makes no sense for a grid. The check is phrased so NaN,
+		-- which fails every comparison, lands in the error path too instead of
+		-- poisoning every voxel key derived from it.
 		error("SetVoxelSize expects a voxel size greater than zero")
 	end
 
@@ -489,10 +501,12 @@ end
 function CullThrottle.SetRenderDistanceRange(self: CullThrottle, renderDistanceRange: NumberRange)
 	local minRenderDistance = renderDistanceRange.Min
 	local maxRenderDistance = renderDistanceRange.Max
-	if minRenderDistance <= 0 then
+	if not (minRenderDistance > 0 and maxRenderDistance > 0) then
 		-- The render distance is a divisor in the priority math and seeds the
 		-- min/max bounds, so a zero or negative distance corrupts visibility state.
-		-- (NumberRange already guarantees Min <= Max, so checking Min covers Max.)
+		-- The checks are phrased so NaN, which fails every comparison, errors too.
+		-- NumberRange guarantees Min <= Max for real numbers, but a NaN slips
+		-- through its ordering check, so Max gets its own gate here.
 		error("SetRenderDistanceRange expects render distances greater than zero")
 	end
 
@@ -513,9 +527,11 @@ function CullThrottle.SetTimeBudgets(
 	ingestTimeBudget: number,
 	updateTimeBudget: number
 )
-	if searchTimeBudget < 0 or ingestTimeBudget < 0 or updateTimeBudget < 0 then
+	if not (searchTimeBudget >= 0 and ingestTimeBudget >= 0 and updateTimeBudget >= 0) then
 		-- Budgets are per-frame time allowances in seconds, and a negative budget
-		-- silently starves the corresponding pass. Zero is allowed (it just skips the work).
+		-- silently starves the corresponding pass. Zero is allowed (it just skips
+		-- the work). The check is phrased so NaN, which fails every comparison,
+		-- errors too instead of defeating the budget checks downstream.
 		error("SetTimeBudgets expects non-negative time budgets in seconds")
 	end
 
@@ -533,7 +549,10 @@ end
 function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRange)
 	local worstHz = refreshRates.Min
 	local bestHz = refreshRates.Max
-	if worstHz <= 0 then
+	if not (worstHz > 0 and bestHz > 0) then
+		-- The checks are phrased so NaN, which fails every comparison, errors
+		-- too. NumberRange guarantees Min <= Max for real numbers, but a NaN
+		-- slips through its ordering check, so Max gets its own gate here.
 		error("SetRefreshRates expects refresh rates in Hz greater than zero")
 	end
 

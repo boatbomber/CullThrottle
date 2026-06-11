@@ -33,8 +33,8 @@ VisibilitySignals.__index = VisibilitySignals
 type VisibilitySignalsProto = {
 	-- These are the facade's public signals, injected so this module fires them
 	-- without owning them.
-	_enteredViewSignal: GoodSignal.Signal,
-	_exitedViewSignal: GoodSignal.Signal,
+	_enteredViewSignal: GoodSignal.Signal<Instance>,
+	_exitedViewSignal: GoodSignal.Signal<Instance>,
 
 	-- These are the objects currently in view (lastVisibleClock ~= 0), kept as a
 	-- compact array so the exit scan touches only in-view objects instead of
@@ -55,8 +55,8 @@ export type VisibilitySignals = typeof(setmetatable({} :: VisibilitySignalsProto
 	Builds the buffers around the given entered/exited signals.
 ]]
 function VisibilitySignals.new(
-	enteredViewSignal: GoodSignal.Signal,
-	exitedViewSignal: GoodSignal.Signal
+	enteredViewSignal: GoodSignal.Signal<Instance>,
+	exitedViewSignal: GoodSignal.Signal<Instance>
 ): VisibilitySignals
 	local self = setmetatable({
 		_enteredViewSignal = enteredViewSignal,
@@ -167,7 +167,9 @@ end
 	By the time we get here all of CullThrottle's own iteration over the voxels,
 	the tracked objects, and the in-view set is finished, so a handler is now
 	free to mutate the tracked set (AddObject/RemoveObject) without corrupting
-	an in-progress loop. We null out each slot as we go so a removed/destroyed
+	an in-progress loop. Every entered signal fires before any exited signal,
+	which is contract, so a consumer always hears about a replacement before
+	the vacancy it fills. We null out each slot as we go so a removed/destroyed
 	instance isn't pinned in the buffer until the next frame overwrites it.
 ]]
 function VisibilitySignals.flushVisibilitySignals(self: VisibilitySignals)
@@ -198,7 +200,12 @@ end
 
 --[[
 	Rebuilds the buffers at their current occupancy so a burst of in-view
-	objects doesn't leave permanently oversized arrays behind.
+	objects doesn't leave permanently oversized arrays behind. The in-view set
+	is carried over, but the pending signal buffers are recreated empty while
+	their size counters stay put, so this may only run while both pending
+	buffers are empty. The driver guarantees that by resizing between frames,
+	after the end-of-frame flush has drained the buffers and zeroed their
+	counters.
 ]]
 function VisibilitySignals.resizeBuffers(self: VisibilitySignals)
 	local objectsInViewSize = self._objectsInViewSize

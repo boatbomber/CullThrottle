@@ -33,8 +33,8 @@ type ObjectLifecycleProto = {
 	_signals: VisibilitySignals.VisibilitySignals,
 	-- These are the facade's public signals, injected so this module fires them
 	-- without owning them.
-	_objectAddedSignal: GoodSignal.Signal,
-	_objectRemovedSignal: GoodSignal.Signal,
+	_objectAddedSignal: GoodSignal.Signal<Instance>,
+	_objectRemovedSignal: GoodSignal.Signal<Instance>,
 
 	-- This is the tracked-object map. The voxel grid holds an alias of this
 	-- table, so it must only ever be mutated in place, never reassigned.
@@ -55,8 +55,8 @@ function ObjectLifecycle.new(
 	objects: { [Instance]: types.ObjectData },
 	grid: VoxelGrid.VoxelGrid,
 	signals: VisibilitySignals.VisibilitySignals,
-	objectAddedSignal: GoodSignal.Signal,
-	objectRemovedSignal: GoodSignal.Signal
+	objectAddedSignal: GoodSignal.Signal<Instance>,
+	objectRemovedSignal: GoodSignal.Signal<Instance>
 ): ObjectLifecycle
 	local self = setmetatable({
 		_grid = grid,
@@ -76,8 +76,9 @@ end
 --[[
 	Round-robin polls the physics-driven objects within the time budget,
 	resuming each frame where the last one stopped. Each pass refreshes the
-	object's cframe and camera distance, and reslots its voxels when it
-	actually moved.
+	object's cframe and position, and reslots its voxels when it actually
+	moved. Camera distance is not touched here since the ingest pass scores
+	it fresh whenever it considers the object.
 ]]
 function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: number, now: number)
 	debug.profilebegin("pollPhysicsObjects")
@@ -106,8 +107,6 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 				if cframe then
 					-- The oriented-box voxel fill is the expensive part of a poll,
 					-- so only redo it when the object actually moved.
-					-- Distance is refreshed every poll since the camera
-					-- may have moved even when the object did not.
 					local moved = cframe ~= objectData.cframe
 					local position = cframe.Position
 					objectData.cframe = cframe
@@ -332,7 +331,11 @@ function ObjectLifecycle.captureTag(self: ObjectLifecycle, tag: string)
 		CollectionService:GetInstanceRemovedSignal(tag):Connect(function(object: Instance)
 			-- An object can carry several captured tags, so it only untracks once
 			-- it has lost all of them. The removed tag is already off the object
-			-- when this fires, so it can't match itself here.
+			-- when this fires, so it can't match itself here. Tracking doesn't
+			-- record how an object arrived, so losing the last captured tag
+			-- untracks the object even when it was also added directly through
+			-- addObject. A caller who wants an object to outlive its tags should
+			-- re-add it after the tag toggle.
 			for capturedTag in self._tagConnections do
 				if object:HasTag(capturedTag) then
 					return

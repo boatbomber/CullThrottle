@@ -11,6 +11,7 @@ local afterEach = JestGlobals.afterEach
 
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
+local Ingest = require(CullThrottlePackage:WaitForChild("Ingest"))
 local Utilities = CullThrottlePackage:WaitForChild("Utilities")
 local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
@@ -24,6 +25,10 @@ describe("Ingest", function()
 
 	beforeEach(function()
 		cullThrottle = CullThrottle.new()
+		-- The elapsed values in these tests assume the band boundaries that a
+		-- 15 to 60 Hz range produces (over-refresh up to 1/60s, p0 from 1/15s),
+		-- so the rates are pinned here instead of riding on the library defaults.
+		cullThrottle:SetRefreshRates(NumberRange.new(15, 60))
 	end)
 
 	afterEach(function()
@@ -33,71 +38,100 @@ describe("Ingest", function()
 		cullThrottle = nil
 	end)
 
-	describe("Ingest priority", function()
-		--[[
-			Reads back the priority the ingest pass staged for an object, matching it
-			to its entry in the incoming batch (items[i] pairs with priorities[i]).
-		]]
-		local function incomingPriority(object: Instance): number?
-			local batch = cullThrottle._ingest._visibleObjectsQueue._incomingBatch
-			for i = 1, batch.size do
-				if batch.items[i] == object then
-					return batch.priorities[i]
-				end
+	--[[
+		Heapifies whatever the ingest passes staged and drains the queue proper,
+		returning the objects in dequeue order plus a map of each object's
+		dequeued priority. This is the same pop order IterateObjectsToUpdate
+		consumes, so assertions on it survive refactors of how ingest feeds the
+		queue.
+	]]
+	local function drainStagedObjects()
+		local queue = cullThrottle._ingest._visibleObjectsQueue
+		queue:enqueueIncomingBatch()
+		local order = {}
+		local priorities = {}
+		while not queue:isEmpty() do
+			local object, priority = queue:dequeue()
+			table.insert(order, object)
+			priorities[object] = priority
+		end
+		return order, priorities
+	end
+
+	--[[
+		Counts how many incoming-batch entries reference the object. The staged
+		batch is the right surface for duplicate checks because the facade
+		answers GetVisibleObjects straight off this items array, while the queue
+		proper dedupes on heapify and so can never show a double staging.
+	]]
+	local function stagedOccurrences(object: Instance): number
+		local batch = cullThrottle._ingest._visibleObjectsQueue._incomingBatch
+		local occurrences = 0
+		for i = 1, batch.size do
+			if batch.items[i] == object then
+				occurrences += 1
 			end
-			return nil
 		end
+		return occurrences
+	end
 
-		--[[
-			Positions an object a fixed distance straight out from the camera and
-			prepares the object data fields the priority branches read. Jitter is
-			zeroed so the elapsed argument alone picks the priority branch.
-		]]
-		local function stageObject(distance: number, radius: number, elapsed: number): Instance
-			local part = createMockPart()
-			cullThrottle:AddObject(part)
-			local objectData = cullThrottle._lifecycle._objects[part]
-			objectData.jitterOffset = 0
-			objectData.radius = radius
-			objectData.lastCheckClock = 0
-			objectData.cframe = CFrame.new(CameraCache.Position + CameraCache.CFrame.LookVector * distance)
-			objectData.position = objectData.cframe.Position
-			-- The elapsed argument is measured from "now" (os.clock) at ingest time.
-			objectData.lastUpdateClock = os.clock() - elapsed
-			return part
-		end
+	--[[
+		Positions an object a fixed distance straight out from the camera and
+		prepares the object data fields the priority branches read. Jitter is
+		zeroed and lastUpdateClock is anchored to the caller's shared now, so the
+		elapsed argument alone picks the priority branch with no clock drift.
+	]]
+	local function stageObject(now: number, distance: number, radius: number, elapsed: number): Instance
+		local part = createMockPart()
+		cullThrottle:AddObject(part)
+		local objectData = cullThrottle._lifecycle._objects[part]
+		objectData.jitterOffset = 0
+		objectData.radius = radius
+		objectData.lastCheckClock = 0
+		objectData.cframe = CFrame.new(CameraCache.Position + CameraCache.CFrame.LookVector * distance)
+		objectData.position = objectData.cframe.Position
+		objectData.lastUpdateClock = now - elapsed
+		return part
+	end
 
+	describe("Ingest priority", function()
 		it("excludes objects beyond the render distance", function()
-			local part = stageObject(500, 2, 0.04)
+			local now = os.clock()
+			local part = stageObject(now, 500, 2, 0.04)
 			cullThrottle._config.renderDistance = 100
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { part })
+			ingestObjects(cullThrottle, now, { part })
 
-			-- It's past the render distance, so it's never staged and never marked visible.
-			expect(incomingPriority(part)).toBeNil()
+			-- It's past the render distance, so it never dequeues and is never
+			-- marked visible.
+			local order = drainStagedObjects()
+			expect(table.find(order, part)).toBeNil()
 			expect(cullThrottle._lifecycle._objects[part].lastVisibleClock).toBe(0)
 
 			part:Destroy()
 		end)
 
 		it("excludes objects beyond the render distance in the fast pass too", function()
-			local part = stageObject(500, 2, 0.04)
+			local now = os.clock()
+			local part = stageObject(now, 500, 2, 0.04)
 			cullThrottle._config.renderDistance = 100
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			fastIngestObjects(cullThrottle, os.clock(), { part })
+			fastIngestObjects(cullThrottle, now, { part })
 
 			-- The cheap pass applies the same cull as the precise one, so the
-			-- object is never staged and never marked visible.
-			expect(incomingPriority(part)).toBeNil()
+			-- object never dequeues and is never marked visible.
+			local order = drainStagedObjects()
+			expect(table.find(order, part)).toBeNil()
 			expect(cullThrottle._lifecycle._objects[part].lastVisibleClock).toBe(0)
 
 			part:Destroy()
 		end)
 
 		it("refreshes the stored distance in the fast pass", function()
-			local part = stageObject(200, 2, 0.04)
+			local now = os.clock()
+			local part = stageObject(now, 200, 2, 0.04)
 			-- The stored distance goes stale when the camera moves while the
 			-- object's voxel keeps falling to the fast pass, so we plant a stale
 			-- value and expect ingest to overwrite it with the real distance.
@@ -105,150 +139,348 @@ describe("Ingest", function()
 			objectData.distance = 50
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			fastIngestObjects(cullThrottle, os.clock(), { part })
+			fastIngestObjects(cullThrottle, now, { part })
 
 			expect(objectData.distance).toBeCloseTo(200)
-			expect(incomingPriority(part)).toBeDefined()
+			-- It still got staged and dequeues like any visible object.
+			local order = drainStagedObjects()
+			expect(table.find(order, part)).toBe(1)
 
 			part:Destroy()
 		end)
 
 		it("pushes over-refreshed objects far down the queue", function()
-			-- An elapsed of 0 is well under bestRefreshPeriod, so this is the over-refresh
-			-- branch, scaled by OVER_REFRESH_PRIORITY_SCALE (1e6). A small, distant
-			-- object keeps the screen size below 1 so the scaled value stays large.
-			local part = stageObject(300, 0.5, 0)
+			local now = os.clock()
+			-- An elapsed of 0 is under the best refresh period, so this is the
+			-- over-refresh branch. A small, distant object keeps the screen size
+			-- below 1 so the scaled value stays large.
+			local overRefreshed = stageObject(now, 300, 0.5, 0)
+			-- A fair-band companion makes the band ordering observable.
+			local due = stageObject(now, 100, 2, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { part })
+			ingestObjects(cullThrottle, now, { overRefreshed, due })
 
-			local priority = incomingPriority(part)
-			expect(priority).toBeDefined()
-			expect((priority :: number) > 1e5).toBe(true)
+			local order, priorities = drainStagedObjects()
+			expect(table.find(order, due)).toBe(1)
+			expect(table.find(order, overRefreshed)).toBe(2)
+			-- Every same-frame priority from the precise pass stays in the low
+			-- hundreds at most, so a value past 1e5 pins this to the scaled
+			-- over-refresh band.
+			expect(priorities[overRefreshed] > 1e5).toBe(true)
 
-			part:Destroy()
+			overRefreshed:Destroy()
+			due:Destroy()
 		end)
 
 		it("keeps over-refreshed large objects from stealing p0 priority", function()
+			local now = os.clock()
 			-- A large radius relative to distance gives a screen size above 1,
 			-- which would drive (1 - screenSize) negative and pull this just-updated
 			-- object below the p0 threshold and ahead of overdue ones. An elapsed
 			-- of 0 selects the over-refresh branch.
-			local overRefreshed = stageObject(10, 50, 0)
+			local overRefreshed = stageObject(now, 10, 50, 0)
 			-- A small, distant object that is genuinely overdue (elapsed far past
 			-- the worst refresh rate) sits in the p0 band.
-			local overdue = stageObject(300, 0.5, 100)
+			local overdue = stageObject(now, 300, 0.5, 100)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { overRefreshed, overdue })
+			ingestObjects(cullThrottle, now, { overRefreshed, overdue })
 
-			local pOverRefreshed = incomingPriority(overRefreshed) :: number
-			local pOverdue = incomingPriority(overdue) :: number
+			local order, priorities = drainStagedObjects()
 
-			-- The over-refreshed object stays at or above the p0 threshold (0.90),
-			-- so the update loop never grants it the extended p0 budget.
-			expect(pOverRefreshed >= 0.9).toBe(true)
-			-- The genuinely overdue object still sorts first (lower value dequeues first).
-			expect(pOverdue < pOverRefreshed).toBe(true)
+			-- The genuinely overdue object dequeues first.
+			expect(table.find(order, overdue)).toBe(1)
+			expect(table.find(order, overRefreshed)).toBe(2)
+			-- The overdue object sits below the threshold the update loop keys
+			-- its overrun budget off, while the clamped over-refreshed object
+			-- lands far past it in the scaled over-refresh band (every priority
+			-- the precise pass hands an object that needs an update this frame
+			-- stays in the low hundreds, so 1e5 cleanly separates the bands).
+			expect(priorities[overdue] < Ingest.P0_THRESHOLD).toBe(true)
+			expect(priorities[overRefreshed] > 1e5).toBe(true)
 
 			overRefreshed:Destroy()
 			overdue:Destroy()
 		end)
 
+		it("keeps a screen-filling fair-band object out of the p0 band", function()
+			local now = os.clock()
+			-- A radius far above the distance pushes the screen size past 1. The
+			-- fair band must clamp it so the screen-size term can't go negative
+			-- and drop a recently refreshed object below the p0 threshold, where
+			-- it would steal the p0 overrun budget from genuinely overdue objects.
+			-- Distance 40 keeps it past the nearby band, and an elapsed of 0.04
+			-- keeps it in the fair band.
+			local screenFilling = stageObject(now, 40, 100, 0.04)
+			local overdue = stageObject(now, 300, 0.5, 100)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { screenFilling, overdue })
+
+			local order, priorities = drainStagedObjects()
+
+			-- The genuinely overdue object dequeues first.
+			expect(table.find(order, overdue)).toBe(1)
+			expect(table.find(order, screenFilling)).toBe(2)
+			-- The screen-filling object stays at or above the p0 threshold, so
+			-- the update loop never grants it the extended p0 budget.
+			expect(priorities[screenFilling] >= Ingest.P0_THRESHOLD).toBe(true)
+			expect(priorities[overdue] < Ingest.P0_THRESHOLD).toBe(true)
+
+			screenFilling:Destroy()
+			overdue:Destroy()
+		end)
+
+		it("skips an object whose position has gone NaN in both passes", function()
+			local now = os.clock()
+			-- A NaN position makes every comparison against its distance false, so
+			-- the render distance cull must be phrased to reject it. Letting it
+			-- through would feed a NaN priority into the queue, where it lodges
+			-- arbitrarily and silently misorders later dequeues.
+			local part = stageObject(now, 100, 2, 0.04)
+			local objectData = cullThrottle._lifecycle._objects[part]
+			objectData.position = Vector3.new(0 / 0, 0 / 0, 0 / 0)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { part })
+
+			local order = drainStagedObjects()
+			expect(#order).toBe(0)
+			expect(objectData.lastVisibleClock).toBe(0)
+
+			objectData.lastCheckClock = 0
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			fastIngestObjects(cullThrottle, now, { part })
+
+			order = drainStagedObjects()
+			expect(#order).toBe(0)
+			expect(objectData.lastVisibleClock).toBe(0)
+
+			part:Destroy()
+		end)
+
 		it("sorts over-refreshed objects behind objects that are due for a refresh", function()
+			local now = os.clock()
 			-- A screen-filling object (radius well above distance) clamps the
 			-- screen-size term to zero, which must not let its just-refreshed
 			-- priority undercut the fair band. An elapsed of 0 selects the
 			-- over-refresh branch.
-			local overRefreshed = stageObject(10, 50, 0)
+			local overRefreshed = stageObject(now, 10, 50, 0)
 			-- A due object in the fair band, with elapsed between the best and
 			-- worst refresh periods.
-			local due = stageObject(300, 0.5, 0.04)
+			local due = stageObject(now, 300, 0.5, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { overRefreshed, due })
+			ingestObjects(cullThrottle, now, { overRefreshed, due })
 
-			local pOverRefreshed = incomingPriority(overRefreshed) :: number
-			local pDue = incomingPriority(due) :: number
-
-			expect(pDue < pOverRefreshed).toBe(true)
+			local order = drainStagedObjects()
+			expect(table.find(order, due)).toBe(1)
+			expect(table.find(order, overRefreshed)).toBe(2)
 
 			overRefreshed:Destroy()
 			due:Destroy()
 		end)
 
 		it("gives overdue objects p0 priority sorted by screen size", function()
-			-- An elapsed far past worstRefreshPeriod puts both in the p0 band.
-			local smallPart = stageObject(100, 0.5, 100)
-			local bigPart = stageObject(100, 5, 100)
+			local now = os.clock()
+			-- An elapsed far past the worst refresh period puts both in the p0 band.
+			local smallPart = stageObject(now, 100, 0.5, 100)
+			local bigPart = stageObject(now, 100, 5, 100)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { smallPart, bigPart })
+			ingestObjects(cullThrottle, now, { smallPart, bigPart })
 
-			local pSmall = incomingPriority(smallPart) :: number
-			local pBig = incomingPriority(bigPart) :: number
+			local order, priorities = drainStagedObjects()
 
-			-- Both sit below the p0 threshold (0.90).
-			expect(pSmall < 0.9).toBe(true)
-			expect(pBig < 0.9).toBe(true)
-			-- The larger (more on-screen) object sorts ahead with a lower value.
-			expect(pBig < pSmall).toBe(true)
+			-- Both sit below the p0 threshold the update loop keys its overrun
+			-- budget off.
+			expect(priorities[smallPart] < Ingest.P0_THRESHOLD).toBe(true)
+			expect(priorities[bigPart] < Ingest.P0_THRESHOLD).toBe(true)
+			-- The larger (more on-screen) object dequeues first.
+			expect(table.find(order, bigPart)).toBe(1)
+			expect(table.find(order, smallPart)).toBe(2)
 
 			smallPart:Destroy()
 			bigPart:Destroy()
 		end)
 
 		it("gives nearby objects a distance-proportional priority", function()
-			-- This sits within NEARBY_DISTANCE_THRESHOLD (30) and refreshes at a fair rate.
-			local part = stageObject(15, 2, 0.04)
+			local now = os.clock()
+			-- Both sit within the nearby threshold and refresh at a fair rate,
+			-- with the farther one exactly twice as far out.
+			local nearPart = stageObject(now, 10, 2, 0.04)
+			local farPart = stageObject(now, 20, 2, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { part })
+			ingestObjects(cullThrottle, now, { nearPart, farPart })
 
-			-- The priority is distance / NEARBY_DISTANCE_THRESHOLD, which is 15 / 30.
-			expect(incomingPriority(part)).toBeCloseTo(15 / 30)
+			local order, priorities = drainStagedObjects()
 
-			part:Destroy()
+			-- The nearer object dequeues first, and doubling the distance doubles
+			-- the priority value, so a constant priority can't pass here.
+			expect(table.find(order, nearPart)).toBe(1)
+			expect(table.find(order, farPart)).toBe(2)
+			expect(priorities[farPart]).toBeCloseTo(priorities[nearPart] * 2)
+
+			nearPart:Destroy()
+			farPart:Destroy()
 		end)
 
 		it("ranks a farther object below a nearer one in the fair band", function()
+			local now = os.clock()
 			-- Both are past the nearby threshold and refreshing at a fair rate, so they
 			-- take the weighted-blend branch where distance and screen size matter.
-			local nearPart = stageObject(100, 2, 0.04)
-			local farPart = stageObject(200, 2, 0.04)
+			local nearPart = stageObject(now, 100, 2, 0.04)
+			local farPart = stageObject(now, 200, 2, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { nearPart, farPart })
+			ingestObjects(cullThrottle, now, { nearPart, farPart })
 
-			local pNear = incomingPriority(nearPart) :: number
-			local pFar = incomingPriority(farPart) :: number
-
-			-- A higher priority value means later in the queue, so the farther,
-			-- smaller-on-screen object should sort after the nearer one.
-			expect(pFar > pNear).toBe(true)
+			-- The farther, smaller-on-screen object dequeues after the nearer one.
+			local order = drainStagedObjects()
+			expect(table.find(order, nearPart)).toBe(1)
+			expect(table.find(order, farPart)).toBe(2)
 
 			nearPart:Destroy()
 			farPart:Destroy()
 		end)
 
 		it("ranks a larger object ahead of a smaller one in the fair band", function()
-			local bigPart = stageObject(100, 5, 0.04)
-			local smallPart = stageObject(100, 1, 0.04)
+			local now = os.clock()
+			local bigPart = stageObject(now, 100, 5, 0.04)
+			local smallPart = stageObject(now, 100, 1, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { bigPart, smallPart })
+			ingestObjects(cullThrottle, now, { bigPart, smallPart })
 
-			local pBig = incomingPriority(bigPart) :: number
-			local pSmall = incomingPriority(smallPart) :: number
-
-			-- The bigger object fills more of the screen, so it sorts first (lower value).
-			expect(pBig < pSmall).toBe(true)
+			-- The bigger object fills more of the screen, so it dequeues first.
+			local order = drainStagedObjects()
+			expect(table.find(order, bigPart)).toBe(1)
+			expect(table.find(order, smallPart)).toBe(2)
 
 			bigPart:Destroy()
 			smallPart:Destroy()
 		end)
 
+		it("ranks a more overdue object ahead of a fresher one in the fair band", function()
+			local now = os.clock()
+			-- Both objects share distance and size, so only the refresh urgency
+			-- term separates them. Deleting or inverting it would break this.
+			local fresher = stageObject(now, 100, 2, 0.02)
+			local overdue = stageObject(now, 100, 2, 0.06)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { fresher, overdue })
+
+			local order = drainStagedObjects()
+			expect(table.find(order, overdue)).toBe(1)
+			expect(table.find(order, fresher)).toBe(2)
+
+			fresher:Destroy()
+			overdue:Destroy()
+		end)
+
+		it("breaks fair-band ties between equal screen sizes by distance", function()
+			local now = os.clock()
+			-- The far object's radius scales with its distance, so both project
+			-- to the same screen size, and both elapsed values anchor to the same
+			-- shared now. Only the deliberate distance tiebreaker can order them.
+			local nearPart = stageObject(now, 100, 2, 0.04)
+			local farPart = stageObject(now, 200, 4, 0.04)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { farPart, nearPart })
+
+			local order = drainStagedObjects()
+			expect(table.find(order, nearPart)).toBe(1)
+			expect(table.find(order, farPart)).toBe(2)
+
+			nearPart:Destroy()
+			farPart:Destroy()
+		end)
+
+		it("sends a just-refreshed nearby object to the over-refresh band, not the nearby band", function()
+			local now = os.clock()
+			-- The over-refresh check outranks the nearby check in the branch
+			-- ladder. Reordering them would make objects right by the camera
+			-- refresh every frame no matter how recently they updated.
+			local part = stageObject(now, 15, 2, 0)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { part })
+
+			-- A nearby-band value sits below 1, while the over-refresh band is
+			-- scaled far past 1e5.
+			local _, priorities = drainStagedObjects()
+			expect(priorities[part] > 1e5).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("stages a finite priority for an object at the camera's position", function()
+			local now = os.clock()
+			-- A zero distance would feed an infinite screen size into the p0
+			-- math without the minimum-distance clamp. The object is hugely
+			-- overdue so it takes the p0 branch where that matters.
+			local part = stageObject(now, 0, 2, 100)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { part })
+
+			local _, priorities = drainStagedObjects()
+			local priority = priorities[part]
+			expect(priority).toBeDefined()
+			-- Finite means bounded on both sides. An unclamped screen size would
+			-- produce -inf here, and both checks also fail for a NaN.
+			expect(priority > -math.huge).toBe(true)
+			expect(priority < math.huge).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("culls an object poking outside a side plane within a visible voxel", function()
+			local now = os.clock()
+			-- Voxel-level visibility doesn't imply per-object visibility, so an
+			-- object whose bounding sphere sits fully outside a side plane must
+			-- be dropped (and never marked in view) even though its voxel was
+			-- staged as visible. Its neighbor just inside the plane stays.
+			local sinH = CameraCache.SinHalfHorizontalFOV
+			local cosH = CameraCache.CosHalfHorizontalFOV
+			local forward = 100
+			local radius = 2
+			local boundary = forward * sinH / cosH
+
+			local function stageAtLateralOffset(right: number): Instance
+				local part = createMockPart()
+				cullThrottle:AddObject(part)
+				local objectData = cullThrottle._lifecycle._objects[part]
+				objectData.jitterOffset = 0
+				objectData.radius = radius
+				objectData.lastCheckClock = 0
+				objectData.lastUpdateClock = now - 0.04
+				objectData.cframe = CameraCache.CFrame * CFrame.new(right, 0, -forward)
+				objectData.position = objectData.cframe.Position
+				return part
+			end
+
+			local culled = stageAtLateralOffset(boundary + (radius + 5) / cosH)
+			local kept = stageAtLateralOffset(boundary - (radius + 5) / cosH)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { culled, kept })
+
+			local order = drainStagedObjects()
+			expect(table.find(order, culled)).toBeNil()
+			expect(cullThrottle._lifecycle._objects[culled].lastVisibleClock).toBe(0)
+			expect(table.find(order, kept)).never.toBeNil()
+
+			culled:Destroy()
+			kept:Destroy()
+		end)
+
 		it("keeps a large near object whose center is behind the camera", function()
+			local now = os.clock()
 			-- The per-axis angle test is only valid in front of the camera. A big
 			-- object centered just behind the camera plane can still wrap its body
 			-- into view, so it must be kept rather than culled.
@@ -257,7 +489,7 @@ describe("Ingest", function()
 			local objectData = cullThrottle._lifecycle._objects[part]
 			objectData.jitterOffset = 0
 			objectData.lastCheckClock = 0
-			objectData.lastUpdateClock = os.clock()
+			objectData.lastUpdateClock = now
 			objectData.radius = 40
 			-- Local +Z is behind the camera (LookVector is -Z), so this sits 8 behind
 			-- and 12 to the side.
@@ -265,17 +497,345 @@ describe("Ingest", function()
 			objectData.position = objectData.cframe.Position
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
-			ingestObjects(cullThrottle, os.clock(), { part })
+			ingestObjects(cullThrottle, now, { part })
 
-			-- Being staged into the queue means it was kept, not culled.
-			expect(incomingPriority(part)).never.toBeNil()
+			-- Coming out of the queue means it was kept, not culled.
+			local order = drainStagedObjects()
+			expect(table.find(order, part)).never.toBeNil()
 
+			part:Destroy()
+		end)
+	end)
+
+	describe("Multi-voxel deduplication", function()
+		it("ingests an object spanning two visible voxels only once in the precise pass", function()
+			local now = os.clock()
+			local part = stageObject(now, 100, 2, 0.04)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			-- The same object data sits in two visible voxels, the way a large
+			-- object straddling a voxel boundary does, so the precise pass must
+			-- do the work only on its first visit this frame.
+			local keyA = Vector3.new(1e6, 1e6, 1e6)
+			local keyB = Vector3.new(1e6, 1e6, 1e6 + 1)
+			cullThrottle._grid._voxels[keyA] = { objectData }
+			cullThrottle._grid._voxels[keyB] = { objectData }
+			cullThrottle._search._visibleVoxelKeys = { keyA, keyB }
+			cullThrottle._search._visibleVoxelCount = 2
+
+			-- A generous budget keeps the precise pass on both voxels.
+			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle._ingest:ingestVisibleVoxels(now)
+
+			-- It was staged exactly once.
+			expect(stagedOccurrences(part)).toBe(1)
+			-- It was marked visible exactly once, so one entered-view event is
+			-- buffered and the in-view set holds one entry.
+			expect(cullThrottle._signals._pendingEnteredViewSize).toBe(1)
+			expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+
+			cullThrottle._grid._voxels[keyA] = nil
+			cullThrottle._grid._voxels[keyB] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			part:Destroy()
+		end)
+
+		it("does not duplicate an object spanning several voxels in the fast pass", function()
+			local now = os.clock()
+			local part = stageObject(now, 100, 2, 0.04)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			-- Each helper call stages one visible voxel, so two calls sharing one
+			-- now reproduce an object occupying two voxels that both fall to the
+			-- fast pass in the same frame.
+			fastIngestObjects(cullThrottle, now, { part })
+			fastIngestObjects(cullThrottle, now, { part })
+
+			expect(stagedOccurrences(part)).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("does not re-add an object the precise ingest pass already handled", function()
+			local now = os.clock()
+			local part = stageObject(now, 100, 2, 0.04)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			-- The precise pass reaches the object's first voxel, then its second
+			-- voxel falls to the fast pass within the same frame, which must
+			-- recognize the object was already handled.
+			ingestObjects(cullThrottle, now, { part })
+			fastIngestObjects(cullThrottle, now, { part })
+
+			expect(stagedOccurrences(part)).toBe(1)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("Budget handoff", function()
+		it("hands voxels past the exhausted budget to the fast pass without skipping or duplicating any", function()
+			local now = os.clock()
+			-- The first voxel holds enough objects to cross the per-batch clock
+			-- check interval (the count just needs to be at least the interval,
+			-- so it sits comfortably above it), which means the budget check runs
+			-- right after that voxel and the zero budget is already spent. The
+			-- second voxel must fall through to the fast pass, neither skipped
+			-- (an off-by-one up) nor re-ingested from the first voxel (an
+			-- off-by-one down, visible in the skip tally).
+			local nearObjects = {}
+			for i = 1, 64 do
+				nearObjects[i] = stageObject(now, 100, 2, 0.04)
+			end
+			local farObjects = {}
+			for i = 1, 3 do
+				farObjects[i] = stageObject(now, 200, 2, 0.04)
+			end
+
+			local nearVoxel = {}
+			for i, part in nearObjects do
+				nearVoxel[i] = cullThrottle._lifecycle._objects[part]
+			end
+			local farVoxel = {}
+			for i, part in farObjects do
+				farVoxel[i] = cullThrottle._lifecycle._objects[part]
+			end
+
+			local keyA = Vector3.new(1e6, 1e6, 1e6)
+			local keyB = Vector3.new(1e6, 1e6, 1e6 + 1)
+			cullThrottle._grid._voxels[keyA] = nearVoxel
+			cullThrottle._grid._voxels[keyB] = farVoxel
+			cullThrottle._search._visibleVoxelKeys = { keyA, keyB }
+			cullThrottle._search._visibleVoxelCount = 2
+
+			cullThrottle._config.ingestTimeBudget = 0
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle._ingest:ingestVisibleVoxels(now)
+
+			local order, priorities = drainStagedObjects()
+
+			-- Every object came through exactly once.
+			expect(#order).toBe(#nearObjects + #farObjects)
+			-- All the precisely scored near objects dequeue ahead of the far
+			-- voxel's coarse tier.
+			local worstNearPosition = 0
+			for _, part in nearObjects do
+				local position = table.find(order, part)
+				expect(position).never.toBeNil()
+				if position > worstNearPosition then
+					worstNearPosition = position
+				end
+			end
+			for _, part in farObjects do
+				local position = table.find(order, part)
+				expect(position).never.toBeNil()
+				expect(position).toBeGreaterThan(worstNearPosition)
+			end
+			-- The far voxel's objects share one coarse tier, since the fast pass
+			-- scores per voxel rather than per object.
+			local farTier = priorities[farObjects[1]]
+			for _, part in farObjects do
+				expect(priorities[part]).toBe(farTier)
+			end
+			-- Exactly one voxel fell through to the fast pass.
+			local perfMetrics = cullThrottle._perfMetrics
+			expect(perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor]).toBe(1)
+
+			cullThrottle._grid._voxels[keyA] = nil
+			cullThrottle._grid._voxels[keyB] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			for _, part in nearObjects do
+				part:Destroy()
+			end
+			for _, part in farObjects do
+				part:Destroy()
+			end
+		end)
+
+		it("records the ingest duration when the budget hands off to the fast pass", function()
+			local now = os.clock()
+			-- The handoff returns out of the precise pass early, and that path
+			-- must still record how long the pass ran before it bailed. The
+			-- object count just needs to be at least the per-batch clock check
+			-- interval so the zero budget is noticed after the first voxel.
+			local parts = {}
+			for i = 1, 64 do
+				parts[i] = stageObject(now, 100, 2, 0.04)
+			end
+			local voxel = {}
+			for i, part in parts do
+				voxel[i] = cullThrottle._lifecycle._objects[part]
+			end
+			local key = Vector3.new(1e6, 1e6, 1e6)
+			cullThrottle._grid._voxels[key] = voxel
+			cullThrottle._search._visibleVoxelKeys = { key }
+			cullThrottle._search._visibleVoxelCount = 1
+
+			cullThrottle:SetTimeBudgets(1, 0, 1)
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			-- The sentinel proves the early return wrote the metric rather than
+			-- leaving a stale value behind.
+			cullThrottle._perfMetrics._ingestDuration = -1
+			cullThrottle._ingest:ingestVisibleVoxels(now)
+
+			expect(cullThrottle._perfMetrics._ingestDuration >= 0).toBe(true)
+
+			cullThrottle._grid._voxels[key] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("gives farther fast-pass voxels strictly higher priority tiers", function()
+			local now = os.clock()
+			-- The fast pass can't score objects, so it must still dequeue nearer
+			-- voxels first through the per-voxel tier scale.
+			local partA = stageObject(now, 100, 2, 0.04)
+			local partB = stageObject(now, 200, 2, 0.04)
+
+			local keyA = Vector3.new(1e6, 1e6, 1e6)
+			local keyB = Vector3.new(1e6, 1e6, 1e6 + 1)
+			cullThrottle._grid._voxels[keyA] = { cullThrottle._lifecycle._objects[partA] }
+			cullThrottle._grid._voxels[keyB] = { cullThrottle._lifecycle._objects[partB] }
+			cullThrottle._search._visibleVoxelKeys = { keyA, keyB }
+			cullThrottle._search._visibleVoxelCount = 2
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			cullThrottle._ingest:fastApproxIngestRemainingVoxels(now, 1)
+
+			-- The earlier voxel's object dequeues first, from a strictly lower
+			-- (distinct) tier.
+			local order, priorities = drainStagedObjects()
+			expect(table.find(order, partA)).toBe(1)
+			expect(table.find(order, partB)).toBe(2)
+			expect(priorities[partA] < priorities[partB]).toBe(true)
+			-- Both voxels fell through here, so the skip tally records two.
+			local perfMetrics = cullThrottle._perfMetrics
+			expect(perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor]).toBe(2)
+
+			cullThrottle._grid._voxels[keyA] = nil
+			cullThrottle._grid._voxels[keyB] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("keeps deep fast-pass voxels ahead of over-refreshed objects", function()
+			local now = os.clock()
+			-- Objects dumped by the fast pass still need updates this frame, so
+			-- every fast-pass tier must stay below the over-refresh band no matter
+			-- how deep the voxel index grows. An unbounded tier scale would cross
+			-- the band floor around index 90, so the index here sits well past
+			-- that, and the screen-filling over-refreshed object takes the band's
+			-- floor value, the hardest case to stay below.
+			local overRefreshed = stageObject(now, 10, 50, 0)
+			local fastPassed = stageObject(now, 200, 2, 0.04)
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			ingestObjects(cullThrottle, now, { overRefreshed })
+
+			-- The fast-passed object's voxel sits at slot 120 of the visible
+			-- list, with every earlier slot referencing no voxel.
+			local deepIndex = 120
+			local deepKey = Vector3.new(1e6, 1e6, 1e6)
+			local keys = table.create(deepIndex)
+			for i = 1, deepIndex - 1 do
+				keys[i] = Vector3.new(2e6 + i, 2e6, 2e6)
+			end
+			keys[deepIndex] = deepKey
+			cullThrottle._grid._voxels[deepKey] = { cullThrottle._lifecycle._objects[fastPassed] }
+			cullThrottle._search._visibleVoxelKeys = keys
+			cullThrottle._search._visibleVoxelCount = deepIndex
+
+			cullThrottle._ingest:fastApproxIngestRemainingVoxels(now, 1)
+
+			local order = drainStagedObjects()
+			expect(table.find(order, fastPassed)).toBe(1)
+			expect(table.find(order, overRefreshed)).toBe(2)
+
+			cullThrottle._grid._voxels[deepKey] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			overRefreshed:Destroy()
+			fastPassed:Destroy()
+		end)
+	end)
+
+	describe("Voxel iteration edge cases", function()
+		it("records a zero skip tally when the fast pass starts past the last voxel", function()
+			local now = os.clock()
+			-- When the precise pass spends its budget exactly on the last voxel,
+			-- the handoff calls the fast pass with a start index one past the
+			-- end. It must not error, and the tally must record that nothing
+			-- actually fell through.
+			local part = stageObject(now, 100, 2, 0.04)
+
+			local key = Vector3.new(1e6, 1e6, 1e6)
+			cullThrottle._grid._voxels[key] = { cullThrottle._lifecycle._objects[part] }
+			cullThrottle._search._visibleVoxelKeys = { key }
+			cullThrottle._search._visibleVoxelCount = 1
+
+			-- Plant a sentinel so the zero is provably written rather than left over.
+			local perfMetrics = cullThrottle._perfMetrics
+			perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor] = 5
+
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			expect(function()
+				cullThrottle._ingest:fastApproxIngestRemainingVoxels(now, 2)
+			end).never.toThrow()
+
+			expect(perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor]).toBe(0)
+			local order = drainStagedObjects()
+			expect(#order).toBe(0)
+
+			cullThrottle._grid._voxels[key] = nil
+			cullThrottle._search._visibleVoxelCount = 0
+			part:Destroy()
+		end)
+
+		it("skips a visible voxel missing from the grid while ingesting the rest in both passes", function()
+			local now = os.clock()
+			-- The search can stage a voxel key whose voxel got emptied out of the
+			-- grid before ingest ran, so both passes must step over it without
+			-- erroring and still ingest the voxels around it.
+			local part = stageObject(now, 100, 2, 0.04)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			local missingKey = Vector3.new(1e6, 1e6, 1e6)
+			local presentKey = Vector3.new(1e6, 1e6, 1e6 + 1)
+			cullThrottle._grid._voxels[presentKey] = { objectData }
+			cullThrottle._search._visibleVoxelKeys = { missingKey, presentKey }
+			cullThrottle._search._visibleVoxelCount = 2
+
+			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			expect(function()
+				cullThrottle._ingest:ingestVisibleVoxels(now)
+			end).never.toThrow()
+			local order = drainStagedObjects()
+			expect(table.find(order, part)).toBe(1)
+
+			-- Resetting the per-frame stamp makes the fast pass do the work again.
+			objectData.lastCheckClock = 0
+			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
+			expect(function()
+				cullThrottle._ingest:fastApproxIngestRemainingVoxels(now, 1)
+			end).never.toThrow()
+			order = drainStagedObjects()
+			expect(table.find(order, part)).toBe(1)
+
+			cullThrottle._grid._voxels[presentKey] = nil
+			cullThrottle._search._visibleVoxelCount = 0
 			part:Destroy()
 		end)
 	end)
 
 	describe("Visible voxel ordering", function()
 		it("accumulates added voxels into the pending buffer in call order", function()
+			-- The subject here is VisibilitySearch's addVoxelKeyToVisible, pinned
+			-- in this file because the pending buffer it fills is exactly what
+			-- the sort under test consumes.
 			cullThrottle:SetVoxelSize(100)
 			local cameraVoxel = CameraCache.Position // 100
 
@@ -351,6 +911,66 @@ describe("Ingest", function()
 			expect(cullThrottle._search._visibleVoxelCount).toBe(addedCount)
 		end)
 
+		it("keeps equal-distance voxels in their original order through the sort", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- All four offsets sit at manhattan distance two in distinct
+			-- directions, so the documented stability is the only thing that
+			-- can order them.
+			local equalOffsets = {
+				Vector3.new(2, 0, 0),
+				Vector3.new(0, 2, 0),
+				Vector3.new(1, 1, 0),
+				Vector3.new(0, 1, 1),
+			}
+			for _, offset in equalOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+
+			cullThrottle._ingest:sortVisibleVoxelKeys()
+
+			for i, offset in equalOffsets do
+				expect(cullThrottle._search._visibleVoxelKeys[i]).toBe(cameraVoxel + offset)
+			end
+		end)
+
+		it("sorts correctly on a second batch with a smaller max distance", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- The first sort fills the reused scratch counts out to a wide max
+			-- distance, leaving stale prefix sums behind in the higher buckets.
+			local wideOffsets = {
+				Vector3.new(3, 2, 1), -- This one sits at distance 6.
+				Vector3.new(1, 0, 0), -- This one sits at distance 1.
+				Vector3.new(2, 2, 0), -- This one sits at distance 4.
+			}
+			for _, offset in wideOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+			cullThrottle._ingest:sortVisibleVoxelKeys()
+
+			-- The second batch tops out at distance 2, well inside the stale
+			-- range, so only a correct reset of the reused counts can place its
+			-- voxels in the right slots.
+			cullThrottle._search._visibleVoxelCount = 0
+			local narrowOffsets = {
+				Vector3.new(0, 2, 0), -- This one sits at distance 2.
+				Vector3.new(0, 0, 0), -- This one sits at distance 0.
+				Vector3.new(-1, 0, 0), -- This one sits at distance 1.
+			}
+			for _, offset in narrowOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+			cullThrottle._ingest:sortVisibleVoxelKeys()
+
+			expect(cullThrottle._search._visibleVoxelCount).toBe(3)
+			expect(cullThrottle._search._visibleVoxelKeys[1]).toBe(cameraVoxel)
+			expect(cullThrottle._search._visibleVoxelKeys[2]).toBe(cameraVoxel + Vector3.new(-1, 0, 0))
+			expect(cullThrottle._search._visibleVoxelKeys[3]).toBe(cameraVoxel + Vector3.new(0, 2, 0))
+		end)
+
 		it("handles the empty and single-voxel cases", function()
 			cullThrottle:SetVoxelSize(100)
 			local cameraVoxel = CameraCache.Position // 100
@@ -368,10 +988,12 @@ describe("Ingest", function()
 		end)
 
 		it("keeps visible voxels ordered closest-first end to end", function()
-			-- Spread objects across several voxels so the search produces a batch to order.
+			-- Spread objects through the view at increasing depth so the search
+			-- produces a multi-voxel batch to order.
+			local camera = workspace.CurrentCamera
 			local parts = {}
-			for i = -3, 3 do
-				local part = createMockPart(Vector3.new(i * 120, 0, 0))
+			for i = 1, 7 do
+				local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -120 * i)).Position)
 				cullThrottle:AddObject(part)
 				table.insert(parts, part)
 			end
@@ -381,8 +1003,12 @@ describe("Ingest", function()
 			cullThrottle._config.ingestTimeBudget = 1
 			cullThrottle:_findVisibleObjects(os.clock())
 
-			-- However many voxels ended up visible, they must come out non-decreasing
-			-- in manhattan distance to the camera (the ingest passes depend on it).
+			-- The sort only matters when several voxels are visible, so prove
+			-- the staging actually produced a batch.
+			expect(cullThrottle._search._visibleVoxelCount).toBeGreaterThan(1)
+
+			-- The batch must come out non-decreasing in manhattan distance to
+			-- the camera (the ingest passes depend on it).
 			local cameraVoxel = CameraCache.Position // cullThrottle._config.voxelSize
 			local previousDistance = -1
 			for i = 1, cullThrottle._search._visibleVoxelCount do
@@ -398,6 +1024,8 @@ describe("Ingest", function()
 		end)
 
 		it("preserves the visible voxel keys when the backing tables are resized", function()
+			-- The subject here is the facade's _resizeTables, pinned in this file
+			-- because the sorted visible list is the buffer it must not corrupt.
 			cullThrottle:SetVoxelSize(100)
 			local cameraVoxel = CameraCache.Position // 100
 

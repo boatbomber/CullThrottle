@@ -1001,6 +1001,25 @@ function VisibilitySearch.resizeBuffers(self: VisibilitySearch)
 	local volumesToCheck = tableCreate(volumesSize)
 	tableMove(self._volumesToCheck, 1, volumesSize, 1, volumesToCheck)
 	self._volumesToCheck = volumesToCheck
+
+	-- Any volume still on the stack owns a [lo, hi] slice of the seed buffer,
+	-- so the rebuild keeps every slot a surviving slice can reach. With the
+	-- stack empty (the steady state between frames) this rebuilds the buffer
+	-- empty, and the next seed refills it from scratch.
+	local keptSeedKeys = 0
+	for base = 0, volumesSize - 1, 10 do
+		local hi = volumesToCheck[base + 8]
+		if hi > keptSeedKeys then
+			keptSeedKeys = hi
+		end
+	end
+	local searchVoxelKeys = tableCreate(keptSeedKeys)
+	tableMove(self._searchVoxelKeys, 1, keptSeedKeys, 1, searchVoxelKeys)
+	self._searchVoxelKeys = searchVoxelKeys
+
+	-- The proof walk's scratch list is only ever read within the call that
+	-- filled it, so nothing in it survives the rebuild.
+	self._unprovenVoxelKeys = {}
 end
 
 --[[

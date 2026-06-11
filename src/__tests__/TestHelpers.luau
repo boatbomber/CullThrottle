@@ -83,6 +83,77 @@ local function stubObjectData(object: Instance): any
 	return { object = object }
 end
 
+--[[
+	Packs a visible voxel proof the way the search stamps one. The X component
+	is the expiry of the visible verdict, Y is -1 because the proof carries no
+	culled verdict, and Z is the arm the rotation accumulator is charged at.
+	The proof is trusted while (accumT + accumF) + accumR * Z stays at or under
+	the stored expiry.
+]]
+local function visibleVoxelProof(expiry: number, arm: number): Vector3
+	return Vector3.new(expiry, -1, arm)
+end
+
+--[[
+	Packs a culled voxel proof, the mirror of visibleVoxelProof with the culled
+	verdict's expiry in Y and -1 in X.
+]]
+local function culledVoxelProof(expiry: number, arm: number): Vector3
+	return Vector3.new(-1, expiry, arm)
+end
+
+--[[
+	Pops the top volume off a search's flat stack, the way the search's run
+	loop reads one. Each volume spans ten consecutive slots holding its box
+	bounds, its [lo, hi] slice of the seed buffer, its plane mask, and its
+	inherited slack, and this returns them as named fields so tests never
+	hand-copy the slot layout.
+]]
+local function popVolume(search: any): { [string]: number }
+	local volumesToCheck = search._volumesToCheck
+	local n = search._volumesToCheckSize
+	local volume = {
+		x0 = volumesToCheck[n - 9],
+		y0 = volumesToCheck[n - 8],
+		z0 = volumesToCheck[n - 7],
+		x1 = volumesToCheck[n - 6],
+		y1 = volumesToCheck[n - 5],
+		z1 = volumesToCheck[n - 4],
+		lo = volumesToCheck[n - 3],
+		hi = volumesToCheck[n - 2],
+		planeMask = volumesToCheck[n - 1],
+		inheritedSlack = volumesToCheck[n],
+	}
+	search._volumesToCheckSize = n - 10
+	return volume
+end
+
+--[[
+	Drains a search's volume stack the way run does, popping each volume and
+	resolving it through searchVolume with the given accumulators and no time
+	budget, so the stack always empties.
+]]
+local function drainVolumeStack(search: any, accumTF: number, accumR: number, frustumPlanes: { Vector3 })
+	while search._volumesToCheckSize > 0 do
+		local volume = popVolume(search)
+		search:searchVolume(
+			accumTF,
+			accumR,
+			frustumPlanes,
+			volume.x0,
+			volume.y0,
+			volume.z0,
+			volume.x1,
+			volume.y1,
+			volume.z1,
+			volume.lo,
+			volume.hi,
+			volume.planeMask,
+			volume.inheritedSlack
+		)
+	end
+end
+
 -- Module-table patches are shared state across tests (unlike patches on a
 -- per-test instance, which die with it), so every patch is registered here and
 -- restorePatches is wired into afterEach by the suites that patch.
@@ -151,6 +222,10 @@ return {
 	fastIngestObjects = fastIngestObjects,
 	markInView = markInView,
 	stubObjectData = stubObjectData,
+	visibleVoxelProof = visibleVoxelProof,
+	culledVoxelProof = culledVoxelProof,
+	popVolume = popVolume,
+	drainVolumeStack = drainVolumeStack,
 	patchFunction = patchFunction,
 	restorePatches = restorePatches,
 	straddlingFrustumPlanes = straddlingFrustumPlanes,

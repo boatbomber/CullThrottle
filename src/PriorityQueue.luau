@@ -6,6 +6,11 @@
     It was adapted for Luau by boatbomber.
 
     Lowest priority values come first.
+
+    Priorities must be real numbers. A NaN priority fails every heap comparison
+    and silently corrupts dequeue order, and the hot enqueue paths deliberately
+    don't pay for a guard, so callers keep NaN out (Ingest culls NaN distances
+    before staging anything).
 ]]
 
 local PriorityQueue = {}

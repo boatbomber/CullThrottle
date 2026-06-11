@@ -20,8 +20,10 @@ describe("GoodSignal", function()
 
 	describe("new", function()
 		it("starts with no connections", function()
-			expect(signal._connectionCount).toBe(0)
-			expect(signal._handlerListHead).toBe(false)
+			expect(signal:HasConnections()).toBe(false)
+			-- The handler list sentinel only needs to read as empty, whatever
+			-- falsy value the implementation picks.
+			expect(signal._handlerListHead).toBeFalsy()
 		end)
 	end)
 
@@ -53,31 +55,52 @@ describe("GoodSignal", function()
 			expect(count).toBe(2)
 		end)
 
-		it("tracks the connection count as handlers connect and disconnect", function()
-			expect(signal._connectionCount).toBe(0)
+		it("runs handlers in most-recently-connected-first order", function()
+			-- The mutation-during-fire tests below stage themselves around this
+			-- order, so it gets pinned directly instead of only by implication.
+			local order = {}
+			signal:Connect(function()
+				table.insert(order, "first")
+			end)
+			signal:Connect(function()
+				table.insert(order, "second")
+			end)
+			signal:Connect(function()
+				table.insert(order, "third")
+			end)
+
+			signal:Fire()
+
+			expect(order).toEqual({ "third", "second", "first" })
+		end)
+
+		it("reports connections exactly while any handler remains connected", function()
+			expect(signal:HasConnections()).toBe(false)
 
 			local c1 = signal:Connect(function() end)
 			local c2 = signal:Connect(function() end)
-			expect(signal._connectionCount).toBe(2)
+			expect(signal:HasConnections()).toBe(true)
 
+			-- One handler is still live here, so an undercounting bug (like a
+			-- double decrement) would wrongly flip this to false.
 			c1:Disconnect()
-			expect(signal._connectionCount).toBe(1)
+			expect(signal:HasConnections()).toBe(true)
 
 			c2:Disconnect()
-			expect(signal._connectionCount).toBe(0)
+			expect(signal:HasConnections()).toBe(false)
 		end)
 
-		it("keeps the connection count intact when a connection is disconnected twice", function()
+		it("still reports a connection when another handler is disconnected twice", function()
 			local c1 = signal:Connect(function() end)
 			signal:Connect(function() end)
 
-			-- The second disconnect must be a no-op. If it decremented again, the
-			-- count would read zero while a live handler remains, and anything
-			-- gating work on the count would wrongly see no demand.
+			-- The second disconnect must be a no-op. If it took effect again, the
+			-- signal would report no connections while a live handler remains, and
+			-- anything gating work on that report would wrongly see no demand.
 			c1:Disconnect()
 			c1:Disconnect()
 
-			expect(signal._connectionCount).toBe(1)
+			expect(signal:HasConnections()).toBe(true)
 		end)
 
 		it("does not run a handler after it is disconnected", function()
@@ -114,7 +137,7 @@ describe("GoodSignal", function()
 			signal:Fire()
 
 			expect(count).toBe(0)
-			expect(signal._connectionCount).toBe(0)
+			expect(signal:HasConnections()).toBe(false)
 		end)
 
 		it("makes a later Disconnect on a swept connection a no-op", function()
@@ -122,12 +145,12 @@ describe("GoodSignal", function()
 
 			signal:DisconnectAll()
 
-			-- Disconnecting a connection the sweep already covered must not
-			-- decrement the count again and drive it negative.
+			-- Disconnecting a connection the sweep already covered must stay a
+			-- no-op, leaving the signal reporting no connections.
 			connection:Disconnect()
 
-			expect(connection._connected).toBe(false)
-			expect(signal._connectionCount).toBe(0)
+			expect(connection.Connected).toBe(false)
+			expect(signal:HasConnections()).toBe(false)
 		end)
 	end)
 
@@ -142,7 +165,9 @@ describe("GoodSignal", function()
 			signal:Fire()
 
 			expect(count).toBe(1)
-			expect(signal._connectionCount).toBe(0)
+			-- The one-shot connection cleans itself up, which the facade's
+			-- on-demand gate relies on to see demand disappear.
+			expect(signal:HasConnections()).toBe(false)
 		end)
 
 		it("passes the fired arguments to the handler", function()
@@ -172,7 +197,7 @@ describe("GoodSignal", function()
 			expect(results.a).toBe(7)
 			expect(results.b).toBe(8)
 			-- Wait connects a temporary handler that disconnects itself on fire.
-			expect(signal._connectionCount).toBe(0)
+			expect(signal:HasConnections()).toBe(false)
 		end)
 	end)
 
@@ -192,6 +217,27 @@ describe("GoodSignal", function()
 			-- After the self-disconnect, a second fire must not reach it again.
 			signal:Fire()
 			expect(count).toBe(1)
+		end)
+
+		it("keeps firing the remaining handlers after one disconnects itself mid-fire", function()
+			-- Handlers are prepended, so the handler connected last fires first
+			-- and the one connected first still waits its turn behind it. The
+			-- first-firing handler disconnects itself, and the fire must still
+			-- walk forward off the unhooked node to reach the remaining handler.
+			-- Once and Wait self-disconnect on every fire, so any mixed set of
+			-- connections hits this path constantly.
+			local aRan = false
+			signal:Connect(function()
+				aRan = true
+			end)
+			local connectionB
+			connectionB = signal:Connect(function()
+				connectionB:Disconnect()
+			end)
+
+			signal:Fire()
+
+			expect(aRan).toBe(true)
 		end)
 
 		it("does not invoke a handler connected during a fire", function()
@@ -222,6 +268,96 @@ describe("GoodSignal", function()
 			signal:Fire()
 
 			expect(aRan).toBe(false)
+		end)
+
+		it("handles a handler firing the same signal again", function()
+			-- The refiring handler is connected last so it runs first, nesting a
+			-- whole second dispatch before the witness gets its turn in the
+			-- outer one. The witness must hear both fires.
+			local witnessed = 0
+			signal:Connect(function()
+				witnessed += 1
+			end)
+			local refired = false
+			signal:Connect(function()
+				if not refired then
+					refired = true
+					signal:Fire()
+				end
+			end)
+
+			expect(function()
+				signal:Fire()
+			end).never.toThrow()
+
+			expect(witnessed).toBe(2)
+		end)
+
+		it("lets a handler disconnect everything mid-fire and leaves later fires silent", function()
+			local laterRan = 0
+			signal:Connect(function()
+				laterRan += 1
+			end)
+			signal:Connect(function()
+				signal:DisconnectAll()
+			end)
+
+			expect(function()
+				signal:Fire()
+			end).never.toThrow()
+
+			-- The sweep marked every node disconnected, so the fire's walk skips
+			-- the handler it had not reached yet and later fires reach nobody.
+			expect(laterRan).toBe(0)
+			expect(signal:HasConnections()).toBe(false)
+
+			signal:Fire()
+			expect(laterRan).toBe(0)
+		end)
+	end)
+
+	describe("handlers that never return", function()
+		-- A handler that throws takes the cached runner coroutine down exactly
+		-- like one that parks forever, since both leave the runner acquired and
+		-- never release it, and task.spawn contains either outcome to that
+		-- thread. These tests stage the loss with a bare yield because a real
+		-- throw would land an error report in the test output, which the test
+		-- runner treats as a failed run.
+		it("keeps firing the remaining handlers when one takes the runner down mid-fire", function()
+			local survivorRan = false
+			signal:Connect(function()
+				survivorRan = true
+			end)
+			signal:Connect(function()
+				coroutine.yield()
+			end)
+
+			expect(function()
+				signal:Fire()
+			end).never.toThrow()
+
+			-- Handlers fire most-recently-connected first, so the runner was
+			-- already lost by the time the survivor's turn came. It must have
+			-- been dispatched on a fresh runner within the same fire.
+			expect(survivorRan).toBe(true)
+		end)
+
+		it("fires normally again after a handler took the runner down", function()
+			local stalling = signal:Connect(function()
+				coroutine.yield()
+			end)
+			signal:Fire()
+			stalling:Disconnect()
+
+			-- The parked handler never released the cached runner coroutine, so
+			-- this fire has to stand up a fresh runner rather than reuse it.
+			local ran = false
+			signal:Connect(function()
+				ran = true
+			end)
+			signal:Fire()
+
+			expect(ran).toBe(true)
 		end)
 	end)
 

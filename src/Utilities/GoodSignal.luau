@@ -1,91 +1,110 @@
---------------------------------------------------------------------------------
---               Batched Yield-Safe Signal Implementation                     --
--- This is a Signal class which has effectively identical behavior to a       --
--- normal RBXScriptSignal, with the only difference being a couple extra      --
--- stack frames at the bottom of the stack trace when an error is thrown.     --
--- This implementation caches runner coroutines, so the ability to yield in   --
--- the signal handlers comes at minimal extra cost over a naive signal        --
--- implementation that either always or never spawns a thread.                --
---                                                                            --
--- API:                                                                       --
---   local Signal = require(THIS MODULE)                                      --
---   local sig = Signal.new()                                                 --
---   local connection = sig:Connect(function(arg1, arg2, ...) ... end)        --
---   sig:Fire(arg1, arg2, ...)                                                --
---   connection:Disconnect()                                                  --
---   sig:DisconnectAll()                                                      --
---   local arg1, arg2, ... = sig:Wait()                                       --
---                                                                            --
--- Licence:                                                                   --
---   Licenced under the MIT licence.                                          --
---                                                                            --
--- Authors:                                                                   --
---   stravant - July 31st, 2021 - Created the file.                           --
---------------------------------------------------------------------------------
+--!strict
 
--- The currently idle thread to run the next handler on
-local freeRunnerThread = nil
+--[[
+	This is a batched yield-safe signal implementation, based on stravant's
+	original GoodSignal but heavily modified for strict typing and a better
+	API surface. Behavior is effectively identical to a normal RBXScriptSignal,
+	with the only difference being a couple extra stack frames at the bottom of
+	the stack trace when an error is thrown. Runner coroutines are cached, so
+	the ability to yield in signal handlers comes at minimal extra cost over a
+	naive signal implementation that either always or never spawns a thread.
 
--- Function which acquires the currently idle handler runner thread, runs the
--- function fn on it, and then releases the thread, returning it to being the
--- currently idle one.
--- If there was a currently idle runner thread already, that's okay, that old
--- one will just get thrown and eventually GCed.
-local function acquireRunnerThreadAndCallEventHandler(fn, ...)
+	A signal is parameterized by the argument pack that Fire sends and
+	connected handlers receive.
+
+		local sig: Signal.Signal<number, string> = Signal.new()
+		local connection = sig:Connect(function(count, label) end)
+		sig:Fire(5, "hello")
+		local count, label = sig:Wait()
+		local hasConnections = sig:HasConnections()
+		connection:Disconnect()
+		sig:DisconnectAll()
+
+	The original GoodSignal is by stravant (2021) and is licensed under the MIT
+	licence. The strict typing and API changes are by boatbomber (2026).
+]]
+
+-- The currently idle thread to run the next handler on. This cache is shared
+-- by every signal, so it lives at module level.
+local freeRunnerThread: thread? = nil
+
+--[[
+	Acquires the currently idle handler runner thread, runs fn on it, and then
+	releases the thread, returning it to being the currently idle one. If
+	another runner thread became idle while fn ran, restoring ours on top of it
+	just drops that one to be GCed, which is okay.
+]]
+local function acquireRunnerThreadAndCallEventHandler<T...>(fn: (T...) -> (), ...: T...)
 	local acquiredRunnerThread = freeRunnerThread
 	freeRunnerThread = nil
 	fn(...)
-	-- The handler finished running, this runner thread is free again.
+	-- The handler finished running, so this runner thread is free again.
 	freeRunnerThread = acquiredRunnerThread
 end
 
--- Coroutine runner that we create coroutines of. The coroutine can be
--- repeatedly resumed with functions to run followed by the argument to run
--- them with.
+--[[
+	The coroutine runner that we create coroutines of. The coroutine can be
+	repeatedly resumed with functions to run followed by the arguments to run
+	them with. We can't use the arguments the coroutine was first resumed with
+	for a handler call, because those would stay on the stack for the duration
+	of the thread's existence, temporarily leaking references, and without
+	access to raw bytecode there's no way to clear the "..." references from
+	the stack. That's why the loop leads with a bare coroutine.yield instead.
+]]
 local function runEventHandlerInFreeThread()
-	-- Note: We cannot use the initial set of arguments passed to
-	-- runEventHandlerInFreeThread for a call to the handler, because those
-	-- arguments would stay on the stack for the duration of the thread's
-	-- existence, temporarily leaking references. Without access to raw bytecode
-	-- there's no way for us to clear the "..." references from the stack.
 	while true do
 		acquireRunnerThreadAndCallEventHandler(coroutine.yield())
 	end
 end
 
--- Connection class
-local Connection = {}
-Connection.__index = Connection
-
-type ConnectionProto = {
-	_connected: boolean,
-	_signal: any,
-	_fn: any,
-	_next: any,
+--[[
+	T... is the argument pack that Fire sends and connected handlers receive.
+	Signals and connections are plain tables that carry their methods directly,
+	because the typechecker can't parameterize typeof(setmetatable(...)) and
+	won't look through __index when matching a structural type, which rules out
+	a generic metatable class. The method implementations are defined once at
+	module level as functions generic in T... and shared by every signal, so
+	creating a signal allocates no closures and the method values are identical
+	across all signals. Property slots are invariant and won't accept the
+	generic functions directly, so Signal.new pins each one to its own T...
+	through an annotated local before storing it. The underscore fields are
+	implementation details, present in the types so the method bodies typecheck
+	through self, not for external use.
+]]
+export type Signal<T... = ...any> = {
+	Connect: (self: Signal<T...>, fn: (T...) -> ()) -> Connection<T...>,
+	Once: (self: Signal<T...>, fn: (T...) -> ()) -> Connection<T...>,
+	Wait: (self: Signal<T...>) -> T...,
+	Fire: (self: Signal<T...>, T...) -> (),
+	DisconnectAll: (self: Signal<T...>) -> (),
+	HasConnections: (self: Signal<T...>) -> boolean,
+	_handlerListHead: Connection<T...>?,
+	_connectionCount: number,
 }
 
-export type Connection = typeof(setmetatable({} :: ConnectionProto, Connection))
+export type Connection<T... = ...any> = {
+	Connected: boolean,
+	Disconnect: (self: Connection<T...>) -> (),
+	_signal: Signal<T...>,
+	_fn: (T...) -> (),
+	_next: Connection<T...>?,
+}
 
-function Connection.new(signal: any, fn: any): Connection
-	return setmetatable({
-		_connected = true,
-		_signal = signal,
-		_fn = fn,
-		_next = false,
-	}, Connection)
-end
-
-function Connection.Disconnect(self: Connection)
-	-- Disconnecting twice must be a no-op. Without this guard the count below
-	-- would be decremented again, undercounting the remaining live handlers.
-	if not self._connected then
+--[[
+	Disconnects the connection so its handler no longer runs when the signal
+	fires. Disconnecting an already disconnected connection is a no-op.
+]]
+local function Disconnect<T...>(self: Connection<T...>)
+	-- Without this guard a second Disconnect would decrement the count again,
+	-- undercounting the remaining live handlers.
+	if not self.Connected then
 		return
 	end
 
-	self._connected = false
+	self.Connected = false
 	self._signal._connectionCount -= 1
 
-	-- Unhook the node, but DON'T clear it. That way any fire calls that are
+	-- Unhook the node, but don't clear it. That way any fire calls that are
 	-- currently sitting on this node will be able to iterate forwards off of
 	-- it, but any subsequent fire calls will not hit it, and it will be GCed
 	-- when no more fire calls are sitting on it.
@@ -102,96 +121,104 @@ function Connection.Disconnect(self: Connection)
 	end
 end
 
--- Make Connection strict
-setmetatable(Connection, {
-	__index = function(_, key)
-		error(("Attempt to get Connection::%s (not a valid member)"):format(tostring(key)), 2)
-	end,
-	__newindex = function(_, key, _)
-		error(("Attempt to set Connection::%s (not a valid member)"):format(tostring(key)), 2)
-	end,
-})
+--[[
+	Connects fn to run on every Fire with the fired arguments. The new
+	connection is prepended to the handler list. Its _next picks up the old
+	head (or nil for an empty list), so no branching is needed.
+]]
+local function Connect<T...>(self: Signal<T...>, fn: (T...) -> ()): Connection<T...>
+	-- The connection's Disconnect slot is invariant at this signal's T..., so
+	-- the shared generic implementation gets pinned through an annotated local
+	-- first. This copies a reference, it does not create a function.
+	local disconnect: (self: Connection<T...>) -> () = Disconnect
 
--- Signal class
-local Signal = {}
-Signal.__index = Signal
-
-type SignalProto = {
-	_handlerListHead: any,
-	_connectionCount: number,
-}
-
-export type Signal = typeof(setmetatable({} :: SignalProto, Signal))
-
-function Signal.new(): Signal
-	return setmetatable({
-		_handlerListHead = false,
-		_connectionCount = 0,
-	}, Signal)
-end
-
-function Signal.Connect(self: Signal, fn: (...any) -> ()): Connection
 	self._connectionCount += 1
-	local connection = Connection.new(self, fn)
-	if self._handlerListHead then
-		connection._next = self._handlerListHead
-		self._handlerListHead = connection
-	else
-		self._handlerListHead = connection
-	end
+	local connection: Connection<T...> = {
+		Connected = true,
+		Disconnect = disconnect,
+		_signal = self,
+		_fn = fn,
+		_next = self._handlerListHead,
+	}
+	self._handlerListHead = connection
 	return connection
 end
 
--- Disconnect all handlers. Since we use a linked list it suffices to clear the
--- reference to the head handler, but each node is also marked disconnected so
--- a Disconnect call on one of them later doesn't drive the count negative.
-function Signal.DisconnectAll(self: Signal)
+--[[
+	Returns whether any handler is currently connected. Connect, Disconnect,
+	and DisconnectAll maintain the count this reads.
+]]
+local function HasConnections<T...>(self: Signal<T...>): boolean
+	return self._connectionCount > 0
+end
+
+--[[
+	Disconnects all handlers. Since we use a linked list it suffices to clear
+	the reference to the head handler, but each node is also marked
+	disconnected so a Disconnect call on one of them later doesn't drive the
+	count negative.
+]]
+local function DisconnectAll<T...>(self: Signal<T...>)
 	local item = self._handlerListHead
 	while item do
-		item._connected = false
+		item.Connected = false
 		item = item._next
 	end
 	self._connectionCount = 0
-	self._handlerListHead = false
+	self._handlerListHead = nil
 end
 
--- Signal:Fire(...) implemented by running the handler functions on the
--- coRunnerThread, and any time the resulting thread yielded without returning
--- to us, that means that it yielded to the Roblox scheduler and has been taken
--- over by Roblox scheduling, meaning we have to make a new coroutine runner.
-function Signal.Fire(self: Signal, ...: any)
+--[[
+	Fires the signal, running every connected handler with the given arguments
+	on the cached runner thread. Whenever that thread yields without returning
+	to us it has been taken over by the Roblox scheduler, so the next handler
+	gets a freshly made runner.
+]]
+local function Fire<T...>(self: Signal<T...>, ...: T...)
 	local item = self._handlerListHead
 	while item do
-		if item._connected then
-			if not freeRunnerThread then
-				freeRunnerThread = coroutine.create(runEventHandlerInFreeThread)
-				-- Get the freeRunnerThread to the first yield
-				coroutine.resume(freeRunnerThread)
+		if item.Connected then
+			local currentThread: thread
+			if freeRunnerThread then
+				-- An idle runner thread exists, so we reuse it.
+				currentThread = freeRunnerThread
+			else
+				-- We make a new thread and get it to its first yield, ready to
+				-- be handed work.
+				currentThread = coroutine.create(runEventHandlerInFreeThread)
+				freeRunnerThread = currentThread
+				coroutine.resume(currentThread)
 			end
-			task.spawn(freeRunnerThread, item._fn, ...)
+			task.spawn(currentThread, item._fn, ...)
 		end
 		item = item._next
 	end
 end
 
--- Implement Signal:Wait() in terms of a temporary connection using
--- a Signal:Connect() which disconnects itself.
-function Signal.Wait(self: Signal): ...any
+--[[
+	Yields the calling thread until the signal next fires, then returns the
+	fired arguments. This works through a temporary connection that
+	disconnects itself and resumes the waiting thread.
+]]
+local function Wait<T...>(self: Signal<T...>): T...
 	local waitingCoroutine = coroutine.running()
 	local cn
-	cn = self:Connect(function(...)
+	cn = Connect(self, function(...)
 		cn:Disconnect()
 		task.spawn(waitingCoroutine, ...)
 	end)
 	return coroutine.yield()
 end
 
--- Implement Signal:Once() in terms of a connection which disconnects
--- itself before running the handler.
-function Signal.Once(self: Signal, fn: (...any) -> ()): Connection
+--[[
+	Connects fn to run on the next Fire only. The connection disconnects
+	itself before running the handler, and it can also be disconnected
+	manually before it ever runs.
+]]
+local function Once<T...>(self: Signal<T...>, fn: (T...) -> ()): Connection<T...>
 	local cn
-	cn = self:Connect(function(...)
-		if cn._connected then
+	cn = Connect(self, function(...)
+		if cn.Connected then
 			cn:Disconnect()
 		end
 		fn(...)
@@ -199,14 +226,32 @@ function Signal.Once(self: Signal, fn: (...any) -> ()): Connection
 	return cn
 end
 
--- Make signal strict
-setmetatable(Signal, {
-	__index = function(_, key)
-		error(("Attempt to get Signal::%s (not a valid member)"):format(tostring(key)), 2)
-	end,
-	__newindex = function(_, key, _)
-		error(("Attempt to set Signal::%s (not a valid member)"):format(tostring(key)), 2)
-	end,
-})
+local Signal = {}
+
+--[[
+	Builds a new signal carrying the shared method implementations. The method
+	slots are invariant at this signal's T... and won't accept the generic
+	functions directly, so each one is pinned through an annotated local. The
+	locals copy references, no functions are created here.
+]]
+function Signal.new<T...>(): Signal<T...>
+	local connect: (self: Signal<T...>, fn: (T...) -> ()) -> Connection<T...> = Connect
+	local once: (self: Signal<T...>, fn: (T...) -> ()) -> Connection<T...> = Once
+	local wait: (self: Signal<T...>) -> T... = Wait
+	local fire: (self: Signal<T...>, T...) -> () = Fire
+	local disconnectAll: (self: Signal<T...>) -> () = DisconnectAll
+	local hasConnections: (self: Signal<T...>) -> boolean = HasConnections
+
+	return {
+		Connect = connect,
+		Once = once,
+		Wait = wait,
+		Fire = fire,
+		DisconnectAll = disconnectAll,
+		HasConnections = hasConnections,
+		_handlerListHead = nil,
+		_connectionCount = 0,
+	}
+end
 
 return Signal

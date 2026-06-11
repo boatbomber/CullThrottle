@@ -23,15 +23,6 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(0)
 			expect(queue:isEmpty()).toBe(true)
 		end)
-
-		it("should initialize with correct internal structure", function()
-			expect(queue._size).toBe(0)
-			expect(queue._items).toEqual({})
-			expect(queue._priorities).toEqual({})
-			expect(queue._indices).toEqual({})
-			expect(queue._incomingBatch).toBeDefined()
-			expect(queue._incomingBatch.size).toBe(0)
-		end)
 	end)
 
 	describe("enqueue", function()
@@ -60,16 +51,6 @@ describe("PriorityQueue", function()
 			local item, priority = queue:peek()
 			expect(priority).toBe(5)
 			expect(item).toBe("item1")
-		end)
-
-		it("should handle multiple items with same priority", function()
-			queue:enqueue("item1", 5)
-			queue:enqueue("item2", 5)
-			queue:enqueue("item3", 5)
-
-			expect(queue:len()).toBe(3)
-			local _, priority = queue:peek()
-			expect(priority).toBe(5)
 		end)
 
 		it("should return self for chaining", function()
@@ -216,14 +197,40 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(1)
 		end)
 
+		it("does not remove an item that is only staged in the incoming batch", function()
+			queue:addToIncomingBatch("staged", 5)
+
+			-- The remove method only consults the queue proper, never the
+			-- incoming batch, so a batch-only item survives the call and still
+			-- enqueues later.
+			expect(queue:remove("staged")).toBe(false)
+
+			queue:enqueueIncomingBatch()
+			expect(queue:contains("staged")).toBe(true)
+			local item, priority = queue:dequeue()
+			expect(item).toBe("staged")
+			expect(priority).toBe(5)
+		end)
+
 		it("should handle removing the last item", function()
 			queue:enqueue("item1", 1)
 			queue:enqueue("item2", 2)
 			queue:enqueue("item3", 3)
 
+			-- Enqueued in increasing priority order, item3 lands in the final heap
+			-- slot, so this removal takes the no-replacement fast path. The index
+			-- check proves that layout assumption still holds before we rely on it.
+			expect(queue._indices["item3"]).toBe(queue._size)
 			local success = queue:remove("item3")
 			expect(success).toBe(true)
 			expect(queue:len()).toBe(2)
+			expect(queue:contains("item3")).toBe(false)
+
+			local drained = {}
+			while not queue:isEmpty() do
+				table.insert(drained, (queue:dequeue()))
+			end
+			expect(drained).toEqual({ "item1", "item2" })
 		end)
 
 		it("should handle removing the root item", function()
@@ -258,6 +265,14 @@ describe("PriorityQueue", function()
 			-- Removing p6 (an interior node) replaces it with the last element p4,
 			-- which is smaller than p6's parent p5, so the replacement must sift up
 			-- toward the root rather than sink. Every other remove test sinks instead.
+			-- These checks prove the assumed layout still holds (p6 sits mid-heap
+			-- and its parent outranks the element that will replace it), so the
+			-- sift-up path can't silently stop being exercised if heap
+			-- construction ever changes.
+			local removeIndex = queue._indices["p6"]
+			expect(removeIndex).toBeGreaterThan(1)
+			expect(queue._size).toBeGreaterThan(removeIndex)
+			expect(queue._priorities[removeIndex // 2]).toBeGreaterThan(queue._priorities[queue._size])
 			expect(queue:remove("p6")).toBe(true)
 
 			local drained = {}
@@ -404,9 +419,15 @@ describe("PriorityQueue", function()
 			queue:batchEnqueue({ "x", "y", "z" }, { 50, 0, 200 })
 
 			expect(queue:len()).toBe(5)
-			local item, priority = queue:peek()
-			expect(item).toBe("y")
-			expect(priority).toBe(0)
+
+			-- The bulk heapify has to restore the invariant across the whole array,
+			-- not just the appended region, so the merged queue must drain fully
+			-- sorted rather than merely surface the right root.
+			local drained = {}
+			while not queue:isEmpty() do
+				table.insert(drained, (queue:dequeue()))
+			end
+			expect(drained).toEqual({ "y", "seed2", "x", "seed1", "z" })
 		end)
 	end)
 
@@ -428,6 +449,42 @@ describe("PriorityQueue", function()
 			local item, priority = queue:peek()
 			expect(priority).toBe(3)
 			expect(item).toBe("item2")
+		end)
+
+		it("leaves the incoming batch intact after enqueueing it", function()
+			queue:addToIncomingBatch("item1", 5)
+			queue:addToIncomingBatch("item2", 3)
+			queue:enqueueIncomingBatch()
+
+			-- Enqueueing heapifies the staged items without consuming them. That
+			-- intact snapshot is load-bearing for the facade, which answers
+			-- GetVisibleObjects by reading the batch's items array directly even
+			-- after the update iterator drains the queue proper (it never
+			-- re-enqueues within a frame). Re-enqueueing below just proves the
+			-- snapshot survived in full.
+			expect(queue._incomingBatch.size).toBe(2)
+
+			queue:clear()
+			expect(queue:len()).toBe(0)
+
+			queue:enqueueIncomingBatch()
+			expect(queue:len()).toBe(2)
+			expect(queue:contains("item1")).toBe(true)
+			expect(queue:contains("item2")).toBe(true)
+		end)
+
+		it("enqueues an intra-batch duplicate only once", function()
+			queue:addToIncomingBatch("dup", 5)
+			queue:addToIncomingBatch("dup", 2)
+			queue:addToIncomingBatch("other", 9)
+			queue:enqueueIncomingBatch()
+
+			expect(queue:len()).toBe(2)
+			local item, priority = queue:peek()
+			expect(item).toBe("dup")
+			-- The surviving priority must be one the caller actually staged, but
+			-- which of the duplicates wins is unspecified.
+			expect(priority == 5 or priority == 2).toBe(true)
 		end)
 
 		it("should clear incoming batch", function()
@@ -528,14 +585,19 @@ describe("PriorityQueue", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 3)
 			queue:enqueue("item3", 7)
+			queue:addToIncomingBatch("staged", 1)
 
 			queue:clear()
 
 			expect(queue:len()).toBe(0)
 			expect(queue:isEmpty()).toBe(true)
-			expect(queue._items).toEqual({})
-			expect(queue._priorities).toEqual({})
-			expect(queue._indices).toEqual({})
+			expect(queue:contains("item1")).toBe(false)
+			expect(queue:contains("item2")).toBe(false)
+			expect(queue:contains("item3")).toBe(false)
+
+			-- Clearing empties the queue proper only, so anything staged in the
+			-- incoming batch survives untouched.
+			expect(queue._incomingBatch.size).toBe(1)
 		end)
 
 		it("should correctly report length", function()
@@ -610,6 +672,25 @@ describe("PriorityQueue", function()
 			expect(item3).toBe("item0")
 		end)
 
+		it("orders a math.huge priority after every finite one", function()
+			-- Unlike NaN, math.huge is a real comparable number, so the heap
+			-- must order it after every finite priority, including ones enqueued
+			-- while it sat at the root.
+			queue:enqueue("infinite", math.huge)
+			queue:enqueue("small", 1)
+			queue:enqueue("large", 1000)
+			queue:enqueue("negative", -50)
+
+			expect((queue:dequeue())).toBe("negative")
+			expect((queue:dequeue())).toBe("small")
+			expect((queue:dequeue())).toBe("large")
+
+			local item, priority = queue:dequeue()
+			expect(item).toBe("infinite")
+			expect(priority).toBe(math.huge)
+			expect(queue:isEmpty()).toBe(true)
+		end)
+
 		it("should handle decimal priorities", function()
 			queue:enqueue("item1", 1.5)
 			queue:enqueue("item2", 1.2)
@@ -673,19 +754,31 @@ describe("PriorityQueue", function()
 			expect(count).toBe(50)
 		end)
 
-		it("maintains the min-heap invariant across random insert/remove/update/dequeue", function()
+		it("maintains the heap and index map across random insert/batch/remove/update/dequeue", function()
 			-- This is a property test that brute-forces the heap with thousands of
-			-- random ops and asserts the parent <= children invariant holds after
-			-- every one. It's the highest-value guard for a heap and exercises the
-			-- remove/update mutation paths the targeted tests can't fully cover.
-			local function heapIsValid(): boolean
-				local priorities = queue._priorities
+			-- random ops and checks two invariants after every one. Parents must
+			-- never outrank their children, and every live heap slot must round-trip
+			-- through the index map with no stray entries, because a corrupted map
+			-- keeps the heap draining correctly while later removes evict the wrong
+			-- item. It's the highest-value guard for a heap and exercises the
+			-- mutation paths the targeted tests can't fully cover.
+			local function queueIsValid(): boolean
+				local items, priorities, indices = queue._items, queue._priorities, queue._indices
 				for index = 2, queue._size do
 					if priorities[index // 2] > priorities[index] then
 						return false
 					end
 				end
-				return true
+				for index = 1, queue._size do
+					if indices[items[index]] ~= index then
+						return false
+					end
+				end
+				local mappedCount = 0
+				for _ in indices do
+					mappedCount += 1
+				end
+				return mappedCount == queue._size
 			end
 
 			-- Track present items in an array plus an index map for O(1) random pick/remove.
@@ -713,7 +806,7 @@ describe("PriorityQueue", function()
 			local nextId = 0
 			local valid = true
 			for _ = 1, 2000 do
-				local operation = math.random(1, 4)
+				local operation = math.random(1, 5)
 				if operation == 1 then
 					nextId += 1
 					local item = "rng" .. nextId
@@ -725,12 +818,24 @@ describe("PriorityQueue", function()
 					removePresent(item)
 				elseif operation == 3 and #presentList > 0 then
 					queue:update(randomPresent(), math.random() * 100)
+				elseif operation == 4 then
+					-- Bulk insertion merges into whatever heap the prior ops built,
+					-- exercising the bottom-up heapify against arbitrary contents.
+					local batchItems, batchPriorities = {}, {}
+					for i = 1, math.random(2, 6) do
+						nextId += 1
+						local item = "rng" .. nextId
+						batchItems[i] = item
+						batchPriorities[i] = math.random() * 100
+						addPresent(item)
+					end
+					queue:batchEnqueue(batchItems, batchPriorities)
 				elseif not queue:isEmpty() then
 					local item = queue:dequeue()
 					removePresent(item)
 				end
 
-				if not heapIsValid() then
+				if not queueIsValid() then
 					valid = false
 					break
 				end

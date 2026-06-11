@@ -60,6 +60,12 @@ local OVER_REFRESH_PRIORITY_SCALE = 1e6
 -- voxel index keeps successive voxels in distinct, monotonically increasing
 -- priority tiers, so nearer voxels are always dequeued ahead of farther ones.
 local FAST_APPROX_VOXEL_PRIORITY_SCALE = 1e4
+-- The fast-pass tiers saturate at this cap, one tier under the over-refresh
+-- band's floor. Objects dumped by the fast pass still need updates this frame,
+-- so even the deepest voxel must sort ahead of objects that were just
+-- refreshed. Voxels past the cap share one tier, trading their relative order
+-- for that guarantee.
+local FAST_APPROX_VOXEL_PRIORITY_CAP = P0_THRESHOLD * OVER_REFRESH_PRIORITY_SCALE - FAST_APPROX_VOXEL_PRIORITY_SCALE
 
 local Ingest = {}
 Ingest.__index = Ingest
@@ -228,7 +234,10 @@ function Ingest.ingestVisibleVoxels(self: Ingest, now: number)
 			local dirToObject: Vector3 = objectData.position - cameraPos
 			local distance = vectorMagnitude(dirToObject)
 			objectData.distance = distance
-			if distance > renderDistance then
+			if not (distance <= renderDistance) then
+				-- This cull is phrased so a NaN distance (from a NaN position
+				-- upstream) fails into it too, instead of feeding a NaN priority
+				-- into the queue where it would silently corrupt the heap order.
 				continue
 			end
 
@@ -272,8 +281,11 @@ function Ingest.ingestVisibleVoxels(self: Ingest, now: number)
 				-- Objects right by the camera should update basically every frame.
 				objectPriority = distance / NEARBY_DISTANCE_THRESHOLD
 			else
-				-- Figure out the fair object priority.
-				local screenSizePriority = SCREEN_SIZE_PRIORITY_WEIGHT * (1 - screenSize)
+				-- Figure out the fair object priority. The screen size clamps to 1
+				-- so a screen-filling object can't push the term negative and land
+				-- below the p0 threshold, taking the overrun budget from objects
+				-- that must refresh this frame.
+				local screenSizePriority = SCREEN_SIZE_PRIORITY_WEIGHT * (1 - math.min(screenSize, 1))
 				local refreshPriority = REFRESH_RATE_PRIORITY_WEIGHT
 					* (1 - (jitteredElapsed - bestRefreshPeriod) / refreshPeriodRange)
 				local distancePriority = DISTANCE_PRIORITY_WEIGHT * (distance / renderDistance)
@@ -331,7 +343,7 @@ function Ingest.fastApproxIngestRemainingVoxels(self: Ingest, now: number, start
 			continue
 		end
 
-		local approxPriority = voxelIndex * FAST_APPROX_VOXEL_PRIORITY_SCALE
+		local approxPriority = math.min(voxelIndex * FAST_APPROX_VOXEL_PRIORITY_SCALE, FAST_APPROX_VOXEL_PRIORITY_CAP)
 
 		for _, objectData in voxel do
 			if objectData.lastCheckClock == now then
@@ -343,7 +355,9 @@ function Ingest.fastApproxIngestRemainingVoxels(self: Ingest, now: number, start
 
 			local distance = vectorMagnitude(objectData.position - cameraPos)
 			objectData.distance = distance
-			if distance > renderDistance then
+			if not (distance <= renderDistance) then
+				-- Like the precise pass, this is phrased so a NaN distance fails
+				-- into the cull rather than staging a NaN priority.
 				continue
 			end
 
