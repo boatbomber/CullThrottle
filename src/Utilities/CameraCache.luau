@@ -38,13 +38,13 @@ export type CameraCache = typeof(CameraCache)
 ]]
 function CameraCache.init(camera: Camera?)
 	CameraCache.cleanup()
+	CameraCache.Generation += 1
+	CameraCache.Object = camera
+
 	if not camera then
 		-- The CurrentCamera change handler will re-init once one exists.
 		return
 	end
-
-	CameraCache.Generation += 1
-	CameraCache.Object = camera
 
 	CameraCache.cframeChanged()
 	CameraCache.viewportSizeChanged()
