@@ -249,9 +249,9 @@ function Ingest.ingestVisibleVoxels(self: Ingest, now: number)
 			-- the sphere is outside once that exceeds the radius on either axis.
 			--
 			-- This only applies to objects whose center is in front of the camera.
-			-- Once the center passes behind the camera plane, a large object can still
-			-- wrap its body into view while the side-plane test no longer holds, so
-			-- we keep it. The voxel search already discards voxels fully behind us.
+			-- Centers behind it are kept without testing. Skipping a cull is always
+			-- safe, and the case is rare anyway, since an object back there can only
+			-- reach ingest through a voxel the search already called visible.
 			local forward = vectorDot(cameraLookVector, dirToObject)
 			if forward > 0 then
 				local right = vectorDot(cameraRightVector, dirToObject)
