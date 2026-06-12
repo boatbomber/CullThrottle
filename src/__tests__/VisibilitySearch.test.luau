@@ -514,8 +514,9 @@ describe("VisibilitySearch", function()
 
 		it("flips the subdivision push order between frames so each half takes its turn in front", function()
 			-- Six cold keys force the proof walk to bail, and the box test
-			-- straddles, so the volume splits down its long axis and pushes both
-			-- halves. The stack is LIFO, so the half pushed last is searched
+			-- straddles, so the volume splits in half (the staged cube has no
+			-- longest axis, and the tie goes to x) and pushes both halves. The
+			-- stack is LIFO, so the half pushed last is searched
 			-- first, and the push order must flip with the per-frame rotation
 			-- counter or one half would hog the front of the budget every frame.
 			local search = cullThrottle._search
@@ -554,8 +555,8 @@ describe("VisibilitySearch", function()
 		end)
 
 		it("still seeds surviving buckets after a boundary bucket empties", function()
-			-- Two voxels in distant buckets, the farther one defining the coarse
-			-- bounds. Removing it dirties the bounds, and the next seed must
+			-- Two voxels sit in distant buckets, with the farther one defining
+			-- the coarse bounds. Removing it dirties the bounds, and the next seed must
 			-- recompute them around the survivor rather than clamping it out of
 			-- the scan.
 			local partA = createMockPart()

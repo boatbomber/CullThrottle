@@ -760,8 +760,8 @@ describe("PriorityQueue", function()
 			-- never outrank their children, and every live heap slot must round-trip
 			-- through the index map with no stray entries, because a corrupted map
 			-- keeps the heap draining correctly while later removes evict the wrong
-			-- item. It's the highest-value guard for a heap and exercises the
-			-- mutation paths the targeted tests can't fully cover.
+			-- item. It exercises the mutation paths the targeted tests can't
+			-- fully cover.
 			local function queueIsValid(): boolean
 				local items, priorities, indices = queue._items, queue._priorities, queue._indices
 				for index = 2, queue._size do

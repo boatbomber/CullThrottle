@@ -111,8 +111,8 @@ describe("CullThrottle configuration", function()
 		end)
 
 		it("should reject a NaN voxel size", function()
-			-- Every comparison against NaN is false, so a plain `<= 0` gate lets it
-			-- through to poison every voxel key derived from it.
+			-- Every ordered comparison against NaN is false, so a plain `<= 0` gate
+			-- lets it through to poison every voxel key derived from it.
 			expect(function()
 				cullThrottle:SetVoxelSize(0 / 0)
 			end).toThrow()
@@ -147,7 +147,7 @@ describe("CullThrottle configuration", function()
 			expect(range.Min).toBe(300)
 			expect(range.Max).toBe(900)
 			-- The midpoint is derived with no public getter, so the private read
-			-- stays.
+			-- is the only window into it.
 			expect(cullThrottle._config.renderDistanceMidpoint).toBe(600)
 			-- The live distance resets to the range's midpoint baseline.
 			expect(cullThrottle:GetRenderDistance()).toBe(600)

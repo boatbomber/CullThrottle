@@ -46,8 +46,9 @@ function Utility.getHeatmapColor(alpha: number)
 end
 
 --[[
-	Tints the object (part color, text color, or background color, whichever
-	applies) toward the heatmap color for the given alpha.
+	Applies the heatmap color for the given alpha to the object. A part's color
+	lerps toward it for a smoother fade, while a text label's text color or any
+	other gui object's background color is set to it outright.
 ]]
 function Utility.applyHeatmapColor(object: Instance, alpha: number)
 	local color = Utility.getHeatmapColor(alpha)

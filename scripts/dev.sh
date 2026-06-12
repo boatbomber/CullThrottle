@@ -2,7 +2,7 @@
 
 set -e
 
-# If Packages aren't installed, install them.
+# If DevPackages aren't installed, install them.
 if [ ! -d "DevPackages" ]; then
     sh scripts/install-packages.sh
 fi

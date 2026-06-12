@@ -346,8 +346,8 @@ describe("ObjectLifecycle", function()
 
 			-- The offsets are independent random draws, so 32 of them landing on
 			-- one shared value (or all on zero) means the jitter silently no-ops.
-			-- Genuine draws producing that is effectively impossible, so we assert
-			-- the spread without pinning any exact value.
+			-- That's effectively impossible from real draws, so we assert the
+			-- spread without pinning any exact value.
 			local allSame = true
 			local anyNonzero = false
 			for _, offset in offsets do

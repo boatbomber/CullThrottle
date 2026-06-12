@@ -635,9 +635,10 @@ describe("VoxelGrid", function()
 
 	describe("Oriented box fill", function()
 		it("fills only truly overlapped voxels under a compound rotation", function()
-			-- A long thin part under combined pitch, yaw, and roll. Its world
-			-- AABB bulges far past the oriented box, so the fill must keep the
-			-- voxels along the part's axis and reject the AABB's empty corners.
+			-- This stages a long thin part under combined pitch, yaw, and roll.
+			-- Its world AABB bulges far past the oriented box, so the fill must
+			-- keep the voxels along the part's axis and reject the AABB's empty
+			-- corners.
 			local cframe = CFrame.new(550, 350, 450) * CFrame.Angles(math.rad(20), math.rad(45), math.rad(30))
 			local size = Vector3.new(600, 40, 40)
 			local part = createMockPart(nil, size)

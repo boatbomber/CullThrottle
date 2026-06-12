@@ -45,11 +45,9 @@ FloatingBlocksUpdater:CaptureTag(TAG)
 local refreshRates = FloatingBlocksUpdater:GetRefreshRates()
 local bestRefreshHz, worstRefreshHz = refreshRates.Max, refreshRates.Min
 
--- We change the colors of blocks to indicate visibility.
--- FloatingBlocksUpdater.ObjectEnteredView:Connect(function(block)
--- 	block.Color = VISIBLE_COLOR
--- end)
-
+-- Blocks fade back to the invisible color when they leave view. Entering view
+-- needs no handler of its own, since the update loop heatmap-tints every block
+-- it refreshes.
 FloatingBlocksUpdater.ObjectExitedView:Connect(function(block)
 	block.Color = INVISIBLE_COLOR
 end)

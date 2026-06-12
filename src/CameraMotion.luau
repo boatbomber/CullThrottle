@@ -23,8 +23,9 @@ local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> numbe
 -- Voxel proofs are packed into Vector3s, whose f32 components lose absolute
 -- precision as the motion accumulators grow. Flushing re-anchors everything at
 -- zero before f32 rounding (about 1.2e-7 of the compared magnitude) can eat
--- into the SLACK_SAFETY margin that keeps proofs honest. Reaching either limit
--- takes a minute or more of nonstop motion, and the price is one cold frame.
+-- into the SLACK_SAFETY margin that keeps proofs from outliving their
+-- verdicts. Reaching either limit takes a lot of sustained motion,
+-- and the price is one cold frame.
 local ACCUM_TRANSLATION_FLUSH_LIMIT = 16384 -- This counts voxels of translation plus render distance change.
 local ACCUM_ROTATION_FLUSH_LIMIT = 64 -- This one is in radians.
 

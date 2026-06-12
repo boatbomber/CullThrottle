@@ -327,9 +327,10 @@ describe("CullThrottle frame pipeline", function()
 			-- the camera cache before the next frame reads it.
 			task.wait()
 
-			-- Cached visibility verdicts are only honest if the frame pipeline
-			-- charges the accumulators for this move before consulting any of
-			-- them. Skipping the charge would make every cached proof immortal.
+			-- Cached visibility verdicts can only be trusted if the frame
+			-- pipeline charges the accumulators for this move before consulting
+			-- any of them. Skipping the charge would make every cached proof
+			-- immortal.
 			cullThrottle:_findVisibleObjects(os.clock())
 
 			expect(motion._accumT - translationBefore).toBeCloseTo(1.5, 3)

@@ -180,8 +180,8 @@ describe("Ingest", function()
 			-- object below the p0 threshold and ahead of overdue ones. An elapsed
 			-- of 0 selects the over-refresh branch.
 			local overRefreshed = stageObject(now, 10, 50, 0)
-			-- A small, distant object that is genuinely overdue (elapsed far past
-			-- the worst refresh rate) sits in the p0 band.
+			-- A small, distant object that is well overdue (elapsed far past
+			-- the worst refresh period) sits in the p0 band.
 			local overdue = stageObject(now, 300, 0.5, 100)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
@@ -189,7 +189,7 @@ describe("Ingest", function()
 
 			local order, priorities = drainStagedObjects()
 
-			-- The genuinely overdue object dequeues first.
+			-- The overdue object dequeues first.
 			expect(table.find(order, overdue)).toBe(1)
 			expect(table.find(order, overRefreshed)).toBe(2)
 			-- The overdue object sits below the threshold the update loop keys
@@ -209,7 +209,7 @@ describe("Ingest", function()
 			-- A radius far above the distance pushes the screen size past 1. The
 			-- fair band must clamp it so the screen-size term can't go negative
 			-- and drop a recently refreshed object below the p0 threshold, where
-			-- it would steal the p0 overrun budget from genuinely overdue objects.
+			-- it would steal the p0 overrun budget from objects that are actually overdue.
 			-- Distance 40 keeps it past the nearby band, and an elapsed of 0.04
 			-- keeps it in the fair band.
 			local screenFilling = stageObject(now, 40, 100, 0.04)
@@ -220,7 +220,7 @@ describe("Ingest", function()
 
 			local order, priorities = drainStagedObjects()
 
-			-- The genuinely overdue object dequeues first.
+			-- The overdue object dequeues first.
 			expect(table.find(order, overdue)).toBe(1)
 			expect(table.find(order, screenFilling)).toBe(2)
 			-- The screen-filling object stays at or above the p0 threshold, so
@@ -267,8 +267,8 @@ describe("Ingest", function()
 			-- priority undercut the fair band. An elapsed of 0 selects the
 			-- over-refresh branch.
 			local overRefreshed = stageObject(now, 10, 50, 0)
-			-- A due object in the fair band, with elapsed between the best and
-			-- worst refresh periods.
+			-- An elapsed between the best and worst refresh periods stages a due
+			-- object in the fair band.
 			local due = stageObject(now, 300, 0.5, 0.04)
 
 			cullThrottle._ingest._visibleObjectsQueue:clearIncomingBatch()
