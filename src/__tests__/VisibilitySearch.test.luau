@@ -1165,6 +1165,50 @@ describe("VisibilitySearch", function()
 			part:Destroy()
 		end)
 
+		it("stamps bucket verdicts with arms that cover the bucket's corners", function()
+			-- A verdict is about the bucket's whole box, so its rotation debit must
+			-- cover every point of that box. The farthest corner sits a half
+			-- diagonal past the center, so an arm built from the center distance
+			-- alone under-charges rotation and can keep trusting a culled verdict
+			-- after the frustum has provably swept onto the bucket's corner.
+			local partA = createMockPart()
+			local partB = createMockPart()
+			-- Bucket (2, 0, 0) sits far to the camera's right, culled by a side
+			-- plane, while bucket (0, 10, 0) sits straight ahead, fully inside.
+			cullThrottle._grid:insertToVoxel(Vector3.new(8, 0, 0), stubObjectData(partA))
+			cullThrottle._grid:insertToVoxel(Vector3.new(1, 41, 1), stubObjectData(partB))
+
+			local search = cullThrottle._search
+			search:seedSearchVolumes(roomyFrustumPlanes, 0, 0, 0, 16, 48, 16)
+
+			-- A bucket spans four voxels per axis, so this is the covering half diagonal.
+			local bucketHalfDiagonal = 2 * math.sqrt(3)
+			local bucketVerdicts = cullThrottle._visibilityCache._bucketVerdicts
+
+			-- The seed ran with zero accumulated motion, so each expiry reads back
+			-- exactly the shaved clearance it stored, and the expected arm (the
+			-- center distance plus the covering half diagonal plus the governing
+			-- clearance) assembles from observable fields alone.
+			local culledVerdict = bucketVerdicts[Vector3.new(2, 0, 0)]
+			expect(culledVerdict.state).toBe(Frustum.BUCKET_CULLED)
+			expect(culledVerdict.armFactor).toBeCloseTo(
+				Vector3.new(10, 2, 2).Magnitude + bucketHalfDiagonal + culledVerdict.sideExpiry,
+				3
+			)
+
+			local insideVerdict = bucketVerdicts[Vector3.new(0, 10, 0)]
+			expect(insideVerdict.state).toBe(Frustum.BUCKET_INSIDE)
+			expect(insideVerdict.armFactor).toBeCloseTo(
+				Vector3.new(2, 42, 2).Magnitude
+					+ bucketHalfDiagonal
+					+ math.min(insideVerdict.sideExpiry, insideVerdict.farExpiry),
+				3
+			)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
 		it("trusts a bucket verdict at exactly its clearance boundary", function()
 			-- The verdict check is inclusive, so motion landing exactly on the
 			-- stored expiry still trusts the verdict and only motion past it

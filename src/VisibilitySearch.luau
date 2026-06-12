@@ -24,7 +24,7 @@
 	camera-motion accumulators. Translation and render distance change charge at
 	full weight, and rotation charges at the proof's arm (the cell's distance
 	from the camera, inflated by the stored slack since translation can carry
-	the camera closer while the proof lives). See CameraMotion for the
+	the camera farther while the proof lives). See CameraMotion for the
 	accumulators.
 ]]
 
@@ -55,6 +55,10 @@ local SLACK_SAFETY = 1e-2
 -- the cell center's distance from the camera plus this half diagonal, covering
 -- every point of the cell.
 local VOXEL_HALF_DIAGONAL = math.sqrt(3) / 2
+-- Bucket verdicts charge rotation the same way at the bucket's own arm. A
+-- coarse bucket spans COARSE_VOXEL_SIZE voxels per axis, so the half diagonal
+-- covering every point of its box is correspondingly larger.
+local BUCKET_HALF_DIAGONAL = VoxelGrid.COARSE_VOXEL_SIZE * math.sqrt(3) / 2
 -- Recenters an integer voxel key onto its cell center.
 local VOXEL_CENTER_OFFSET = Vector3.new(0.5, 0.5, 0.5)
 -- The proof walk over a volume's voxels re-tests expired voxels cell by cell
@@ -398,20 +402,21 @@ function VisibilitySearch.seedSearchVolumes(
 
 				if state ~= BUCKET_STRADDLING then
 					-- This is a provable verdict, so cache it with its clearances.
-					-- The arm is inflated by the governing clearance so the
-					-- rotation debit stays sound even as translation carries the
-					-- bucket farther from the camera while the verdict lives.
-					-- Bucket clearances aren't capped like voxel proof slacks. The
-					-- verdicts live in f64 table fields, so there's no packing
-					-- precision to guard, and a longer-lived verdict is pure win
-					-- at the bucket layer.
+					-- The arm covers every point of the bucket's box (the center
+					-- distance plus the half diagonal) and is inflated by the
+					-- governing clearance so the rotation debit stays sound even
+					-- as translation carries the bucket farther from the camera
+					-- while the verdict lives. Bucket clearances aren't capped
+					-- like voxel proof slacks. The verdicts live in f64 table
+					-- fields, so there's no packing precision to guard, and a
+					-- longer-lived verdict is pure win at the bucket layer.
 					local arm = vectorMagnitude(
 						Vector3.new(
 							bx0 + COARSE_VOXEL_SIZE * 0.5,
 							by0 + COARSE_VOXEL_SIZE * 0.5,
 							bz0 + COARSE_VOXEL_SIZE * 0.5
 						) - cameraPosVoxels
-					)
+					) + BUCKET_HALF_DIAGONAL
 
 					local armFactor, sideExpiry, farExpiry
 					if state == BUCKET_CULLED then
