@@ -198,7 +198,11 @@ function ObjectLifecycle.addObject(self: ObjectLifecycle, object: Instance)
 		end,
 	})
 
-	self._grid:updateDesiredVoxelKeys(object, objectData)
+	-- The diff is applied directly below so a query made this same frame already
+	-- sees the object in its cells. Passing skipQueue keeps it out of the
+	-- deferred maintenance queue, which would otherwise just dequeue an empty
+	-- diff and discard it.
+	self._grid:updateDesiredVoxelKeys(object, objectData, true)
 
 	self._objects[object] = objectData
 	-- The early-return at the top makes addObject idempotent, so a repeat add

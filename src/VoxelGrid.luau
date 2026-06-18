@@ -134,12 +134,16 @@ end
 	cell its oriented bounding box truly overlaps. Differences from the object's
 	current voxels are recorded in objectData.desiredVoxelKeys (true means
 	enter, false means leave) and the object is queued for updateObjectVoxels
-	to apply them, prioritized by its distance to the camera.
+	to apply them, prioritized by its distance to the camera. Pass skipQueue when
+	the caller applies the returned diff itself this frame, so the object isn't
+	queued for the deferred pass that would only dequeue the now-empty diff and
+	discard it.
 ]]
 function VoxelGrid.updateDesiredVoxelKeys(
 	self: VoxelGrid,
 	object: Instance,
-	objectData: types.ObjectData
+	objectData: types.ObjectData,
+	skipQueue: boolean?
 ): { [types.VoxelKey]: boolean }
 	debug.profilebegin("updateDesiredVoxelKeys")
 	local voxelSize = self._config.voxelSize
@@ -273,7 +277,7 @@ function VoxelGrid.updateDesiredVoxelKeys(
 		end
 	end
 
-	if next(desiredVoxelKeys) and not self._updateObjectVoxelsQueue:contains(object) then
+	if not skipQueue and next(desiredVoxelKeys) and not self._updateObjectVoxelsQueue:contains(object) then
 		-- Manhattan distance to the camera is close enough for ordering the
 		-- queue and skips the square root.
 		local difference = position - CameraCache.Position

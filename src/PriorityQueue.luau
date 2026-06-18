@@ -28,6 +28,36 @@ type PriorityQueueProto<T> = {
 export type PriorityQueue<T> = typeof(setmetatable({} :: PriorityQueueProto<T>, PriorityQueue))
 
 --[[
+	Sinks the element at `from` down toward the leaves until the min-heap property
+	holds again. This is the shared core of the bottom-up heapify and of the
+	single-node restores after a remove or a dequeue, so each of those sinks only
+	the one element that can be out of place rather than re-sinking valid nodes.
+]]
+local function sinkElement<T>(items: { T }, priorities: { number }, indices: { [T]: number }, size: number, from: number)
+	local index = from
+	local left = index + index
+	local right = left + 1
+	while left <= size do
+		local smaller = left
+		if (right <= size) and (priorities[right] < priorities[left]) then
+			smaller = right
+		end
+
+		if priorities[smaller] >= priorities[index] then
+			break
+		end
+
+		items[index], items[smaller] = items[smaller], items[index]
+		priorities[index], priorities[smaller] = priorities[smaller], priorities[index]
+		indices[items[index]], indices[items[smaller]] = index, smaller
+
+		index = smaller
+		left = index + index
+		right = left + 1
+	end
+end
+
+--[[
 	Builds an empty queue with an empty incoming batch.
 ]]
 function PriorityQueue.new<T>(): PriorityQueue<T>
@@ -111,26 +141,7 @@ end
 function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 	local items, priorities, indices, size = self._items, self._priorities, self._indices, self._size
 	for index = limit, 1, -1 do
-		local left = index + index
-		local right = left + 1
-		while left <= size do
-			local smaller = left
-			if (right <= size) and (priorities[right] < priorities[left]) then
-				smaller = right
-			end
-
-			if priorities[smaller] >= priorities[index] then
-				break
-			end
-
-			items[index], items[smaller] = items[smaller], items[index]
-			priorities[index], priorities[smaller] = priorities[smaller], priorities[index]
-			indices[items[index]], indices[items[smaller]] = index, smaller
-
-			index = smaller
-			left = index + index
-			right = left + 1
-		end
+		sinkElement(items, priorities, indices, size, index)
 	end
 end
 
@@ -199,8 +210,10 @@ function PriorityQueue.remove<T>(self: PriorityQueue<T>, item: T): boolean
 		self._size = size
 		if size > 1 then
 			-- The swapped-in element can violate the heap in either direction,
-			-- so we bubble it up first and then sink from wherever it landed.
-			self:siftdown(self:siftup(index))
+			-- so we bubble it up first and then sink that one element from
+			-- wherever it landed. Sinking only it keeps this O(log n) instead of
+			-- re-sinking every node below its slot.
+			sinkElement(items, priorities, indices, size, self:siftup(index))
 		end
 	end
 	return true
@@ -240,7 +253,7 @@ function PriorityQueue.dequeue<T>(self: PriorityQueue<T>): (T, number)
 		indices[newitem] = 1
 		size = size - 1
 		self._size = size
-		self:siftdown(1)
+		sinkElement(items, priorities, indices, size, 1)
 	else
 		items[1], priorities[1] = nil, nil
 		self._size = 0

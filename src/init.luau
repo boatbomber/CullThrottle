@@ -59,6 +59,20 @@ local VOXEL_MAINTENANCE_TIME_BUDGET = 5e-5
 -- whole 5 seconds, versus the sub-millisecond steady-state maintenance above).
 local FULL_RESLOT_TIME_BUDGET = 5
 
+--[[
+	Averages a skipped-frame ring buffer over the full lookback window, so a frame
+	that recorded nothing still weighs in as a zero rather than dropping out of the
+	denominator. It captures only the module-level lookback constant, so it lives
+	here as one shared function instead of a fresh closure per instance.
+]]
+local function getSkippedFramesAverage(values: { number }): number
+	local sum = 0
+	for _, value in values do
+		sum += value
+	end
+	return sum / SKIPPED_FRAMES_LOOKBACK
+end
+
 local CullThrottle = {}
 CullThrottle.__index = CullThrottle
 
@@ -269,13 +283,7 @@ function CullThrottle.new(): CullThrottle
 		_averageObjectDeltaTime = self._config.bestRefreshPeriod,
 		_sumOfObjectDeltaTimes = 0,
 		_updatedObjectCount = 0,
-		_getAverage = function(values: { number }): number
-			local sum = 0
-			for _, value in values do
-				sum += value
-			end
-			return sum / SKIPPED_FRAMES_LOOKBACK
-		end,
+		_getAverage = getSkippedFramesAverage,
 	}
 
 	local objects: { [Instance]: types.ObjectData } = {}
