@@ -703,10 +703,14 @@ describe("VisibilitySearch", function()
 			-- Nudge the field of view a couple of degrees wider. The side planes
 			-- only swing by the half-angle deltas, so proofs minted with more
 			-- clearance than that motion must survive, and the warm pass must
-			-- trust them instead of re-testing every box from scratch. The change
-			-- signal fires deferred, so let it land before the next pass.
+			-- trust them instead of re-testing every box from scratch. We refresh
+			-- the camera cache synchronously, the same work the deferred projection
+			-- signal would do, rather than yielding a frame for it. Yielding lets
+			-- the live camera drift, and that drift charges extra rotation onto the
+			-- motion accumulator that expires the proofs and makes the box-test
+			-- count flaky.
 			camera.FieldOfView += 2
-			task.wait()
+			CameraCache.fovChanged()
 
 			cullThrottle:_findVisibleObjects(os.clock())
 			local warmBoxTests = getBoxTests() - coldBoxTests

@@ -176,13 +176,16 @@ describe("CameraMotion", function()
 
 		-- A real field of view change swings each side plane about the camera by
 		-- its half-angle delta, so the rotation accumulator must absorb the
-		-- larger of the two deltas while every cached proof survives. The change
-		-- signal fires deferred, so let it land before accumulating.
+		-- larger of the two deltas while every cached proof survives. We refresh
+		-- the camera cache synchronously, the same work the deferred projection
+		-- signal would do, rather than yielding a frame for it, since a yielded
+		-- frame lets the live camera drift and charge extra motion that throws off
+		-- the exact accumulator amounts asserted below.
 		local halfVerticalBefore = CameraCache.HalfVerticalFOV
 		local halfHorizontalBefore = CameraCache.HalfHorizontalFOV
 		local camera = workspace.CurrentCamera
 		camera.FieldOfView = if camera.FieldOfView == 80 then 70 else 80
-		task.wait()
+		CameraCache.fovChanged()
 		motion:accumulate()
 
 		local expectedCharge = math.max(
