@@ -118,6 +118,14 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
+		it("should reject an infinite voxel size", function()
+			-- An infinite size passes a plain `> 0` gate, but every voxel key it
+			-- derives is then infinite, so the gate must reject it too.
+			expect(function()
+				cullThrottle:SetVoxelSize(math.huge)
+			end).toThrow()
+		end)
+
 		it("should keep objects whose voxel key is unchanged by the resize", function()
 			-- This part's center voxel key is (0, 0, 0) under both the old and new
 			-- sizes, so the reslot must reinsert it into the rebuilt grid rather
@@ -195,6 +203,15 @@ describe("CullThrottle configuration", function()
 			-- slipping through the gate would poison every priority downstream.
 			expect(function()
 				cullThrottle:SetRenderDistanceRange(NumberRange.new(0 / 0, 0 / 0))
+			end).toThrow()
+		end)
+
+		it("should reject an infinite render distance", function()
+			-- An infinite render distance yields an infinite midpoint and live
+			-- distance, which poisons the controller's step and the priority
+			-- divisor, so the gate must reject it.
+			expect(function()
+				cullThrottle:SetRenderDistanceRange(NumberRange.new(1, math.huge))
 			end).toThrow()
 		end)
 	end)

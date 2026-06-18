@@ -468,12 +468,11 @@ end
 	and reslots all tracked objects into the new grid before the next frame.
 ]]
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
-	if not (voxelSize > 0) then
-		-- A zero voxel size divides by zero in the voxel coordinate math, and a
-		-- negative one makes no sense for a grid. The check is phrased so NaN,
-		-- which fails every comparison, lands in the error path too instead of
-		-- poisoning every voxel key derived from it.
-		error("SetVoxelSize expects a voxel size greater than zero")
+	if not (voxelSize > 0 and voxelSize < math.huge) then
+		-- A zero voxel size divides by zero in the voxel coordinate math,
+		-- a negative one makes no sense for a grid, and infinity/NaN would make
+		-- every voxel key derived from it infinite/NaN.
+		error("SetVoxelSize expects a finite voxel size greater than zero")
 	end
 
 	self._config:setVoxelSize(voxelSize)
@@ -501,13 +500,21 @@ end
 function CullThrottle.SetRenderDistanceRange(self: CullThrottle, renderDistanceRange: NumberRange)
 	local minRenderDistance = renderDistanceRange.Min
 	local maxRenderDistance = renderDistanceRange.Max
-	if not (minRenderDistance > 0 and maxRenderDistance > 0) then
+	if
+		not (
+			minRenderDistance > 0
+			and minRenderDistance < math.huge
+			and maxRenderDistance > 0
+			and maxRenderDistance < math.huge
+		)
+	then
 		-- The render distance is a divisor in the priority math and seeds the
 		-- min/max bounds, so a zero or negative distance corrupts visibility state.
-		-- The checks are phrased so NaN, which fails every comparison, errors too.
-		-- NumberRange guarantees Min <= Max for real numbers, but a NaN slips
-		-- through its ordering check, so Max gets its own gate here.
-		error("SetRenderDistanceRange expects render distances greater than zero")
+		-- The bounds are phrased so NaN, which fails every comparison, errors too,
+		-- and so does an infinite distance, which would give an infinite midpoint
+		-- and live distance. NumberRange guarantees Min <= Max for real numbers, but
+		-- a NaN slips through its ordering check, so Max gets its own gate here.
+		error("SetRenderDistanceRange expects finite render distances greater than zero")
 	end
 
 	-- The live distance resets to the new range's midpoint baseline. The

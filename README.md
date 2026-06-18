@@ -231,7 +231,7 @@ CullThrottle:SetVoxelSize(voxelSize: number)
 CullThrottle:GetVoxelSize(): number
 ```
 
-The size of the voxels used for visibility checks, in studs. The default is 100. Smaller voxels make visibility more precise but cost more memory and more search work. Changing the size forces CullThrottle to recompute which voxels every object occupies and to flush its visibility caches, so it's expensive and best done right after construction, before any objects are added. The size must be greater than zero.
+The size of the voxels used for visibility checks, in studs. The default is 100. Smaller voxels make visibility more precise but cost more memory and more search work. Changing the size forces CullThrottle to recompute which voxels every object occupies and to flush its visibility caches, so it's expensive and best done right after construction, before any objects are added. The size must be a finite number greater than zero.
 
 ```Luau
 CullThrottle:SetRenderDistanceRange(renderDistanceRange: NumberRange)
@@ -243,7 +243,7 @@ The bounds, in studs, that the render distance is allowed to move between. The d
 
 The live distance starts at the range's midpoint, and a controller adjusts it within the bounds every frame, growing it when the time budgets have headroom and shrinking it when they strain. For example, `SetRenderDistanceRange(NumberRange.new(200, 3000))` lets CullThrottle render anywhere from 200 to 3000 studs, starting at the 1600 stud midpoint. To pin the render distance to a fixed value (disabling dynamic adjustment), pass a zero-width range such as `NumberRange.new(600, 600)`.
 
-`GetDynamicRenderDistance` is derived from the range, returning true whenever the configured range spans more than a single value. The bounds must be greater than zero.
+`GetDynamicRenderDistance` is derived from the range, returning true whenever the configured range spans more than a single value. The bounds must be finite and greater than zero.
 
 ```Luau
 CullThrottle:SetTimeBudgets(searchTimeBudget: number, ingestTimeBudget: number, updateTimeBudget: number)

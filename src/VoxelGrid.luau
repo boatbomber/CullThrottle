@@ -119,6 +119,16 @@ local function clampRowToAxis(
 end
 
 --[[
+	Reports whether a number is finite, meaning it's neither NaN nor an
+	infinity. Every NaN comparison is false and these two bounds pin the value
+	strictly inside the infinities, so this one pair rejects every non-finite
+	value at once.
+]]
+local function isFinite(value: number): boolean
+	return value > -math.huge and value < math.huge
+end
+
+--[[
 	Recomputes which voxels the object should occupy. That's the cell holding
 	its center plus, for an object large enough to span multiple voxels, every
 	cell its oriented bounding box truly overlaps. Differences from the object's
@@ -144,6 +154,17 @@ function VoxelGrid.updateDesiredVoxelKeys(
 
 	local cframe, halfBoundingBox = objectData.cframe, objectData.halfBoundingBox
 	local position = cframe.Position
+
+	if not (isFinite(position.X) and isFinite(position.Y) and isFinite(position.Z) and isFinite(objectData.radius)) then
+		-- A non-finite position or extent poisons the voxel coordinate math. A
+		-- NaN can't even be used as a voxel key, and it would feed a NaN into the
+		-- queue priority that corrupts the heap's dequeue order, while an infinite
+		-- extent makes the multi-voxel fill loop's bounds never advance and hangs
+		-- the frame. We leave the object in its current voxels and reslot it once
+		-- it has finite geometry again. The diff was cleared above, so returning
+		-- it now enqueues nothing.
+		return desiredVoxelKeys
+	end
 
 	local desiredVoxelKey = position // voxelSize
 	desiredVoxelKeys[desiredVoxelKey] = true

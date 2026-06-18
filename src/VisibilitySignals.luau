@@ -171,6 +171,14 @@ end
 	which is contract, so a consumer always hears about a replacement before
 	the vacancy it fills. We null out each slot as we go so a removed/destroyed
 	instance isn't pinned in the buffer until the next frame overwrites it.
+
+	Unlike the visible-objects snapshot and the update iterator, which drop
+	instances no longer tracked because they hand back objects for the consumer
+	to act on, the flush trusts its buffer and fires every slot. So an entered
+	handler that removes another instance still buffered this frame will still
+	see that instance's entered event fire, which is intended. The event records
+	that the object was visible this frame, and refiltering here would let one
+	handler silently cancel a peer's buffered notification.
 ]]
 function VisibilitySignals.flushVisibilitySignals(self: VisibilitySignals)
 	debug.profilebegin("flushVisibilitySignals")

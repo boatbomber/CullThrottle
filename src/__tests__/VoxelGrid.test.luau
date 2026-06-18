@@ -735,4 +735,55 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 	end)
+
+	describe("Non-finite geometry", function()
+		it("skips the voxel update for a NaN position instead of poisoning the queue priority", function()
+			-- A part driven to a NaN position can't be used as a voxel key at all,
+			-- and it would feed a NaN into the voxel-maintenance queue priority that
+			-- silently corrupts the heap's dequeue order. The recompute must bail
+			-- with an empty diff and leave the object in its current voxels.
+			local part = createMockPart(Vector3.new(0, 0, 0))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			objectData.cframe = CFrame.new(0 / 0, 0 / 0, 0 / 0)
+			local diff
+			expect(function()
+				diff = cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+			end).never.toThrow()
+
+			-- An empty diff means the guard bailed before deriving any voxel key, so
+			-- it staged no membership change and the object keeps its current cell.
+			expect(next(diff)).toBeNil()
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("skips the multi-voxel fill for an infinite position instead of hanging the frame", function()
+			-- A multi-voxel object fills the voxels across its world AABB, and an
+			-- infinite position makes that AABB's bounds infinite. The fill loop's
+			-- `for x = min, max` would never advance past an infinite bound and would
+			-- hang the frame, so the recompute must bail before reaching it.
+			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(400, 400, 400))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+			expect(objectData.radius > cullThrottle._config.multiVoxelRadiusThreshold).toBe(true)
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			objectData.cframe = CFrame.new(math.huge, 0, 0)
+			local diff
+			expect(function()
+				diff = cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+			end).never.toThrow()
+
+			-- The guard bailed before the fill, so the diff is empty and the object
+			-- keeps the cells it already spanned.
+			expect(next(diff)).toBeNil()
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			part:Destroy()
+		end)
+	end)
 end)
