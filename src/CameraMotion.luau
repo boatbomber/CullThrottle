@@ -53,11 +53,17 @@ type CameraMotionProto = {
 	_accumT: number,
 	_accumR: number,
 	_accumF: number,
-	-- This counts every visibility cache flush. The search's whole-frame
-	-- replay compares it across frames, because a flush leaves the
-	-- accumulators at zero while re-anchoring what they measure from (and can
-	-- mean the camera itself was replaced), so matching accumulator readings
-	-- across one prove nothing.
+	-- This is how much translation the last processed frame added to _accumT,
+	-- in voxels. The occlusion layer reads it as the motion floor a fresh
+	-- proof's allowance must clear to survive to the next frame, so stamps
+	-- that would expire before they're ever trusted get skipped. A flush
+	-- resets it to zero, since a flush has no motion bound to report.
+	_lastTranslationDelta: number,
+	-- This counts every visibility cache flush. The occlusion layer records
+	-- the count when it builds umbrae and refuses to reuse them once it
+	-- moves, because a flush re-anchors the translation odometer and can mean
+	-- the camera itself was replaced, so no drift measured across one is
+	-- trustworthy.
 	_flushCount: number,
 	_lastCameraCFrame: CFrame,
 	_lastRenderDistanceVoxels: number,
@@ -79,6 +85,7 @@ function CameraMotion.new(config: Config.Config, visibilityCache: VisibilityCach
 		_accumT = 0,
 		_accumR = 0,
 		_accumF = 0,
+		_lastTranslationDelta = 0,
 		_flushCount = 0,
 		_lastCameraCFrame = CameraCache.CFrame,
 		_lastRenderDistanceVoxels = config.renderDistance / config.voxelSize,
@@ -103,6 +110,7 @@ function CameraMotion.flushVisibilityCache(self: CameraMotion)
 	self._accumT = 0
 	self._accumR = 0
 	self._accumF = 0
+	self._lastTranslationDelta = 0
 	self._flushCount += 1
 	self._lastCameraCFrame = CameraCache.CFrame
 	self._lastRenderDistanceVoxels = self._config.renderDistance / self._config.voxelSize
@@ -128,12 +136,14 @@ function CameraMotion.accumulate(self: CameraMotion)
 
 	local cameraCFrame = CameraCache.CFrame
 	local lastCameraCFrame = self._lastCameraCFrame
+	local translationDelta = 0
 	if cameraCFrame ~= lastCameraCFrame then
 		-- We take the full axis-angle of the orientation delta, so roll is covered
 		-- too (roll swings the side plane normals even though the look vector is
 		-- unchanged).
 		local _axis, rotation = lastCameraCFrame.Rotation:ToObjectSpace(cameraCFrame.Rotation):ToAxisAngle()
-		self._accumT += vectorMagnitude(cameraCFrame.Position - lastCameraCFrame.Position) / voxelSize
+		translationDelta = vectorMagnitude(cameraCFrame.Position - lastCameraCFrame.Position) / voxelSize
+		self._accumT += translationDelta
 		self._accumR += rotation
 		self._lastCameraCFrame = cameraCFrame
 	end
@@ -165,6 +175,11 @@ function CameraMotion.accumulate(self: CameraMotion)
 	if self._accumT + self._accumF > ACCUM_TRANSLATION_FLUSH_LIMIT or self._accumR > ACCUM_ROTATION_FLUSH_LIMIT then
 		self:flushVisibilityCache()
 	end
+
+	-- The delta is recorded after any limit flush above, because the flush
+	-- re-anchors the odometer but the camera's real motion rate this frame is
+	-- still what the occlusion stamp gate should see.
+	self._lastTranslationDelta = translationDelta
 end
 
 return CameraMotion

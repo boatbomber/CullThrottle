@@ -26,6 +26,7 @@ local GoodSignal = require(script.Utilities.GoodSignal)
 local CameraMotion = require(script.CameraMotion)
 local Ingest = require(script.Ingest)
 local ObjectLifecycle = require(script.ObjectLifecycle)
+local OcclusionCulling = require(script.OcclusionCulling)
 local RenderDistanceController = require(script.RenderDistanceController)
 local VisibilityCache = require(script.VisibilityCache)
 local VisibilitySearch = require(script.VisibilitySearch)
@@ -95,6 +96,7 @@ type CullThrottleProto = {
 	_motion: CameraMotion.CameraMotion,
 	_grid: VoxelGrid.VoxelGrid,
 	_signals: VisibilitySignals.VisibilitySignals,
+	_occlusion: OcclusionCulling.OcclusionCulling,
 	_search: VisibilitySearch.VisibilitySearch,
 	_ingest: Ingest.Ingest,
 	_lifecycle: ObjectLifecycle.ObjectLifecycle,
@@ -153,10 +155,17 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	perfMetrics._skippedFramesCursor = cursor
 	perfMetrics._skippedIngest[cursor] = 0
 	perfMetrics._skippedSearch[cursor] = 0
+	perfMetrics._occludedVoxelCount = 0
 
 	-- Cached visibility verdicts are proven against the motion accumulators, so
 	-- they must advance (or flush, on a projection change) before any are consulted.
 	self._motion:accumulate()
+
+	-- The umbrae are rebuilt from the camera's current position so the
+	-- search's occlusion tests this frame match the pose the accumulators
+	-- were just charged for, or reused within the erosion pad with this
+	-- frame's drift debited from every allowance they hand out.
+	self._occlusion:buildUmbrae()
 
 	local replayed = self._search:run(now)
 
@@ -262,6 +271,7 @@ function CullThrottle.new(): CullThrottle
 		_skippedSearch = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
 		_skippedIngest = tableCreate(SKIPPED_FRAMES_LOOKBACK, 0),
 		_skippedFramesCursor = 1,
+		_occludedVoxelCount = 0,
 		_searchDuration = 0,
 		_ingestDuration = 0,
 		-- Seeding the average at the best refresh period reads as full headroom,
@@ -281,8 +291,20 @@ function CullThrottle.new(): CullThrottle
 	self._motion = CameraMotion.new(self._config, self._visibilityCache)
 	self._grid = VoxelGrid.new(self._config, self._visibilityCache, objects)
 	self._signals = VisibilitySignals.new(self.ObjectEnteredView, self.ObjectExitedView)
-	self._search =
-		VisibilitySearch.new(self._config, self._grid, self._motion, self._visibilityCache, self._perfMetrics)
+	self._occlusion = OcclusionCulling.new(
+		self._config,
+		self._visibilityCache,
+		self._motion,
+		VisibilitySearch.TESTABLE_REACH_EXPANSION
+	)
+	self._search = VisibilitySearch.new(
+		self._config,
+		self._grid,
+		self._motion,
+		self._visibilityCache,
+		self._occlusion,
+		self._perfMetrics
+	)
 	self._ingest = Ingest.new(self._config, self._grid, self._search, self._signals, self._perfMetrics)
 	self._lifecycle = ObjectLifecycle.new(objects, self._grid, self._signals, self.ObjectAdded, self.ObjectRemoved)
 	self._renderDistanceController = RenderDistanceController.new(self._config, self._perfMetrics)
@@ -314,6 +336,7 @@ function CullThrottle.Destroy(self: CullThrottle)
 
 	self._grid:destroy()
 	self._signals:destroy()
+	self._occlusion:destroy()
 	self._visibilityCache:clear()
 	self._search:destroy()
 	self._ingest:destroy()
@@ -624,6 +647,24 @@ function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRa
 end
 
 --[[
+	Sets how many tagged occluders may build umbrae in a single frame. The
+	highest scoring occluders win each frame, so the cap trades occlusion
+	coverage against umbra test cost. Zero disables occlusion culling
+	entirely, cached occlusion proofs included.
+]]
+function CullThrottle.SetMaxOccluders(self: CullThrottle, maxOccluders: number)
+	if not (maxOccluders >= 0 and maxOccluders <= 32 and maxOccluders % 1 == 0) then
+		-- Each umbra claims one bit of a 32-bit mask, so the cap tops out at
+		-- 32, and a fractional or NaN count has no meaning as a table size.
+		-- The checks are phrased so NaN, which fails every comparison, errors
+		-- too.
+		error("SetMaxOccluders expects an integer between 0 and 32")
+	end
+
+	self._config.maxOccluders = maxOccluders
+end
+
+--[[
 	When enabled, visibility is only computed when something asks for it (a
 	query, or a connected visibility signal) instead of every frame.
 ]]
@@ -685,6 +726,14 @@ function CullThrottle.GetRefreshRates(self: CullThrottle): NumberRange
 end
 
 --[[
+	Mirrors SetMaxOccluders, returning how many tagged occluders may build
+	umbrae in a single frame.
+]]
+function CullThrottle.GetMaxOccluders(self: CullThrottle): number
+	return self._config.maxOccluders
+end
+
+--[[
 	Returns whether visibility is computed only on demand
 	(see SetComputeVisibilityOnlyOnDemand).
 ]]
@@ -743,14 +792,15 @@ end
 --[[
 	Returns a read-only snapshot of the latest perf metrics with public field
 	names, so callers never get a reference to the internal _perfMetrics table.
-	Durations and averageObjectDeltaTime are in seconds, and the skipped counts
-	are the most recent frame's tallies.
+	Durations and averageObjectDeltaTime are in seconds, and the skipped and
+	occluded counts are the most recent frame's tallies.
 ]]
 function CullThrottle.GetPerformanceMetrics(self: CullThrottle): {
 	searchDuration: number,
 	ingestDuration: number,
 	skippedSearch: number,
 	skippedIngest: number,
+	occludedVoxelCount: number,
 	averageObjectDeltaTime: number,
 }
 	local perfMetrics = self._perfMetrics
@@ -759,6 +809,7 @@ function CullThrottle.GetPerformanceMetrics(self: CullThrottle): {
 		ingestDuration = perfMetrics._ingestDuration,
 		skippedSearch = perfMetrics._skippedSearch[perfMetrics._skippedFramesCursor],
 		skippedIngest = perfMetrics._skippedIngest[perfMetrics._skippedFramesCursor],
+		occludedVoxelCount = perfMetrics._occludedVoxelCount,
 		averageObjectDeltaTime = perfMetrics._averageObjectDeltaTime,
 	}
 end

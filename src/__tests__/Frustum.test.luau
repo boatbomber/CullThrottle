@@ -357,11 +357,12 @@ describe("Frustum", function()
 		end)
 
 		it("reports a rejection by an appended sixth plane like a side plane", function()
-			-- Callers may append planes past the standard five. This sixth
-			-- plane caps the frustum 50 voxels up the view axis, so it alone
-			-- rejects a box the five real planes prove fully inside, and the
-			-- rejection must not read as a far-plane one, since only the real
-			-- far plane moves with the render distance.
+			-- Callers may append planes past the standard five, the way the
+			-- occluder prefilter closes the frustum behind the camera. This
+			-- sixth plane caps the frustum 50 voxels up the view axis, so it
+			-- alone rejects a box the five real planes prove fully inside, and
+			-- the rejection must not read as a far-plane one, since only the
+			-- real far plane moves with the render distance.
 			local planes = table.clone(roomyFrustumPlanes)
 			table.insert(planes, Vector3.new(0, 50, 0))
 			table.insert(planes, Vector3.new(0, -1, 0))

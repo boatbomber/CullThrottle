@@ -937,6 +937,7 @@ describe("CullThrottle queries", function()
 			expect(type(metrics.ingestDuration)).toBe("number")
 			expect(type(metrics.skippedSearch)).toBe("number")
 			expect(type(metrics.skippedIngest)).toBe("number")
+			expect(type(metrics.occludedVoxelCount)).toBe("number")
 			expect(type(metrics.averageObjectDeltaTime)).toBe("number")
 		end)
 
@@ -945,6 +946,7 @@ describe("CullThrottle queries", function()
 			cullThrottle._perfMetrics._ingestDuration = 0.00456
 			cullThrottle._perfMetrics._skippedSearch[1] = 7
 			cullThrottle._perfMetrics._skippedIngest[1] = 9
+			cullThrottle._perfMetrics._occludedVoxelCount = 4
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.025
 
 			local metrics = cullThrottle:GetPerformanceMetrics()
@@ -952,6 +954,7 @@ describe("CullThrottle queries", function()
 			expect(metrics.ingestDuration).toBe(0.00456)
 			expect(metrics.skippedSearch).toBe(7)
 			expect(metrics.skippedIngest).toBe(9)
+			expect(metrics.occludedVoxelCount).toBe(4)
 			expect(metrics.averageObjectDeltaTime).toBe(0.025)
 		end)
 

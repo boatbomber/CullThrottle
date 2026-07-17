@@ -29,6 +29,8 @@ type ConfigurationProto = {
 	updateTimeBudget: number,
 	ingestTimeBudget: number,
 
+	maxOccluders: number,
+
 	bestRefreshPeriod: number,
 	worstRefreshPeriod: number,
 	refreshPeriodRange: number,
@@ -55,6 +57,8 @@ function Config.new(): Config
 	self.searchTimeBudget = 0.8 / 1000
 	self.ingestTimeBudget = 1.2 / 1000
 	self.updateTimeBudget = 0.4 / 1000
+
+	self.maxOccluders = 8
 
 	self:setVoxelSize(100)
 	self:setRefreshPeriods(1 / 60, 1 / 15)

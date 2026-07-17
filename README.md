@@ -72,7 +72,7 @@ For a richer example, `demo/init.client.luau` drives an interactive scene of spi
 
 Suppose your game has fifty thousand objects that each want a small per-frame effect. A frame at 60 FPS gives you about 16 milliseconds for everything the game does, and a loop that merely touches 50,000 objects eats a meaningful slice of that before doing any real work. Updating them all every frame is out of the question. But almost none of those objects are on screen at once, and of the ones that are, the big nearby ones matter far more than the distant specks. The work you actually need each frame is small. The hard part is figuring out which work that is, fast enough that the figuring saves more than it costs.
 
-The name describes the two halves of the answer. The cull half decides what's visible without asking each object. CullThrottle divides the world into large cubic voxels and tracks which objects occupy each one, so visibility is decided per voxel against the camera's view frustum, and a room packed with a thousand objects costs one verdict instead of a thousand. On top of that, consecutive frames are nearly identical, so every verdict is cached together with how much camera movement it survives. On a typical frame, most of the world re-validates with a single comparison per cached answer instead of a fresh geometry test.
+The name describes the two halves of the answer. The cull half decides what's visible without asking each object. CullThrottle divides the world into large cubic voxels and tracks which objects occupy each one, and visibility is decided per voxel so a room packed with a thousand objects costs one verdict instead of a thousand. It culls voxels that are outside the camera's view frustum or hidden behind an occluder. On top of that, consecutive frames are nearly identical, so every verdict is cached together with how much camera movement it survives. On a typical frame, most of the world re-validates with a single comparison per cached answer instead of a fresh geometry test.
 
 The throttle half decides what the visible objects deserve. Each one is scored, dominated by how large it looms on screen, with smaller corrections so neglected objects gain urgency and nearby ones get a nudge. The scores feed a priority queue, and your update loop drains it under a time budget. Anything that misses a frame comes back more urgent the next, and an object overdue past its worst allowed refresh rate jumps to the front of the line. Every visible object keeps updating, update frequency tracks importance, and under sustained pressure the whole system slows down smoothly instead of letting some objects freeze.
 
@@ -91,6 +91,8 @@ That summary is enough to use the library, and the API reference below covers th
 3. Anchor your BaseParts. A part moved by Roblox's physics engine doesn't fire the CFrame changed event when it moves, so it has to be added with `AddPhysicsObject` so CullThrottle polls its position instead. Polling has a noticeable performance cost and can even produce incorrect visibility if the object moves too quickly.
 
 4. Use tags. CollectionService tags are a powerful way to group objects and let CullThrottle manage them. You can add and remove tags at runtime, and CullThrottle tracks the tagged objects automatically. A BasePart that is unanchored at the moment it's captured is added as a physics object, so anchor your objects before they get picked up if you don't want that (see the previous practice). That routing happens once at capture, so changing the Anchored property later doesn't move an object between static and physics tracking.
+
+5. Define occluders. Anything tagged `CullThrottleOccluder` can hide the space behind it from the visibility search, so objects behind buildings, terrain walls, and room shells stop costing update time. A handful of huge occluders beat dozens of small ones (only the most prominent few build umbrae each frame). CullThrottle won't verify opacity for you, so tagging a transparent part may hide something players can actually see. Occluders must be anchored box-shaped Parts sitting under Workspace. A tagged Part that doesn't qualify yet stays watched until it does, so anchoring a wall or parenting a stored template into Workspace registers it without retagging, while anything that isn't a Part at all is warned about and ignored.
 
 ## Supported object types
 
@@ -252,13 +254,20 @@ CullThrottle:GetTimeBudgets(): (number, number, number)
 
 The per-frame time allowances, in seconds, for the search, ingest, and update phases. The defaults are 0.0008, 0.0012, and 0.0004 (0.8 ms, 1.2 ms, and 0.4 ms). These budgets ensure CullThrottle never consumes enough of a frame to cause drops, and each phase has a graceful fallback when its budget runs out.
 
-The search phase finds the voxels that are considered visible. If its budget runs out, CullThrottle reuses the last known visibility of each voxel it did not have time to search, which can be momentarily incorrect.
+The search phase finds the voxels that are considered visible, including any occlusion tests for tagged occluders (those tests pay for themselves by retiring regions the search would otherwise resolve voxel by voxel). If its budget runs out, CullThrottle reuses the last known visibility of each voxel it did not have time to search, which can be momentarily incorrect.
 
 The ingest phase scores the objects in the visible voxels into the update queue. If its budget runs out, the remaining objects are queued at a coarse priority rather than a precise one, which can reduce how well the update order matches importance.
 
 The update phase is the time spent by `IterateObjectsToUpdate`. If its budget runs out, the iterator simply stops returning objects. The most important objects come first, so they'll likely have been updated already, and whatever was left grows in priority for the next frame.
 
 Dynamic render distance adjusts to keep the work fitting these budgets, so a lower budget settles at a shorter render distance and vice versa. Budgets must be non-negative, and a budget of zero turns its phase off entirely.
+
+```Luau
+CullThrottle:SetMaxOccluders(maxOccluders: number)
+CullThrottle:GetMaxOccluders(): number
+```
+
+How many tagged occluders may cast umbrae in a single frame. The default is 8, and the value must be an integer between 0 and 32 (zero disables occlusion culling). Each frame the most prominent occluders (by projected size) win the slots, and occluders that can't affect the view this frame (behind the camera or otherwise outside the frustum) never take one, so this trades occlusion coverage against per-frame test cost. Tag parts with `CullThrottleOccluder` to make them occluders (see best practices for what makes a good one).
 
 ```Luau
 CullThrottle:SetRefreshRates(refreshRates: NumberRange)
@@ -305,11 +314,12 @@ CullThrottle:GetPerformanceMetrics(): {
     ingestDuration: number,
     skippedSearch: number,
     skippedIngest: number,
+    occludedVoxelCount: number,
     averageObjectDeltaTime: number,
 }
 ```
 
-Returns a read-only snapshot of the latest performance metrics, useful for graphing or tuning your time budgets. The durations are last frame's search and ingest costs in seconds, the skipped counts are how many voxels last frame's search and ingest budgets had to skip, and averageObjectDeltaTime is the average seconds between updates across the objects the iterator handed out (invert it for an average refresh rate in Hz).
+Returns a read-only snapshot of the latest performance metrics, useful for graphing or tuning your time budgets. The durations are last frame's search and ingest costs in seconds, the skipped counts are how many voxels last frame's search and ingest budgets had to skip, occludedVoxelCount is how many voxels last frame's search skipped because they were hidden behind tagged occluders (buckets skipped whole count all their occupied voxels, so the number can read slightly high at the view's edge), and averageObjectDeltaTime is the average seconds between updates across the objects the iterator handed out (invert it for an average refresh rate in Hz).
 
 ## Roadmap
 

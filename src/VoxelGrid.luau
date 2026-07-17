@@ -56,7 +56,8 @@ type VoxelGridProto = {
 	-- This counts every change to the set of occupied voxel keys, meaning a
 	-- voxel created or emptied, plus the wholesale clears. The search's
 	-- whole-frame replay compares it across frames, because with the camera
-	-- holding still the visible voxel set can only change through this set.
+	-- and occluders holding still the visible voxel set can only change
+	-- through this set.
 	_occupancyGeneration: number,
 	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue<Instance>,
 }
@@ -373,6 +374,7 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 		self._voxels[voxelKey] = nil
 		self._occupancyGeneration += 1
 		self._visibilityCache._voxelProofs[voxelKey] = nil
+		self._visibilityCache._voxelOcclusionProofs[voxelKey] = nil
 
 		-- This voxel is no longer occupied, so remove it from its coarse bucket.
 		local coarseX = voxelKey.X // COARSE_VOXEL_SIZE
@@ -386,9 +388,11 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 				local bucketN = #bucket
 				if bucketN == 1 then
 					-- This was the last voxel in this bucket, so drop the bucket
-					-- entirely, along with any cached verdict for it.
+					-- entirely, along with any cached verdict or occlusion
+					-- proof for it.
 					self._coarseVoxels[coarseKey] = nil
 					self._visibilityCache._bucketVerdicts[coarseKey] = nil
+					self._visibilityCache._bucketOcclusionProofs[coarseKey] = nil
 					self._coarseBucketCount -= 1
 
 					-- Only a bucket on the surface of the occupied bounding box can
