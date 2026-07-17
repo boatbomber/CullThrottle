@@ -7,10 +7,17 @@
 
     Lowest priority values come first.
 
+    The heap is 4-ary rather than binary. Slot i's children live at slots
+    4i - 2 through 4i + 1 and its parent at (i + 2) // 4, so the tree is half
+    as deep. A drained element sinks through half the levels (fewer moves,
+    and the four child priorities it scans per level sit adjacent in memory),
+    which is the right trade for this queue's workload of batch fills followed
+    by budgeted dequeue drains.
+
     Priorities must be real numbers. A NaN priority fails every heap comparison
     and silently corrupts dequeue order, and the hot enqueue paths deliberately
-    don't pay for a guard, so callers keep NaN out (Ingest culls NaN distances
-    before staging anything).
+    don't pay for a guard, so callers keep NaN out (VoxelGrid rejects non-finite
+    positions before staging voxel maintenance work).
 ]]
 
 local PriorityQueue = {}
@@ -19,6 +26,8 @@ PriorityQueue.__index = PriorityQueue
 type PriorityQueueProto<T> = {
 	_items: { T },
 	_priorities: { number },
+	-- This is the item-to-slot map behind contains/remove/update and the
+	-- duplicate skipping.
 	_indices: { [T]: number },
 	_size: number,
 
@@ -32,28 +41,47 @@ export type PriorityQueue<T> = typeof(setmetatable({} :: PriorityQueueProto<T>, 
 	holds again. This is the shared core of the bottom-up heapify and of the
 	single-node restores after a remove or a dequeue, so each of those sinks only
 	the one element that can be out of place rather than re-sinking valid nodes.
+	Rather than swapping at every level, the out-of-place element is held aside
+	while smaller children shift up into the hole, and it lands with a single
+	write at its final slot, which roughly halves the writes per level.
 ]]
 local function sinkElement<T>(items: { T }, priorities: { number }, indices: { [T]: number }, size: number, from: number)
 	local index = from
-	local left = index + index
-	local right = left + 1
-	while left <= size do
-		local smaller = left
-		if (right <= size) and (priorities[right] < priorities[left]) then
-			smaller = right
+	local item = items[index]
+	local priority = priorities[index]
+	local firstChild = index * 4 - 2
+	while firstChild <= size do
+		local smallest = firstChild
+		local smallestPriority = priorities[firstChild]
+		local lastChild = firstChild + 3
+		if lastChild > size then
+			lastChild = size
+		end
+		for child = firstChild + 1, lastChild do
+			local childPriority = priorities[child]
+			if childPriority < smallestPriority then
+				smallest = child
+				smallestPriority = childPriority
+			end
 		end
 
-		if priorities[smaller] >= priorities[index] then
+		if smallestPriority >= priority then
 			break
 		end
 
-		items[index], items[smaller] = items[smaller], items[index]
-		priorities[index], priorities[smaller] = priorities[smaller], priorities[index]
-		indices[items[index]], indices[items[smaller]] = index, smaller
+		local smallestItem = items[smallest]
+		items[index] = smallestItem
+		priorities[index] = smallestPriority
+		indices[smallestItem] = index
 
-		index = smaller
-		left = index + index
-		right = left + 1
+		index = smallest
+		firstChild = index * 4 - 2
+	end
+
+	if index ~= from then
+		items[index] = item
+		priorities[index] = priority
+		indices[item] = index
 	end
 end
 
@@ -118,25 +146,36 @@ end
 
 --[[
 	Bubbles the element at `from` up toward the root until the min-heap
-	property holds again, returning its final index.
+	property holds again, returning its final index. Like sinkElement, the
+	moving element is held aside while displaced parents shift down, and it
+	lands with a single write at its final slot.
 ]]
 function PriorityQueue.siftup<T>(self: PriorityQueue<T>, from: number)
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local index = from
-	local parent = index // 2
-	while (index > 1) and (priorities[index] < priorities[parent]) do
-		priorities[index], priorities[parent] = priorities[parent], priorities[index]
-		items[index], items[parent] = items[parent], items[index]
-		indices[items[index]], indices[items[parent]] = index, parent
+	local item = items[index]
+	local priority = priorities[index]
+	local parent = (index + 2) // 4
+	while index > 1 and priority < priorities[parent] do
+		local parentItem = items[parent]
+		items[index] = parentItem
+		priorities[index] = priorities[parent]
+		indices[parentItem] = index
 		index = parent
-		parent = index // 2
+		parent = (index + 2) // 4
+	end
+	if index ~= from then
+		items[index] = item
+		priorities[index] = priority
+		indices[item] = index
 	end
 	return index
 end
 
 --[[
 	Sinks every element from `limit` down to the root into place. Called with
-	size // 2, this is the classic O(n) bottom-up heapify.
+	(size + 2) // 4, the last slot with any children, this is the classic
+	O(n) bottom-up heapify.
 ]]
 function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 	local items, priorities, indices, size = self._items, self._priorities, self._indices, self._size
@@ -146,8 +185,8 @@ function PriorityQueue.siftdown<T>(self: PriorityQueue<T>, limit: number)
 end
 
 --[[
-	Inserts one item with the given priority. An item already in the queue is
-	left untouched.
+	Inserts one item with the given priority. An item already present is left
+	untouched.
 ]]
 function PriorityQueue.enqueue<T>(self: PriorityQueue<T>, item: T, priority: number): PriorityQueue<T>
 	local items, priorities, indices = self._items, self._priorities, self._indices
@@ -156,7 +195,8 @@ function PriorityQueue.enqueue<T>(self: PriorityQueue<T>, item: T, priority: num
 	end
 	local size = self._size + 1
 	self._size = size
-	items[size], priorities[size], indices[item] = item, priority, size
+	items[size], priorities[size] = item, priority
+	indices[item] = size
 	self:siftup(size)
 	return self
 end
@@ -170,17 +210,17 @@ function PriorityQueue.batchEnqueue<T>(self: PriorityQueue<T>, itemsBatch: { T }
 	local items, priorities, indices = self._items, self._priorities, self._indices
 	local size = self._size
 	for i = 1, #itemsBatch do
-		local item, priority = itemsBatch[i], prioritiesBatch[i]
+		local item = itemsBatch[i]
 		if item == nil or indices[item] ~= nil then
 			continue
 		end
-		size = size + 1
-		items[size], priorities[size] = item, priority
+		size += 1
+		items[size], priorities[size] = item, prioritiesBatch[i]
 		indices[item] = size
 	end
 	self._size = size
 	if size > 1 then
-		self:siftdown(size // 2)
+		self:siftdown((size + 2) // 4)
 	end
 end
 
@@ -190,13 +230,14 @@ end
 	still in the incoming batch are not consulted.
 ]]
 function PriorityQueue.remove<T>(self: PriorityQueue<T>, item: T): boolean
-	local index = self._indices[item]
+	local indices = self._indices
+	local index = indices[item]
 	if index == nil then
 		return false
 	end
 
 	local size = self._size
-	local items, priorities, indices = self._items, self._priorities, self._indices
+	local items, priorities = self._items, self._priorities
 	indices[item] = nil
 	if size == index then
 		items[size], priorities[size] = nil, nil

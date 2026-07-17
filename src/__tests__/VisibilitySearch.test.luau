@@ -12,6 +12,7 @@ local afterEach = JestGlobals.afterEach
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
 local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
+local VisibilitySearch = require(CullThrottlePackage:WaitForChild("VisibilitySearch"))
 local Utilities = CullThrottlePackage:WaitForChild("Utilities")
 local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
@@ -56,6 +57,24 @@ local function countClassifyCalls(): () -> number
 	end)
 	return function()
 		return calls
+	end
+end
+
+--[[
+	Wraps VisibilitySearch.seedSearchVolumes with a counting shim (registered
+	for the afterEach restore) and returns a getter for how many passes have
+	seeded since. A replayed frame never seeds, so the count tells full
+	searches apart from replays.
+]]
+local function countSeedPasses(): () -> number
+	local passes = 0
+	local realSeed
+	realSeed = patchFunction(VisibilitySearch, "seedSearchVolumes", function(...)
+		passes += 1
+		return realSeed(...)
+	end)
+	return function()
+		return passes
 	end
 end
 
@@ -860,6 +879,13 @@ describe("VisibilitySearch", function()
 			local distinctCount = 0
 			for _ = 1, 8 do
 				firstOrigin = nil
+				-- A hair of staged translation keeps the frames from being
+				-- bit-identical. A warm zero-budget pass can drain its whole
+				-- stack within one clock-check batch and arm the whole-frame
+				-- replay, which would skip the very search this test watches,
+				-- and the creep is far too small to expire any proof in the
+				-- window.
+				cullThrottle._motion._accumT += 1e-6
 				cullThrottle:_findVisibleObjects(os.clock())
 				expect(firstOrigin).never.toBeNil()
 				if not distinctOrigins[firstOrigin] then
@@ -1603,6 +1629,291 @@ describe("VisibilitySearch", function()
 			expect(search._volumesToCheckSize).toBe(0)
 			expect(search._visibleVoxelCount).toBe(2)
 			expect(voxelProofs[unprovenKey]).toBeDefined()
+		end)
+	end)
+
+	describe("Whole-frame replay", function()
+		local savedCameraCFrame
+
+		beforeEach(function()
+			savedCameraCFrame = workspace.CurrentCamera.CFrame
+			-- A canonical world-aligned pose makes the staged scenes below
+			-- deterministic. The camera cache refresh is called synchronously
+			-- rather than waiting on the deferred change signal.
+			workspace.CurrentCamera.CFrame = CFrame.new(Vector3.new(50, 50, 50), Vector3.new(50, 50, -1000))
+			CameraCache.cframeChanged()
+			-- A generous budget keeps every anchor pass complete, so replay
+			-- eligibility is decided by the watched inputs alone.
+			cullThrottle._config.searchTimeBudget = 1
+		end)
+
+		afterEach(function()
+			workspace.CurrentCamera.CFrame = savedCameraCFrame
+			task.wait()
+		end)
+
+		--[[
+			Stages a handful of parts down the view at increasing depth and
+			returns them for cleanup.
+		]]
+		local function stageViewParts(): { Part }
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 5 do
+				local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -100 * i)).Position)
+				cullThrottle:AddObject(part)
+				table.insert(parts, part)
+			end
+			return parts
+		end
+
+		--[[
+			Destroys the staged parts once a test has captured everything it
+			asserts on.
+		]]
+		local function destroyParts(parts: { Part })
+			for _, part in parts do
+				part:Destroy()
+			end
+		end
+
+		it("replays the last pass and reproduces its output while every input holds still", function()
+			local parts = stageViewParts()
+			local search = cullThrottle._search
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			local fullCount = search._visibleVoxelCount
+			local fullKeys = {}
+			for i = 1, fullCount do
+				fullKeys[i] = search._pendingVoxelKeys[i]
+			end
+
+			-- Nothing the pass reads has changed, so the next frame restores
+			-- the same output without seeding a pass.
+			cullThrottle:_findVisibleObjects(os.clock())
+			local seeds = getSeeds()
+			local replayCount = search._visibleVoxelCount
+			local sameKeys = replayCount == fullCount
+			if sameKeys then
+				for i = 1, replayCount do
+					if search._pendingVoxelKeys[i] ~= fullKeys[i] then
+						sameKeys = false
+						break
+					end
+				end
+			end
+			destroyParts(parts)
+			expect(fullCount).toBeGreaterThan(0)
+			expect(seeds).toBe(1)
+			expect(replayCount).toBe(fullCount)
+			expect(sameKeys).toBe(true)
+		end)
+
+		it("re-searches after any translation and re-arms on the next still frame", function()
+			local parts = stageViewParts()
+			local camera = workspace.CurrentCamera
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- One stud is a hundredth of a voxel, far under any proof's
+			-- clearance, but any charged translation at all re-runs the pass.
+			camera.CFrame += Vector3.new(1, 0, 0)
+			CameraCache.cframeChanged()
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The fresh pass re-anchored, so the next still frame replays again.
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+		end)
+
+		it("re-searches after a pure rotation", function()
+			local parts = stageViewParts()
+			local camera = workspace.CurrentCamera
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			camera.CFrame = camera.CFrame * CFrame.Angles(0, math.rad(1), 0)
+			CameraCache.cframeChanged()
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+		end)
+
+		it("re-searches after a projection change", function()
+			local parts = stageViewParts()
+			local camera = workspace.CurrentCamera
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The projection change charges the rotation accumulator, which the
+			-- gate watches. The cache refresh is synchronous, and the suite's
+			-- teardown restores the field of view.
+			camera.FieldOfView += 10
+			CameraCache.fovChanged()
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+		end)
+
+		it("re-searches after a render distance change", function()
+			local parts = stageViewParts()
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(400, 400))
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The far plane move charges the render distance accumulator.
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(300, 300))
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+		end)
+
+		it("re-searches the frame an object claims a fresh voxel and surfaces it immediately", function()
+			local parts = stageViewParts()
+			local camera = workspace.CurrentCamera
+			local search = cullThrottle._search
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The newcomer lands in a voxel of its own, which changes the
+			-- occupied key set the seeding scans, so this frame must re-search
+			-- and surface the fresh voxel rather than replaying a set that
+			-- predates it.
+			local newcomer = createMockPart((camera.CFrame * CFrame.new(120, 0, -250)).Position)
+			cullThrottle:AddObject(newcomer)
+			local newcomerKey = next(cullThrottle._lifecycle._objects[newcomer].voxelKeys)
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			local found = false
+			for i = 1, search._visibleVoxelCount do
+				if search._pendingVoxelKeys[i] == newcomerKey then
+					found = true
+					break
+				end
+			end
+			newcomer:Destroy()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+			expect(found).toBe(true)
+		end)
+
+		it("keeps replaying when an object joins an already occupied voxel, and still ingests it", function()
+			local camera = workspace.CurrentCamera
+			local anchorPart = createMockPart((camera.CFrame * CFrame.new(0, 0, -250)).Position)
+			cullThrottle:AddObject(anchorPart)
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The newcomer shares the anchor part's voxel, so the occupied key
+			-- set is unchanged and the frame replays, while the ingest reads
+			-- the voxel's live contents and stages the newcomer anyway.
+			local newcomer = createMockPart((camera.CFrame * CFrame.new(2, 0, -250)).Position)
+			cullThrottle:AddObject(newcomer)
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			local ingest = cullThrottle._ingest
+			local staged = false
+			for i = 1, ingest._stagedSize do
+				if ingest._stagedObjects[i].object == newcomer then
+					staged = true
+					break
+				end
+			end
+			newcomer:Destroy()
+			anchorPart:Destroy()
+			expect(seeds).toBe(1)
+			expect(staged).toBe(true)
+		end)
+
+		it("re-searches after a cache flush", function()
+			local parts = stageViewParts()
+
+			local getSeeds = countSeedPasses()
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- A flush re-anchors the odometer at zero, which can coincide with
+			-- the anchored readings, so the gate watches the flush count rather
+			-- than trusting the accumulators alone.
+			cullThrottle._motion:flushVisibilityCache()
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			local seeds = getSeeds()
+			destroyParts(parts)
+			expect(seeds).toBe(2)
+		end)
+
+		it("never replays off a pass the budget truncated", function()
+			-- Six buckets ride the frustum's right side plane at increasing
+			-- depth, the same staging as the budget fallback test above, so a
+			-- zero budget is guaranteed to leave volumes for the fallback.
+			local search = cullThrottle._search
+			local voxelProofs = cullThrottle._visibilityCache._voxelProofs
+			local part = createMockPart()
+			local keys = {
+				Vector3.new(5, 5, 1),
+				Vector3.new(5, 9, 1),
+				Vector3.new(9, 13, 1),
+				Vector3.new(13, 17, 1),
+				Vector3.new(13, 21, 1),
+				Vector3.new(17, 25, 1),
+			}
+			for _, key in keys do
+				cullThrottle._grid:insertToVoxel(key, stubObjectData(part))
+				voxelProofs[key] = visibleVoxelProof(math.huge, 0)
+			end
+
+			patchFunction(CameraCache, "getPlanesAndBounds", function()
+				return roomyFrustumPlanes, Vector3.new(0, 0, 0), Vector3.new(19, 27, 3)
+			end)
+
+			local getSeeds = countSeedPasses()
+
+			-- The zero budget truncates the pass, which must leave the replay
+			-- disarmed even though every proof it consulted was valid.
+			cullThrottle._config.searchTimeBudget = 0
+			search:run(os.clock())
+			local perfMetrics = cullThrottle._perfMetrics
+			expect(perfMetrics._skippedSearch[perfMetrics._skippedFramesCursor]).toBeGreaterThan(0)
+			expect(search._replayReady).toBe(false)
+
+			-- A complete pass arms it, and the identical call after replays.
+			cullThrottle._config.searchTimeBudget = 1
+			search._visibleVoxelCount = 0
+			search:run(os.clock())
+			expect(search._replayReady).toBe(true)
+			expect(getSeeds()).toBe(2)
+			expect(search._visibleVoxelCount).toBe(6)
+
+			search._visibleVoxelCount = 0
+			search:run(os.clock())
+			expect(getSeeds()).toBe(2)
+			expect(search._visibleVoxelCount).toBe(6)
+
+			part:Destroy()
 		end)
 	end)
 end)

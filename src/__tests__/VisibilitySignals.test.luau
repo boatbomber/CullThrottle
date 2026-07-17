@@ -113,7 +113,7 @@ describe("VisibilitySignals", function()
 		cullThrottle._signals:flushVisibilitySignals()
 
 		expect(enteredFires).toBe(1)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
 		connection:Disconnect()
 		part:Destroy()
@@ -238,8 +238,8 @@ describe("VisibilitySignals", function()
 	it("should let an exited-view handler remove another object without corrupting iteration", function()
 		-- Both objects were visible last frame and neither is this frame, so
 		-- both exit. The handler removes the other object mid-dispatch, which
-		-- mutates the in-view set. Deferring the fire to after
-		-- signalVisibilityChanges finishes its scan makes it safe.
+		-- mutates the in-view bookkeeping. Deferring the fire to after
+		-- signalVisibilityChanges finishes its sweep makes it safe.
 		local part1 = createMockPart(Vector3.new(0, 0, 0))
 		local part2 = createMockPart(Vector3.new(0, 0, 0))
 		cullThrottle:AddObject(part1)
@@ -293,7 +293,7 @@ describe("VisibilitySignals", function()
 		cullThrottle._signals:signalVisibilityChanges(t + 0.1)
 		cullThrottle._signals:flushVisibilitySignals()
 		expect(exited).toBe(false)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
 		-- It comes back into view during the linger through the same markVisible
 		-- path ingest uses. Its lastVisibleClock never returned to zero, so the
@@ -304,13 +304,13 @@ describe("VisibilitySignals", function()
 		cullThrottle._signals:flushVisibilitySignals()
 		expect(exited).toBe(false)
 		expect(enteredFires).toBe(1)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
 		-- Once we're out past the grace, the exit fires and the in-view entry is dropped.
 		cullThrottle._signals:signalVisibilityChanges(t + 0.4)
 		cullThrottle._signals:flushVisibilitySignals()
 		expect(exited).toBe(true)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(0)
+		expect(cullThrottle._signals._inViewCount).toBe(0)
 		expect(cullThrottle._lifecycle._objects[part].lastVisibleClock).toBe(0)
 
 		enteredConnection:Disconnect()
@@ -318,7 +318,80 @@ describe("VisibilitySignals", function()
 		part:Destroy()
 	end)
 
-	it("removes an object that the exit sweep swapped into a new slot", function()
+	it("only touches a steadily visible object when its grace deadline comes due", function()
+		local part = createMockPart()
+		cullThrottle:AddObject(part)
+		local objectData = cullThrottle._lifecycle._objects[part]
+
+		local t = os.clock()
+		markInView(cullThrottle, part, t)
+		local scheduledBucket = objectData.exitSweepBucketIndex
+		expect(scheduledBucket > 0).toBe(true)
+
+		-- A sweep before the deadline's bucket comes due never opens it, and a
+		-- repeat sighting is just the inline clock stamp, so the entry stays
+		-- exactly where the entry flip scheduled it.
+		cullThrottle._signals:signalVisibilityChanges(t + 0.05)
+		markInView(cullThrottle, part, t + 0.1)
+		expect(objectData.exitSweepBucketIndex).toBe(scheduledBucket)
+
+		-- Once the original deadline comes due, the sweep sees the newer
+		-- sighting and reschedules the object at the deadline that sighting
+		-- implies, in a strictly later bucket.
+		cullThrottle._signals:signalVisibilityChanges(t + 0.25)
+		expect(objectData.exitSweepBucketIndex > scheduledBucket).toBe(true)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
+
+		-- With no further sightings, the rescheduled deadline expires and the
+		-- object exits.
+		local exited = false
+		local connection = cullThrottle.ObjectExitedView:Connect(function()
+			exited = true
+		end)
+		cullThrottle._signals:signalVisibilityChanges(t + 0.4)
+		cullThrottle._signals:flushVisibilitySignals()
+		expect(exited).toBe(true)
+		expect(cullThrottle._signals._inViewCount).toBe(0)
+
+		connection:Disconnect()
+		part:Destroy()
+	end)
+
+	it("re-anchors the sweep after an idle stretch with nothing in view", function()
+		local part = createMockPart()
+		cullThrottle:AddObject(part)
+		local signals = cullThrottle._signals
+
+		-- One full stay ends with nothing left in view.
+		local t = os.clock()
+		markInView(cullThrottle, part, t)
+		signals:signalVisibilityChanges(t + 1)
+		expect(signals._inViewCount).toBe(0)
+
+		-- Sweeps during the idle stretch park the resume point just past their
+		-- own clock instead of crawling the empty range.
+		signals:signalVisibilityChanges(t + 50)
+		local idleResumePoint = signals._nextSweepBucketIndex
+
+		-- The next entry after a stretch with no sweeps at all re-anchors the
+		-- resume point at the present, so the following sweep starts near its
+		-- own clock and the fresh stay still exits on schedule.
+		markInView(cullThrottle, part, t + 100)
+		expect(signals._nextSweepBucketIndex > idleResumePoint).toBe(true)
+
+		local exited = false
+		local connection = cullThrottle.ObjectExitedView:Connect(function()
+			exited = true
+		end)
+		signals:signalVisibilityChanges(t + 101)
+		signals:flushVisibilitySignals()
+		expect(exited).toBe(true)
+
+		connection:Disconnect()
+		part:Destroy()
+	end)
+
+	it("evicts an object from the bucket the sweep rescheduled it into", function()
 		local part1 = createMockPart(Vector3.new(0, 0, 0))
 		local part2 = createMockPart(Vector3.new(0, 0, 0))
 		local part3 = createMockPart(Vector3.new(0, 0, 0))
@@ -326,35 +399,48 @@ describe("VisibilitySignals", function()
 		cullThrottle:AddObject(part2)
 		cullThrottle:AddObject(part3)
 
-		-- Only the first object is stale, so the sweep exits it and swap-moves the
-		-- last entry into its slot.
+		-- The first object goes stale while the other two are seen again
+		-- before their first deadline comes due, so the sweep exits the stale
+		-- one and reschedules the fresh pair into a later bucket.
 		local now = os.clock()
 		markInView(cullThrottle, part1, now - 1)
 		markInView(cullThrottle, part2, now)
 		markInView(cullThrottle, part3, now)
-		cullThrottle._signals:signalVisibilityChanges(now)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(2)
+		local objects = cullThrottle._lifecycle._objects
+		local firstBucket = objects[part3].exitSweepBucketIndex
 
-		-- The moved entry must be removable from its new slot, leaving only the
-		-- middle object behind.
-		cullThrottle:RemoveObject(part3)
+		markInView(cullThrottle, part2, now + 0.1)
+		markInView(cullThrottle, part3, now + 0.1)
+		cullThrottle._signals:signalVisibilityChanges(now + 0.25)
+		cullThrottle._signals:flushVisibilitySignals()
 
 		local signals = cullThrottle._signals
-		expect(signals._objectsInViewSize).toBe(1)
-		expect(signals._objectsInView[1].object).toBe(part2)
-		expect(signals._objectsInView[2]).toBeNil()
+		expect(signals._inViewCount).toBe(2)
+		expect(objects[part3].exitSweepBucketIndex).never.toBe(firstBucket)
 
+		-- The moved entry must be evictable from the bucket it lives in now,
+		-- leaving only the middle object behind for the final sweep to report.
+		cullThrottle:RemoveObject(part3)
+		expect(signals._inViewCount).toBe(1)
+
+		local exited = {}
+		local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
+			table.insert(exited, obj)
+		end)
+		cullThrottle._signals:signalVisibilityChanges(now + 1)
 		cullThrottle._signals:flushVisibilitySignals()
+		expect(exited).toEqual({ part2 })
+
+		connection:Disconnect()
 		part1:Destroy()
 		part2:Destroy()
 		part3:Destroy()
 	end)
 
-	it("exits every consecutive stale entry in a single sweep", function()
-		-- The sweep swap-removes a stale entry by pulling the tail entry into
-		-- its slot, and when the tail is stale too the swapped-in entry must
-		-- get rechecked at the same index instead of skipped. One fresh object
-		-- ahead of four stale ones forces that swap chain on every removal.
+	it("exits every stale entry in a due bucket in a single sweep", function()
+		-- One fresh object and four stale ones. Every stale entry in the due
+		-- range must exit in the same sweep, while the fresh object's bucket
+		-- isn't due and never gets opened.
 		local freshPart = createMockPart(Vector3.new(0, 0, 0))
 		cullThrottle:AddObject(freshPart)
 
@@ -384,11 +470,8 @@ describe("VisibilitySignals", function()
 			expect(exited[part]).toBe(true)
 		end
 
-		-- Only the fresh object keeps its place, and the freed slots are nil.
-		local signals = cullThrottle._signals
-		expect(signals._objectsInViewSize).toBe(1)
-		expect(signals._objectsInView[1].object).toBe(freshPart)
-		expect(signals._objectsInView[2]).toBeNil()
+		-- Only the fresh object keeps its place.
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
 		connection:Disconnect()
 		freshPart:Destroy()
@@ -404,18 +487,18 @@ describe("VisibilitySignals", function()
 		cullThrottle:AddObject(part2)
 
 		-- Both enter view, both exit past the grace period, and then only the
-		-- second one re-enters, landing in a different slot than its first stay.
+		-- second one re-enters, landing in a different bucket than its first stay.
 		local now = os.clock()
 		ingestObjects(cullThrottle, now, { part1, part2 })
 		cullThrottle._signals:signalVisibilityChanges(now + 1)
 		ingestObjects(cullThrottle, now + 2, { part2 })
-		expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
-		-- Removing it must clear its current in-view entry, not whatever slot it
+		-- Removing it must clear its current entry, not whatever slot it
 		-- occupied the first time around.
 		cullThrottle:RemoveObject(part2)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(0)
-		expect(next(cullThrottle._signals._objectsInView)).toBeNil()
+		expect(cullThrottle._signals._inViewCount).toBe(0)
+		expect(next(cullThrottle._signals._exitSweepBuckets)).toBeNil()
 
 		cullThrottle._signals:flushVisibilitySignals()
 		part1:Destroy()
@@ -435,18 +518,18 @@ describe("VisibilitySignals", function()
 		fastIngestObjects(cullThrottle, now, { part1, part2 })
 		cullThrottle._signals:signalVisibilityChanges(now + 1)
 		fastIngestObjects(cullThrottle, now + 2, { part2 })
-		expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+		expect(cullThrottle._signals._inViewCount).toBe(1)
 
 		cullThrottle:RemoveObject(part2)
-		expect(cullThrottle._signals._objectsInViewSize).toBe(0)
-		expect(next(cullThrottle._signals._objectsInView)).toBeNil()
+		expect(cullThrottle._signals._inViewCount).toBe(0)
+		expect(next(cullThrottle._signals._exitSweepBuckets)).toBeNil()
 
 		cullThrottle._signals:flushVisibilitySignals()
 		part1:Destroy()
 		part2:Destroy()
 	end)
 
-	it("preserves the in-view set and its indices across a buffer resize", function()
+	it("keeps the scheduled entries intact across a buffer resize", function()
 		local parts = {}
 		local now = os.clock()
 		for i = 1, 5 do
@@ -458,27 +541,17 @@ describe("VisibilitySignals", function()
 
 		cullThrottle._signals:resizeBuffers()
 
-		-- The rebuilt array must hold exactly the in-view objects, each with its
-		-- stored index pointing at its own slot, or the swap-remove bookkeeping
-		-- falls apart. Which slot any particular object lands in is the
-		-- container's own business.
+		-- The resize only rebuilds the pending buffers and drops the bucket
+		-- pool, so everything scheduled stays scheduled with its stored
+		-- position still valid.
 		local signals = cullThrottle._signals
-		expect(signals._objectsInViewSize).toBe(5)
-		local seen = {}
-		for i = 1, 5 do
-			local objectData = signals._objectsInView[i]
-			expect(objectData.inViewIndex).toBe(i)
-			seen[objectData.object] = true
-		end
-		for _, part in parts do
-			expect(seen[part]).toBe(true)
-		end
+		expect(signals._inViewCount).toBe(5)
 
-		-- A removal still finds and evicts its object through the stored index.
+		-- A removal still finds and evicts its object through the stored position.
 		cullThrottle:RemoveObject(parts[2])
-		expect(signals._objectsInViewSize).toBe(4)
+		expect(signals._inViewCount).toBe(4)
 
-		-- And the exit sweep still walks the rebuilt array cleanly.
+		-- And the exit sweep still drains the remaining entries cleanly.
 		local exitedCount = 0
 		local connection = cullThrottle.ObjectExitedView:Connect(function()
 			exitedCount += 1
@@ -486,7 +559,7 @@ describe("VisibilitySignals", function()
 		cullThrottle._signals:signalVisibilityChanges(now + 1)
 		cullThrottle._signals:flushVisibilitySignals()
 		expect(exitedCount).toBe(4)
-		expect(signals._objectsInViewSize).toBe(0)
+		expect(signals._inViewCount).toBe(0)
 
 		connection:Disconnect()
 		for _, part in parts do

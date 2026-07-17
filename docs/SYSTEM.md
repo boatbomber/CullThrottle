@@ -30,7 +30,7 @@ Almost every design choice in CullThrottle traces back to one of these two princ
 
 The first idea is that every phase runs under a fixed time budget with a graceful fallback. The frame never waits for a perfect answer. Each phase front-loads its most valuable work then falls back to a reasonable approximation when time runs out, reusing stale results or deferring what's left. Deferred work gains urgency the longer it waits, so the system self-balances and self-corrects over the next few frames. Section 14 collects all of these fallbacks in one place.
 
-The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict provably survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up properly.
+The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up properly.
 
 ### 3. One frame at a glance
 
@@ -52,7 +52,7 @@ flowchart TD
 1. Poll physics objects, so parts moved by the physics engine have fresh positions (section 12).
 2. Apply queued voxel updates, moving objects between voxels to match where they've gone (sections 4 and 12).
 3. Accumulate camera motion, advancing the running totals that every cached visibility answer is judged against (section 6).
-4. Search the grid for every occupied voxel that intersects the view frustum (section 7).
+4. Search the grid for every occupied voxel that intersects the view frustum (section 7), or replay the previous frame's result outright when nothing that feeds the search has changed (section 7).
 5. Sort the visible voxels closest-first (section 8).
 6. Ingest the objects in those voxels, scoring them into a priority queue (section 8).
 7. Sweep for objects that have stayed out of view long enough to count as gone (section 10).
@@ -122,7 +122,7 @@ The box is inside all five planes, with this much room to
 spare before the nearest one.
 ```
 
-A verdict with slack is a verdict with a shelf life: it stays provably true until the camera has moved enough to use up the slack. Let's turn that observation into a cache mechanic.
+A verdict with slack is a verdict with a shelf life: it stays true until the camera has moved enough to use up the slack. Let's turn that observation into a cache mechanic.
 
 ### 6. Remembering what we proved: motion proofs
 
@@ -173,6 +173,8 @@ Two more measures handle cases where the budget runs out before the search compl
 
 The second safety measure is a fairness rotation. The stack is last-in-first-out, so the top volume gets the front of the budget. A counter rotates which root volume is processed first each frame and alternates the push order of child volumes. When the budget consistently falls short, this ensures every straddling volume eventually gets a fresh search in turn, rather than one corner of the view always consuming the budget while another runs indefinitely on stale proofs.
 
+Above all three layers sits a whole-frame replay for the case where nothing moved at all. The pass is a deterministic function of the camera's frustum, the set of occupied voxels, and the cached proofs, so when every one of those stands exactly where the last complete pass left it, re-running the search could only reproduce the same output, and the frame hands back the previous visible set instead. The gate checks a handful of counters: all three motion accumulators and the flush count (any charged translation, rotation, projection change, or render distance change breaks it), and an occupancy generation the grid bumps whenever a voxel is created or emptied (an object joining or leaving an already occupied voxel doesn't break it, since the output names voxels rather than their contents, and ingest reads contents fresh either way). A pass the budget truncated never arms the replay, because its output leaned on the stale-verdict fallback rather than the watched inputs alone. There's no approximation here and no error direction to track, since the gate demands bit-identical inputs, and the caches don't age while it holds (the odometers aren't moving). What it buys is the common case of a parked camera in a quiet scene, where the search phase drops to a few comparisons.
+
 ## Part III: From visibility to your update loop
 
 ### 8. Ingest: turning visible voxels into priorities
@@ -185,7 +187,7 @@ Then CullThrottle walks the voxels and scores every object inside. An object spa
 
 Three conditions overrule the blended score, checked in this order:
 
-1. An object updated within the best refresh period doesn't need anything yet, so it's pushed into a far-back tier for over-refreshed objects (a screen-size priority scaled by a factor of a million) where it sorts behind everything that actually needs work.
+1. An object updated within the best refresh period doesn't need anything yet, so it's pushed into a far-back tier for over-refreshed objects, where it sorts behind everything that actually needs work (ordered among its peers by screen size).
 2. An object overdue past the worst refresh period becomes p0, aka must-refresh-this-frame, sorted ahead of everything else (p0s order among themselves by screen size).
 3. An object within 30 studs of the camera goes near the front regardless of size, since things right under the player's nose should update nearly every frame.
 
@@ -193,7 +195,7 @@ Each object's refresh clock also carries a small random jitter (up to 2 ms eithe
 
 Because voxel-level visibility is conservative (a visible voxel can contain objects that are themselves out of view), each object is re-culled individually. If it's beyond the render distance or fully outside the frustum, it's skipped.
 
-When the ingest budget runs out during the scoring walk, the fallback approximation takes over. Every object in the remaining voxels is dumped into the queue behind the properly ingested objects with a coarse priority derived from its voxel's position in the closest-first sorted order, so nearer voxels still sort ahead of farther ones. Objects dumped by this fast pass may still need updates this frame, so even the deepest of them still sorts ahead of the far-back tier of objects that were updated within the best refresh period.
+When the ingest budget runs out during the scoring walk, the fallback approximation takes over. Every object in the remaining voxels is dumped into the staged batch behind the properly ingested objects with a coarse rank derived from its voxel's position in the closest-first sorted order, so nearer voxels still sort ahead of farther ones. Objects dumped by this fast pass may still need updates this frame, so even the deepest of them still sorts ahead of the far-back tier of objects that were updated within the best refresh period.
 
 This gives us priority bands, each with a sub-sort within themselves:
 
@@ -205,15 +207,15 @@ This gives us priority bands, each with a sub-sort within themselves:
 
 The last two bands sit strictly behind everything above them, while the first three are intent rather than hard walls. Very nearby objects score in the same numeric range as the p0s on purpose, so the closest of them count as p0 for the update loop's budget rules (section 9), and at the extremes the bands can interleave. The bands exist to put the right objects first, not to wall the tiers off from each other.
 
-Everything lands in a priority queue (lowest value dequeues first) as a cheap staging append. Nothing is heap-ordered yet, just put into a staging batch.
+Everything lands in a staged batch as a cheap pair of array appends, the object alongside its queue band. The band is computed right in the scoring branch that produced the score (section 9 covers the band layout), since that branch already knows which region the object landed in. Nothing is ordered yet.
 
 ### 9. The update loop: what the consumer sees
 
 We got our voxels, we got the objects from the voxels, and the update queue is staged, so now it has to fit in your frame.
 
-`IterateObjectsToUpdate` heap-orders the staged batch on the first iteration of the frame rather than during ingest, so frames where nobody iterates never pay for the sort. From there the iterator dequeues in priority order, checking the clock as it goes against the update budget (0.4 ms by default), and when the budget runs out, iteration just ends.
+`IterateObjectsToUpdate` orders the staged batch on the first iteration of the frame rather than during ingest, so frames where nobody iterates never pay for the sort. The ordering is banded rather than exact. Each object arrives with one of 219 bands that mirror the scoring bands, assigned at scoring time by the branch that scored it, with the p0 and nearby region getting 18 equal slices, the fair region one band per whole point of score (about one percent of the screen-size weight), the fast-pass region one band per voxel tier (so it loses no ordering at all), and the over-refresh region 10 coarse slices at the very back. A stable counting sort lays the batch out band by band, objects that share a band keep their staged order (which is closest-voxel-first), and the iterator walks the layout front to back. Two objects can only come out in the wrong relative order when their scores land in the same band, so any inversion is bounded by one band's width. Iteration stops when the update budget (0.4 ms by default) runs out. The iterator doesn't read the clock for every object it yields. It plans each budget check to cover about half the remaining budget at the average per-object pace measured so far, capped at eight objects, so a cheap consumer skips most of the clock reads while an expensive one collapses back to per-object checks as the budget nears.
 
-The p0 band gets special treatment at the budget cutoff. While the front of the queue is p0 objects, the iterator allows itself to overrun the budget by 15%, so a frame stacked with overdue objects mostly keeps up with the worst refresh rate. If you've enabled `strictlyEnforceWorstRefreshRate`, p0 objects ignore the budget entirely, trading frame time for a guaranteed minimum refresh rate.
+The p0 region gets special treatment at the budget cutoff. The band layout puts every p0 object in a strict prefix of the drain, and while the iterator is inside that prefix it allows itself to overrun the budget by 15%, so a frame stacked with overdue objects mostly keeps up with the worst refresh rate. The first object past the prefix forces a fresh clock check against the plain budget, so the drop from the raised allowance never rides on a stale check plan. If you've enabled `strictlyEnforceWorstRefreshRate`, p0 objects ignore the budget entirely, trading frame time for a guaranteed minimum refresh rate.
 
 Whatever doesn't get updated stays un-refreshed, so its urgency score is higher next frame, and if it keeps missing, it eventually becomes p0 and jumps the line. This is the self-balancing loop closing. Budgets shed load, the scoring system turns shed load into priority, and nothing visible starves. Under sustained pressure, refresh rates degrade smoothly across the board instead of some objects freezing.
 
@@ -223,7 +225,9 @@ A few practical notes round this out. Entries for objects removed mid-frame are 
 
 Some effects don't need a per-frame update and only need to know when an object appears and disappears. That's what `ObjectEnteredView` and `ObjectExitedView` are for.
 
-Entering is detected during ingest. Every visible object gets its last-visible clock stamped, and the stamp flipping from zero to nonzero means the object just came into view, so an entered event is buffered. Exiting needs more care. An object straddling the frustum edge while the player's head bobs or render distance finds equilibrium would enter and exit every few frames, firing a storm of signals for no real change. So the exit sweep at the end of the frame gives every object a short grace period (0.2 seconds), and only after staying unseen that long does it buffer an exited event. An object lingering in its grace period is not in `IterateObjectsToUpdate`/`GetVisibleObjects`, since it isn't actually visible. The grace period only applies to events, and re-entering during the grace does not fire an entered event, preventing the other half of that storm of signals and avoiding confusing "entered without exiting first" events.
+Entering is detected during ingest. Every visible object gets its last-visible clock stamped, and the stamp flipping from zero to nonzero means the object just came into view, so an entered event is buffered. Exiting needs more care. An object straddling the frustum edge while the player's head bobs or render distance finds equilibrium would enter and exit every few frames, firing a storm of signals for no real change. So every object gets a short grace period (0.2 seconds), and only after staying unseen that long does the exit sweep buffer an exited event. An object lingering in its grace period is not in `IterateObjectsToUpdate`/`GetVisibleObjects`, since it isn't actually visible. The grace period only applies to events, and re-entering during the grace does not fire an entered event, preventing the other half of that storm of signals and avoiding confusing "entered without exiting first" events.
+
+The sweep itself is organized as due buckets rather than a walk of the whole in-view set. When an object enters view it is scheduled in the bucket covering its grace deadline, and a frame's sweep only opens the buckets whose due time has arrived. An object seen again since it was scheduled just gets rescheduled at the deadline its latest sighting implies, so a steadily visible object is touched about once per grace period instead of every frame, and the sweep's per-frame cost tracks how much visibility is changing rather than how much is on screen. The buckets quantize deadlines to a thirtieth of a second, so an exit can fire at most one bucket period late, a frame or two against the grace period's 0.2 seconds of deliberate smoothing.
 
 Both signals are buffered during the frame and fired together at the very end, after all of CullThrottle's own iteration is finished. This makes it safe for an event listener to add or remove objects without corrupting a loop in progress. The flush order is a contract: every entered event fires before any exited event. Objects you remove from CullThrottle are evicted silently. `ObjectRemoved` covers the announcement, and a trailing exited event would be spurious.
 
@@ -258,10 +262,10 @@ Let's look at the pipeline from section 3 again, now with our full context and u
 1. Poll physics objects (0.05 ms). Physics-driven positions refresh before anything reads them, so the rest of the frame works on the freshest data available.
 2. Apply queued voxel updates (0.05 ms, closest-first). The grid must be current before the search trusts it.
 3. Accumulate camera motion (cheap, unbudgeted). The odometers must advance (or flush, on a camera swap) before a single cached proof is consulted, or every validity comparison this frame would be against stale readings.
-4. Search (0.8 ms). This is the work of sections 5 through 7.
+4. Search (0.8 ms). This is the work of sections 5 through 7. When nothing that feeds it has changed since the last complete pass, the whole phase collapses into replaying that pass's output (section 7).
 5. Sort visible voxels (unbudgeted, a linear-time counting sort). Closest-first ordering must exist before ingest so its budget is spent nearest-first.
 6. Ingest (1.2 ms). This stages the priority queue and stamps the visibility clocks that entered-view detection reads.
-7. Sweep for exits (unbudgeted, touches only in-view objects). It runs after ingest so this frame's sightings count before anyone is judged gone.
+7. Sweep for exits (unbudgeted, touches only the objects whose grace deadline came due). It runs after ingest so this frame's sightings count before anyone is judged gone.
 8. Step the render distance controller (cheap). It consumes the durations and skip counts the earlier phases just recorded.
 9. Flush view signals (the cost belongs to your handlers). This comes after all internal iteration is done, so handlers can freely mutate the tracked set. The frame is marked processed just before the flush so a handler that re-enters (like by calling `GetVisibleObjects`) short-circuits instead of recomputing.
 10. Your update loop runs whenever you iterate (0.4 ms, with the p0 overrun rules from section 9).

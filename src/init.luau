@@ -34,13 +34,19 @@ local VoxelGrid = require(script.VoxelGrid)
 
 local tableCreate = table.create
 
--- This is hoisted from Ingest. Priorities below this are p0 (must refresh this
--- frame), and the update iterator keys its overrun budget off the same threshold.
-local P0_THRESHOLD = Ingest.P0_THRESHOLD
+-- This is hoisted from Ingest. Queue bands at or under this are the p0
+-- (must refresh this frame) region, and the update iterator keys its overrun
+-- budget off the same boundary the scoring sliced.
+local P0_BAND_COUNT = Ingest.P0_BAND_COUNT
 -- Objects at p0 (must-refresh) may run the update budget over by this factor so
 -- a frame full of them still mostly keeps up. The strictlyEnforceWorstRefreshRate
 -- flag overrides this with an effectively unbounded budget instead.
 local P0_UPDATE_BUDGET_OVERRUN = 1.15
+-- The update drain checks its clock in planned batches capped at this many
+-- objects (see IterateObjectsToUpdate), so a cheap consumer pays a fraction of
+-- the os.clock calls while an expensive one still gets per-object checks near
+-- the budget.
+local DRAIN_CLOCK_CHECK_MAX_BATCH = 8
 -- The reusable buffers get rebuilt at most once per this many seconds.
 local RESIZE_TABLES_PERIOD = 5
 -- The perf metrics track how many voxels the search and ingest passes skipped
@@ -132,17 +138,16 @@ function CullThrottle._clearVisibleObjects(self: CullThrottle)
 
 	self._search._visibleVoxelCount = 0
 	self._filledVisibleObjectsQueue = false
-	local visibleObjectsQueue = self._ingest._visibleObjectsQueue
-	visibleObjectsQueue:clearIncomingBatch()
-	visibleObjectsQueue:clear()
+	self._ingest:clearStagedObjects()
+	self._ingest._visibleObjectsQueue:clear()
 end
 
 --[[
-	Heapifies the visible objects staged by the ingest passes so
-	IterateObjectsToUpdate can dequeue them in priority order. This happens at
-	most once per processed frame, since the staged batch survives until the
-	next frame and re-enqueueing it would hand a second same-frame iteration
-	every object the first one already updated.
+	Lays the visible objects staged by the ingest passes out in priority-band
+	order so IterateObjectsToUpdate can dequeue them. This happens at most
+	once per processed frame, since the staged batch survives until the next
+	frame and re-enqueueing it would hand a second same-frame iteration every
+	object the first one already updated.
 ]]
 function CullThrottle._fillVisibleObjectsQueue(self: CullThrottle)
 	if self._filledVisibleObjectsQueue then
@@ -151,7 +156,7 @@ function CullThrottle._fillVisibleObjectsQueue(self: CullThrottle)
 	self._filledVisibleObjectsQueue = true
 
 	debug.profilebegin("fillVisibleObjectsQueue")
-	self._ingest._visibleObjectsQueue:enqueueIncomingBatch()
+	self._ingest:enqueueStagedObjects()
 	debug.profileend()
 end
 
@@ -343,12 +348,15 @@ function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	-- Removal never scrubs the staged batch (it just gets rebuilt next frame),
 	-- so an object removed partway through the frame can still be sitting in
 	-- it. The snapshot only includes objects that are still tracked, the same
-	-- defense the update iterator applies when it dequeues.
+	-- defense the update iterator applies as it drains.
 	local objects = self._lifecycle._objects
-	local items = self._ingest._visibleObjectsQueue._incomingBatch.items
-	local visibleObjects = tableCreate(#items)
+	local ingest = self._ingest
+	local stagedObjects = ingest._stagedObjects
+	local stagedSize = ingest._stagedSize
+	local visibleObjects = tableCreate(stagedSize)
 	local count = 0
-	for _, object in items do
+	for i = 1, stagedSize do
+		local object = stagedObjects[i].object
 		if objects[object] then
 			count += 1
 			visibleObjects[count] = object
@@ -368,13 +376,16 @@ end
 function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?, CFrame?)
 	self:_processObjectVisibility(os.clock())
 
-	-- The ingest only staged this frame's objects, so the heapify cost lands
-	-- here and frames where nobody iterates never pay it.
+	-- The ingest only staged this frame's objects, so the band layout cost
+	-- lands here and frames where nobody iterates never pay it.
 	self:_fillVisibleObjectsQueue()
 
 	local updateStartClock = os.clock()
 	local queue = self._ingest._visibleObjectsQueue
-	local objects = self._lifecycle._objects
+	-- The queue hands its drain layout over so the loop below walks plain
+	-- arrays, writing each new cursor position back as it goes (which is
+	-- drainView's contract), instead of paying method calls per object.
+	local items, bands, cursor, size = queue:drainView()
 	local perfMetrics = self._perfMetrics
 	local updateTimeBudget = self._config.updateTimeBudget
 	-- The p0s can go a little over budget.
@@ -383,30 +394,71 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 		then 1
 		else updateTimeBudget * P0_UPDATE_BUDGET_OVERRUN
 
+	-- An os.clock call per drained object is measurable at queue scale, so the
+	-- budget check runs in planned batches instead. Each check sizes the next
+	-- batch to cover about half the remaining budget at the average per-object
+	-- pace so far, capped at a few objects. The plan starts at one object
+	-- while the pace is unknown, grows toward the cap for cheap consumers, and
+	-- collapses back to per-object checks as the budget nears, so the overrun
+	-- past the old per-object precision stays around half of whatever budget
+	-- remained. Because the layout is band ordered, the p0 region is a strict
+	-- prefix, and the first object past that prefix forces a check so the drop
+	-- from the raised p0 allowance to the plain budget never rides on a stale
+	-- plan.
+	local drainStartCursor = cursor
+	local objectsUntilClockCheck = 0
+	local inP0Prefix = true
+
 	return function()
-		while not queue:isEmpty() do
-			local topPriority = queue:peekPriority()
-			local budget = if topPriority and topPriority < P0_THRESHOLD then p0UpdateTimeBudget else updateTimeBudget
-			if os.clock() - updateStartClock >= budget then
-				-- We're out of time and can't update the rest this frame.
-				-- That's okay, they'll be higher priority next time.
+		while cursor < size do
+			cursor += 1
+			queue._cursor = cursor
+			local objectData = items[cursor]
 
-				-- Just in case the user iterates multiple times in a single frame,
-				-- let's clear out the leftovers so they don't spill into the second iter.
-				queue:clear()
-
-				return nil
+			local leftP0Prefix = false
+			if inP0Prefix and bands[cursor] > P0_BAND_COUNT then
+				inP0Prefix = false
+				leftP0Prefix = true
 			end
 
-			local object = queue:dequeue()
-			if not object then
-				return nil
-			end
+			if leftP0Prefix or objectsUntilClockCheck <= 0 then
+				-- When the budget turns out to be spent, the object at the
+				-- cursor needs no special handling because the clear below
+				-- was about to drop it along with everything else.
+				local budget = if inP0Prefix then p0UpdateTimeBudget else updateTimeBudget
+				local elapsed = os.clock() - updateStartClock
+				if elapsed >= budget then
+					-- We're out of time and can't update the rest this frame.
+					-- That's okay, they'll be higher priority next time.
 
-			local objectData = objects[object]
-			if not objectData then
+					-- Just in case the user iterates multiple times in a single frame,
+					-- let's clear out the leftovers so they don't spill into the second iter.
+					queue:clear()
+					size = 0
+
+					return nil
+				end
+
+				local walked = cursor - drainStartCursor
+				if walked > 1 and elapsed > 0 then
+					local pace = elapsed / (walked - 1)
+					local batch = (budget - elapsed) / (2 * pace)
+					objectsUntilClockCheck = if batch >= DRAIN_CLOCK_CHECK_MAX_BATCH
+						then DRAIN_CLOCK_CHECK_MAX_BATCH
+						else batch // 1
+				else
+					objectsUntilClockCheck = 1
+				end
+			end
+			objectsUntilClockCheck -= 1
+
+			if objectData.lastVisibleClock == 0 then
 				-- The object was removed while still queued, since removal doesn't
-				-- scrub this queue. Skip the stale entry and keep iterating.
+				-- scrub this queue. Removal always zeroes lastVisibleClock through
+				-- the signals' forget, nothing else can zero it between staging
+				-- and this drain, and a re-added object gets a fresh record, so a
+				-- zero here can only mean this record is stale. Skip it and keep
+				-- iterating.
 				continue
 			end
 
@@ -421,7 +473,7 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 				perfMetrics._updatedObjectCount += 1
 			end
 
-			return object, objectDeltaTime, objectData.distance, objectData.cframe
+			return objectData.object, objectDeltaTime, objectData.distance, objectData.cframe
 		end
 		return nil
 	end

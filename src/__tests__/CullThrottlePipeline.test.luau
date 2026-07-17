@@ -107,13 +107,12 @@ describe("CullThrottle frame pipeline", function()
 			cullThrottle:_processObjectVisibility(now + 0.05)
 			expect(exitedCount).toBe(0)
 
-			-- Backdating the last-seen stamp far past any plausible grace period
-			-- forces the sweep to give up on the part this frame, which pins the
-			-- pipeline wiring without coupling to the grace constant. The exact
-			-- constant is pinned in the VisibilitySignals suite.
-			objectData.lastVisibleClock = now - 1000
+			-- A frame processed a full second later sits far past any plausible
+			-- grace period, so the sweep gives up on the part and buffers the
+			-- exit for the end-of-frame flush. The exact grace constant is
+			-- pinned in the VisibilitySignals suite.
 			cullThrottle._processedVisibilityThisFrame = false
-			cullThrottle:_processObjectVisibility(now + 0.1)
+			cullThrottle:_processObjectVisibility(now + 1)
 			expect(exitedCount).toBe(1)
 			expect(enteredCount).toBe(1)
 
@@ -453,15 +452,15 @@ describe("CullThrottle frame pipeline", function()
 			signals._pendingExitedView[signals._pendingExitedViewSize + 1] = part
 			signals._pendingExitedViewSize += 1
 
-			expect(signals._objectsInViewSize).toBe(1)
+			expect(signals._inViewCount).toBe(1)
 			expect(signals._pendingEnteredViewSize).toBe(1)
 
 			cullThrottle:Destroy()
 
 			expect(next(visibilityCache._voxelProofs)).toBeNil()
 			expect(next(visibilityCache._bucketVerdicts)).toBeNil()
-			expect(signals._objectsInViewSize).toBe(0)
-			expect(next(signals._objectsInView)).toBeNil()
+			expect(signals._inViewCount).toBe(0)
+			expect(next(signals._exitSweepBuckets)).toBeNil()
 			expect(signals._pendingEnteredViewSize).toBe(0)
 			expect(next(signals._pendingEnteredView)).toBeNil()
 			expect(signals._pendingExitedViewSize).toBe(0)

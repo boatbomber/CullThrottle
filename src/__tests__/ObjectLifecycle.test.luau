@@ -87,8 +87,8 @@ describe("ObjectLifecycle", function()
 			expect(cullThrottle._lifecycle._objects).toEqual({})
 			expect(cullThrottle._grid._voxels).toEqual({})
 			expect(cullThrottle._lifecycle._physicsObjects).toEqual({})
-			expect(next(cullThrottle._signals._objectsInView)).toBeNil()
-			expect(cullThrottle._signals._objectsInViewSize).toBe(0)
+			expect(next(cullThrottle._signals._exitSweepBuckets)).toBeNil()
+			expect(cullThrottle._signals._inViewCount).toBe(0)
 
 			part:Destroy()
 			physicsPart:Destroy()
@@ -922,7 +922,7 @@ describe("ObjectLifecycle", function()
 			-- The in-view entry must be removed so the next pass doesn't see a
 			-- stale "was visible last frame, gone this frame" entry and fire a stray
 			-- ObjectExitedView for an object we've already removed.
-			expect(cullThrottle._signals._objectsInViewSize).toBe(0)
+			expect(cullThrottle._signals._inViewCount).toBe(0)
 
 			local exited = false
 			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
@@ -948,13 +948,14 @@ describe("ObjectLifecycle", function()
 				markInView(cullThrottle, parts[i], now)
 			end
 
-			-- Removing the first in-view object swap-moves the last entry into its
-			-- slot, and then that moved entry is removed too. Only the middle object
-			-- is left, which the exit sweep below proves by reporting exactly it.
+			-- All three share one due bucket. Removing the first swap-moves the
+			-- last entry into its slot, and then that moved entry is removed too.
+			-- Only the middle object is left, which the exit sweep below proves
+			-- by reporting exactly it.
 			cullThrottle:RemoveObject(parts[1])
 			cullThrottle:RemoveObject(parts[3])
 
-			expect(cullThrottle._signals._objectsInViewSize).toBe(1)
+			expect(cullThrottle._signals._inViewCount).toBe(1)
 
 			local exited = {}
 			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)

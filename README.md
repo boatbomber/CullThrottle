@@ -178,7 +178,7 @@ Removes all objects with the given tag from CullThrottle's tracking.
 CullThrottle:IterateObjectsToUpdate(): () -> (Instance?, number?, number?, CFrame?)
 ```
 
-Returns an iterator over this frame's visible objects in update-priority order. Each iteration yields the object, the time in seconds since that particular object's last update (which is what your effect should advance by), the object's distance from the camera, and the object's CFrame. The distance and CFrame are values CullThrottle already computed this frame, handed over so you don't pay to read them again.
+Returns an iterator over this frame's visible objects in update-priority order. The order is banded rather than exact, so objects with nearly identical priorities may come out in either order, while any meaningful priority difference is respected. Each iteration yields the object, the time in seconds since that particular object's last update (which is what your effect should advance by), the object's distance from the camera, and the object's CFrame. The distance and CFrame are values CullThrottle already computed this frame, handed over so you don't pay to read them again.
 
 ```Luau
 RunService.Heartbeat:Connect(function()

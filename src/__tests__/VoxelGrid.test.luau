@@ -140,6 +140,36 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
+		it("moves the occupancy generation exactly when the occupied key set changes", function()
+			local grid = cullThrottle._grid
+			local voxelKey = Vector3.new(1, 1, 1)
+			local partA = createMockPart()
+			local partB = createMockPart()
+			local dataA = stubObjectData(partA)
+			local dataB = stubObjectData(partB)
+
+			-- Creating the voxel changes the occupied key set.
+			local generation = grid._occupancyGeneration
+			grid:insertToVoxel(voxelKey, dataA)
+			expect(grid._occupancyGeneration).toBe(generation + 1)
+
+			-- A second object in the same voxel doesn't, and neither does
+			-- removing it while the voxel stays occupied, so a still frame
+			-- with objects churning inside their cells can keep replaying.
+			generation = grid._occupancyGeneration
+			grid:insertToVoxel(voxelKey, dataB)
+			expect(grid._occupancyGeneration).toBe(generation)
+			grid:removeFromVoxel(voxelKey, dataB)
+			expect(grid._occupancyGeneration).toBe(generation)
+
+			-- Emptying the voxel changes the set again.
+			grid:removeFromVoxel(voxelKey, dataA)
+			expect(grid._occupancyGeneration).toBe(generation + 1)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
 		it("should clear cached voxel visibility when a voxel empties", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()

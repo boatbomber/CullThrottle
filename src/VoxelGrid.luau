@@ -53,6 +53,11 @@ type VoxelGridProto = {
 	_coarseMaxX: number,
 	_coarseMaxY: number,
 	_coarseMaxZ: number,
+	-- This counts every change to the set of occupied voxel keys, meaning a
+	-- voxel created or emptied, plus the wholesale clears. The search's
+	-- whole-frame replay compares it across frames, because with the camera
+	-- holding still the visible voxel set can only change through this set.
+	_occupancyGeneration: number,
 	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue<Instance>,
 }
 
@@ -80,6 +85,7 @@ function VoxelGrid.new(
 		_coarseMaxX = 0,
 		_coarseMaxY = 0,
 		_coarseMaxZ = 0,
+		_occupancyGeneration = 0,
 		_updateObjectVoxelsQueue = PriorityQueue.new(),
 	}, VoxelGrid)
 
@@ -293,12 +299,14 @@ end
 --[[
 	Adds one object to a voxel's list, creating the voxel when it was empty (and
 	registering the fresh voxel in its coarse bucket, growing the occupied
-	bounding box as needed).
+	bounding box as needed). A fresh voxel changes the occupied key set, so the
+	occupancy generation moves with it.
 ]]
 function VoxelGrid.insertToVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, objectData: types.ObjectData)
 	local voxel = self._voxels[voxelKey]
 	if not voxel then
 		self._voxels[voxelKey] = { objectData }
+		self._occupancyGeneration += 1
 
 		-- This voxel just became occupied, so add it to its coarse bucket.
 		local coarseX = voxelKey.X // COARSE_VOXEL_SIZE
@@ -346,7 +354,8 @@ end
 	Removes one object from a voxel's list with an unordered swap-remove. An
 	emptied voxel is deleted along with its cached proof, and an emptied coarse
 	bucket is dropped along with its cached verdict, dirtying the occupied
-	bounding box when the bucket sat on its surface.
+	bounding box when the bucket sat on its surface. An emptied voxel changes
+	the occupied key set, so the occupancy generation moves with it.
 ]]
 function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, objectData: types.ObjectData)
 	local voxel = self._voxels[voxelKey]
@@ -362,6 +371,7 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 	local n = #voxel
 	if n == 1 then
 		self._voxels[voxelKey] = nil
+		self._occupancyGeneration += 1
 		self._visibilityCache._voxelProofs[voxelKey] = nil
 
 		-- This voxel is no longer occupied, so remove it from its coarse bucket.
@@ -494,6 +504,7 @@ function VoxelGrid.clearAll(self: VoxelGrid)
 	self._coarseVoxels = {}
 	self._coarseBucketCount = 0
 	self._coarseBoundsDirty = false
+	self._occupancyGeneration += 1
 
 	for _, objectData in self._objects do
 		tableClear(objectData.voxelKeys)
@@ -509,6 +520,7 @@ function VoxelGrid.destroy(self: VoxelGrid)
 	tableClear(self._coarseVoxels)
 	self._coarseBucketCount = 0
 	self._coarseBoundsDirty = false
+	self._occupancyGeneration += 1
 	self._updateObjectVoxelsQueue:clearIncomingBatch()
 	self._updateObjectVoxelsQueue:clear()
 end

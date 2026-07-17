@@ -191,7 +191,7 @@ describe("CullThrottle queries", function()
 			cullThrottle:SetTimeBudgets(1, 1, 1)
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			-- Creating the iterator heapifies the queue with all three parts, so
+			-- Creating the iterator lays the queue out with all three parts, so
 			-- removing the nearest one afterward leaves its stale entry at the
 			-- front of the queue. The iterator must skip past it and still yield
 			-- the other two.
@@ -432,7 +432,7 @@ describe("CullThrottle queries", function()
 			end
 		end)
 
-		it("holds a priority exactly at the p0 threshold to the plain update budget", function()
+		it("holds the first band past the p0 region to the plain update budget", function()
 			-- The part sits far beyond render distance so the real passes are
 			-- guaranteed to cull it, leaving the queue holding exactly the
 			-- handpicked entry below.
@@ -446,12 +446,21 @@ describe("CullThrottle queries", function()
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			-- The queue is staged directly with a handpicked priority because the
-			-- boundary matters here. The iterator's overrun comparison is strict,
-			-- so a priority exactly at the threshold takes the plain (zero)
-			-- budget, and the edge is reachable since an overdue object with zero
-			-- screen size prices at exactly the threshold.
-			cullThrottle._ingest._visibleObjectsQueue:addToIncomingBatch(part, Ingest.P0_THRESHOLD)
+			-- The batch is staged directly with a handpicked band because the
+			-- boundary matters here. The p0 overrun applies to bands up to and
+			-- including the p0 region's last, so the first band past it takes
+			-- the plain (zero) budget, and that edge is reachable since an
+			-- overdue object with zero screen size prices at exactly the p0
+			-- threshold and bands just past the region. Hand staging also has
+			-- to stamp the record visible the way ingest would, since the
+			-- iterator reads a zeroed visibility stamp as a removed object.
+			local objectData = cullThrottle._lifecycle._objects[part]
+			cullThrottle._signals:markVisible(objectData, os.clock())
+			local ingest = cullThrottle._ingest
+			local stagedSize = ingest._stagedSize + 1
+			ingest._stagedSize = stagedSize
+			ingest._stagedObjects[stagedSize] = objectData
+			ingest._stagedBands[stagedSize] = Ingest.P0_BAND_COUNT + 1
 
 			local count = 0
 			for _ in cullThrottle:IterateObjectsToUpdate() do
@@ -463,7 +472,7 @@ describe("CullThrottle queries", function()
 			part:Destroy()
 		end)
 
-		it("grants the raised p0 budget to a priority strictly under the threshold", function()
+		it("grants the raised p0 budget to the p0 region's last band", function()
 			-- Like the exactly-at case, the part sits beyond render distance so
 			-- only the handpicked entry reaches the queue.
 			local camera = workspace.CurrentCamera
@@ -474,10 +483,18 @@ describe("CullThrottle queries", function()
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			-- This priority sits a hair under the threshold, so unlike the
-			-- exactly-at case it counts as p0 and gets the raised budget, which
-			-- is what lets it come out despite the plain budget being zero.
-			cullThrottle._ingest._visibleObjectsQueue:addToIncomingBatch(part, Ingest.P0_THRESHOLD - 0.01)
+			-- This band is the last one inside the p0 region, so unlike the
+			-- just-past case it counts as p0 and gets the raised budget, which
+			-- is what lets it come out despite the plain budget being zero. Like
+			-- the just-past case, hand staging stamps the record visible the way
+			-- ingest would.
+			local objectData = cullThrottle._lifecycle._objects[part]
+			cullThrottle._signals:markVisible(objectData, os.clock())
+			local ingest = cullThrottle._ingest
+			local stagedSize = ingest._stagedSize + 1
+			ingest._stagedSize = stagedSize
+			ingest._stagedObjects[stagedSize] = objectData
+			ingest._stagedBands[stagedSize] = Ingest.P0_BAND_COUNT
 
 			local yielded = {}
 			for object in cullThrottle:IterateObjectsToUpdate() do

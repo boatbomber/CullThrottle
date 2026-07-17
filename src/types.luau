@@ -29,9 +29,10 @@ export type BucketVerdict = {
 }
 
 export type ObjectData = {
-	-- This is a backref to the tracked instance. Voxels store ObjectData directly
-	-- so the ingest loops never pay an Instance-keyed objects-map lookup. Signals
-	-- and the visible-objects queue hand out the Instance through this field.
+	-- This is a backref to the tracked instance. Voxels and the visible-objects
+	-- queue store ObjectData directly so neither the ingest loops nor the update
+	-- iterator pay an Instance-keyed objects-map lookup, and signals and the
+	-- iterator hand out the Instance through this field.
 	object: Instance,
 	cframe: CFrame,
 	position: Vector3,
@@ -50,10 +51,12 @@ export type ObjectData = {
 	-- enter event, and it only returns to zero when the exit sweep gives up on
 	-- the object after the signal grace period (or when it is removed).
 	lastVisibleClock: number,
-	-- This is the object's slot in the signals' in-view array, or zero while it
-	-- is out of view. Every swap-remove keeps it current so removal can clear
-	-- the entry directly instead of scanning the array for it.
-	inViewIndex: number,
+	-- These locate the object's entry in the signals' exit sweep due buckets
+	-- (which bucket it is scheduled in and its slot there), or zero while it is
+	-- out of view. Every reschedule and swap-remove keeps them current so
+	-- removal can clear the entry directly instead of scanning for it.
+	exitSweepBucketIndex: number,
+	exitSweepSlot: number,
 	-- This is the object's slot in the lifecycle's physics poll list, or zero
 	-- when the object isn't physics-driven. It doubles as the duplicate
 	-- registration guard and the direct removal handle.
