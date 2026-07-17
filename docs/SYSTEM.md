@@ -154,7 +154,6 @@ The second layer subdivides the straddling volumes. Volumes are popped from the 
 
 This recursive split in the straddling case stays cheap through proof inheritance. Each child only re-tests the planes its parent straddled. If the parent cleared a plane entirely, the child must too and skips it. The child also inherits the tightest slack any ancestor proved, so proofs stamped deep in the tree have their clearance correctly bounded by every plane without re-testing any of them.
 
-
 ```txt
 a search volume's keys live in one shared buffer slice:
 
