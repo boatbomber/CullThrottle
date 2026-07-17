@@ -203,9 +203,9 @@ Occlusion has no budget of its own. The umbra tests run inside the search time b
 
 The search has now produced our visible voxels. Inside them might be thousands of objects, and the consumer can update a few hundred per frame. Which objects should they update?
 
-Before any object is touched, the visible voxels are sorted closest-first by Manhattan distance in voxel units. The distances are small non-negative integers, so a counting sort does it in linear time. This ordering is the ingest pass's safety net: whatever happens with its budget, the time goes to the nearest voxels first.
+Before scoring begins, the visible voxels are sorted closest-first by Manhattan distance in voxel units. This ordering ensures the budget is spent on the nearest voxels first.
 
-Then CullThrottle walks the voxels and scores every object inside. An object spanning several visible voxels is scored only once per frame (a check stamp dedupes it). The score blends three terms, weighted heuristically by how much each tends to matter. Screen size carries a weight of 85, since the larger an object looms on screen (its radius over its distance), the more it contributes visually, so it should refresh fastest. Refresh urgency carries a weight of 13 and measures how close the object is to its worst allowed refresh period, dragging everything toward a fair share so small objects don't starve entirely. Distance carries a weight of 2, a light thumb on the scale to prefer nearer objects when screen sizes are similar, since near objects are likelier to be what the player is looking at.
+Then CullThrottle walks those voxels and scores every object inside. An object is only checked once per frame, even if it spans several visible voxels. The score blends three terms with heuristic weighting. Screen size carries the largest weight so objects that contribute the most visually will refresh fastest. Refresh urgency is weighted second. This measures how close the object is to its worst allowed refresh period and progressively boosts the priority of neglected objects so low-priority objects wstill get regular updates. Distance carries a tiny weight, creating a slight preferance for nearer objects to tie-break identical screen sizes.
 
 Three conditions overrule the blended score, checked in this order:
 
