@@ -48,7 +48,7 @@ for _ = 1, 20 do
 	occluder.CanCollide = false
 	occluder.Color = Color3.new(0, 0, 0)
 	occluder.Transparency = 0.3
-	occluder.Size = Vector3.new(math.random(5, 50), math.random(100, 200), math.random(300, 500))
+	occluder.Size = Vector3.new(math.random(1, 100), math.random(300, 700), math.random(300, 700))
 	occluder.CFrame = CFrame.lookAlong(
 		Vector3.new(math.random(-1000, 1000), math.random(-500, 500), math.random(-1000, 1000)),
 		Vector3.new(math.random(-100, 100) / 100, math.random(-100, 100) / 100, math.random(-100, 100) / 100)
