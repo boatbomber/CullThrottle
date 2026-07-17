@@ -32,6 +32,13 @@ local ACCUM_ROTATION_FLUSH_LIMIT = 64 -- This one is in radians.
 local CameraMotion = {}
 CameraMotion.__index = CameraMotion
 
+-- The flush limits are precision-guard tunables whose values pair with the
+-- SLACK_SAFETY shave (docs/MATH.md section 10), so they're exported for the
+-- tests that drive flushes and pin that relationship, keeping the literals
+-- out of the test bodies.
+CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT = ACCUM_TRANSLATION_FLUSH_LIMIT
+CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT = ACCUM_ROTATION_FLUSH_LIMIT
+
 type CameraMotionProto = {
 	_config: Config.Config,
 	_visibilityCache: VisibilityCache.VisibilityCache,

@@ -45,7 +45,9 @@ local VisibilityCache = require(script.Parent.VisibilityCache)
 local CameraCache = require(script.Parent.Utilities.CameraCache)
 local Gizmo = if _G.__DEV__ then require(script.Parent.Utilities.Gizmo) else nil :: any
 
+local vectorDot = (vector.dot :: any) :: (Vector3 | vector, Vector3 | vector) -> number
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
+local vectorAbs = (vector.abs :: any) :: (Vector3 | vector) -> Vector3
 local tableCreate = table.create
 local tableMove = table.move
 local tableClear = table.clear
@@ -69,6 +71,9 @@ local VOXEL_HALF_DIAGONAL = math.sqrt(3) / 2
 local BUCKET_HALF_DIAGONAL = VoxelGrid.COARSE_VOXEL_SIZE * math.sqrt(3) / 2
 -- Recenters an integer voxel key onto its cell center.
 local VOXEL_CENTER_OFFSET = Vector3.new(0.5, 0.5, 0.5)
+-- Dotting a componentwise absolute value against this sums its three lanes,
+-- which is how the voxel sort gets a manhattan distance in two vector ops.
+local VECTOR_ONE = Vector3.one
 -- The proof walk over a volume's voxels re-tests expired voxels cell by cell
 -- while they stay rare, so scattered expiries cost a few cell tests instead of
 -- re-subdividing the volume. Once unproven voxels outnumber proven ones by
@@ -98,6 +103,12 @@ local COARSE_VOXEL_SIZE = VoxelGrid.COARSE_VOXEL_SIZE
 local VisibilitySearch = {}
 VisibilitySearch.__index = VisibilitySearch
 
+-- The slack cap and shave are documented spec (docs/MATH.md section 10), so
+-- they're exported for the tests that pin the documented values and the
+-- float-safety relationship between the shave and the odometer flush limits.
+VisibilitySearch.SLACK_CAP = SLACK_CAP
+VisibilitySearch.SLACK_SAFETY = SLACK_SAFETY
+
 type VisibilitySearchProto = {
 	_config: Config.Config,
 	_grid: VoxelGrid.VoxelGrid,
@@ -116,6 +127,8 @@ type VisibilitySearchProto = {
 	_visibleVoxelCount: number,
 	_pendingVoxelKeys: { types.VoxelKey },
 	_pendingVoxelDistances: { number },
+	-- This is the counting sort's tally scratch, keyed by manhattan distance.
+	_voxelDistanceCounts: { number },
 
 	-- These record the state the last complete pass ran against, so run can
 	-- hand back that pass's output while every watched input is bit-identical.
@@ -160,6 +173,7 @@ function VisibilitySearch.new(
 		_visibleVoxelCount = 0,
 		_pendingVoxelKeys = {},
 		_pendingVoxelDistances = {},
+		_voxelDistanceCounts = {},
 		_replayReady = false,
 		_replayAccumT = 0,
 		_replayAccumR = 0,
@@ -208,7 +222,7 @@ end
 
 --[[
 	Accumulates visible voxels unsorted (an O(1) append).
-	Ingest:sortVisibleVoxelKeys orders the whole batch closest-first once the search finishes.
+	sortVisibleVoxelKeys orders the whole batch closest-first once the search finishes.
 
 	We don't dedupe because the search volumes partition space, so a voxel is only
 	ever added once per frame, and any object that spans several voxels is deduped
@@ -218,6 +232,16 @@ function VisibilitySearch.addVoxelKeyToVisible(self: VisibilitySearch, voxelKey:
 	local count = self._visibleVoxelCount + 1
 	self._visibleVoxelCount = count
 	self._pendingVoxelKeys[count] = voxelKey
+end
+
+--[[
+	Resets the visible-voxel accumulator for a fresh frame. Resetting the
+	count is enough because the search overwrites slots 1..count from the
+	start each frame, so any stale trailing entries in the reused buffers are
+	never read.
+]]
+function VisibilitySearch.clearVisibleVoxels(self: VisibilitySearch)
+	self._visibleVoxelCount = 0
 end
 
 --[[
@@ -552,6 +576,29 @@ local function shaveProofSlack(slack: number): number
 end
 
 --[[
+	Packs one visible frustum voxel proof. X holds the visible expiry, the Y
+	component of -1 marks the culled verdict the record doesn't carry, and Z
+	holds the arm factor rotation charges at. The decode side is inlined at
+	the proof checks in searchSingleVoxel and the volume proof walk, plus the
+	budget fallback's visible re-mark, which must all read this layout
+	identically alongside the culled form below.
+]]
+local function packVisibleVoxelProof(expiry: number, armFactor: number): Vector3
+	return Vector3.new(expiry, -1, armFactor)
+end
+
+--[[
+	Packs one culled frustum voxel proof, the mirror of packVisibleVoxelProof
+	with the X component of -1 marking the visible verdict the record doesn't
+	carry and Y holding the culled expiry. Overwriting a record with this form
+	also drops any stale visible expiry, so the budget fallback can't
+	resurrect it.
+]]
+local function packCulledVoxelProof(expiry: number, armFactor: number): Vector3
+	return Vector3.new(-1, expiry, armFactor)
+end
+
+--[[
 	Resolves one voxel's visibility. It trusts a still-valid proof of either
 	verdict, and otherwise frustum-tests its cell and stamps the fresh proof.
 	Split children that land on a single voxel come here directly instead of
@@ -596,12 +643,10 @@ function VisibilitySearch.searchSingleVoxel(
 		local armBase = vectorMagnitude(voxelKey + VOXEL_CENTER_OFFSET - frustumPlanes[1]) + VOXEL_HALF_DIAGONAL
 
 		if not isInside then
-			-- Stamp the culled proof with the rejection margin. Overwriting the
-			-- record also drops any stale visible expiry, so the budget
-			-- fallback can't resurrect it.
+			-- Stamp the culled proof with the rejection margin.
 			local shaved = shaveProofSlack(boxSlack)
 			local armFactor = armBase + shaved
-			voxelProofs[voxelKey] = Vector3.new(-1, accumTF + accumR * armFactor + shaved, armFactor)
+			voxelProofs[voxelKey] = packCulledVoxelProof(accumTF + accumR * armFactor + shaved, armFactor)
 			return
 		end
 
@@ -615,7 +660,7 @@ function VisibilitySearch.searchSingleVoxel(
 		end
 		local shaved = shaveProofSlack(slack)
 		local armFactor = armBase + shaved
-		voxelProofs[voxelKey] = Vector3.new(accumTF + accumR * armFactor + shaved, -1, armFactor)
+		voxelProofs[voxelKey] = packVisibleVoxelProof(accumTF + accumR * armFactor + shaved, armFactor)
 	end
 
 	-- This voxel is visible, either from a still-valid proof or fresh verification.
@@ -757,16 +802,14 @@ function VisibilitySearch.searchVolume(
 	if not isInside then
 		-- Every voxel inherits the box's rejection margin (each sits at least as
 		-- far outside the rejecting plane as the box does), so stamp them all
-		-- provably culled, each charged at its own arm. Overwriting the records
-		-- also drops any stale visible expiries, so the budget fallback can't
-		-- resurrect them.
+		-- culled, each charged at its own arm.
 		debug.profilebegin("stampBoxCulled")
 		local shaved = shaveProofSlack(boxSlack)
 		local centerOffset = VOXEL_CENTER_OFFSET - frustumPlanes[1]
 		for i = lo, hi do
 			local voxelKey = searchVoxelKeys[i]
 			local armFactor = vectorMagnitude(voxelKey + centerOffset) + VOXEL_HALF_DIAGONAL + shaved
-			voxelProofs[voxelKey] = Vector3.new(-1, accumTF + accumR * armFactor + shaved, armFactor)
+			voxelProofs[voxelKey] = packCulledVoxelProof(accumTF + accumR * armFactor + shaved, armFactor)
 		end
 		debug.profileend()
 		return
@@ -789,7 +832,7 @@ function VisibilitySearch.searchVolume(
 		for i = lo, hi do
 			local voxelKey = searchVoxelKeys[i]
 			local armFactor = vectorMagnitude(voxelKey + centerOffset) + VOXEL_HALF_DIAGONAL + shaved
-			voxelProofs[voxelKey] = Vector3.new(accumTF + accumR * armFactor + shaved, -1, armFactor)
+			voxelProofs[voxelKey] = packVisibleVoxelProof(accumTF + accumR * armFactor + shaved, armFactor)
 			count += 1
 			pendingVoxelKeys[count] = voxelKey
 		end
@@ -927,17 +970,19 @@ end
 	buckets, rotates which bucket volume gets the front of the budget, then
 	subdivides within the search time budget, falling back to cached verdicts
 	for whatever the budget can't reach. The visible set this accumulates is
-	unsorted, and Ingest:sortVisibleVoxelKeys orders it afterward.
+	unsorted, and sortVisibleVoxelKeys orders it afterward.
 
 	Before any of that, the replay gate checks whether every input the pass
 	reads is bit-identical to the last complete pass. When it is, re-running
 	could only reproduce that pass's output, so run restores its visible count
-	instead (the pending keys still sit in their slots) and returns. A pass
-	that drains its whole stack re-anchors the gate, and one the budget
-	truncated disarms it, since its output leaned on the stale-verdict
-	fallback rather than the watched inputs alone.
+	instead (the pending keys still sit in their slots) and returns true, which
+	tells the facade the sorted voxel order from the anchor pass still stands
+	and the re-sort can be skipped too. A pass that drains its whole stack
+	re-anchors the gate, and one the budget truncated disarms it, since its
+	output leaned on the stale-verdict fallback rather than the watched inputs
+	alone.
 ]]
-function VisibilitySearch.run(self: VisibilitySearch, now: number)
+function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 	local motion = self._motion
 	local grid = self._grid
 	local perfMetrics = self._perfMetrics
@@ -963,7 +1008,7 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number)
 		-- them, unaged because the odometers never moved.
 		self._visibleVoxelCount = self._replayVisibleVoxelCount
 		perfMetrics._searchDuration = os.clock() - now
-		return
+		return true
 	end
 
 	local config = self._config
@@ -1063,6 +1108,71 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number)
 
 	perfMetrics._searchDuration = os.clock() - now
 	debug.profileend()
+	return false
+end
+
+--[[
+	Orders this frame's visible voxels closest-first by manhattan distance to
+	the camera (in voxel space). The ingest passes rely on that order. Nearer
+	voxels get precise ingestion, and once the budget runs out the fast
+	approximate pass uses the index as a coarse priority. The ordering is only
+	a soft heuristic (manhattan distance is itself an approximation).
+
+	Distances are small non-negative integers, so a counting sort orders them
+	in O(n + maxDistance) with no element shuffling, and cameraVoxelKey is
+	computed just once for the whole batch.
+]]
+function VisibilitySearch.sortVisibleVoxelKeys(self: VisibilitySearch)
+	local count = self._visibleVoxelCount
+	local pendingVoxelKeys = self._pendingVoxelKeys
+	local visibleVoxelKeys = self._visibleVoxelKeys
+
+	if count == 0 then
+		return
+	elseif count == 1 then
+		visibleVoxelKeys[1] = pendingVoxelKeys[1]
+		return
+	end
+
+	local cameraVoxelKey = CameraCache.Position // self._config.voxelSize
+	local distances = self._pendingVoxelDistances
+	local counts = self._voxelDistanceCounts
+
+	-- Compute the manhattan distance for every pending voxel, plus the max (the bucket range).
+	local maxDistance = 0
+	for i = 1, count do
+		local distance = vectorDot(vectorAbs(pendingVoxelKeys[i] - cameraVoxelKey), VECTOR_ONE)
+		distances[i] = distance
+		if distance > maxDistance then
+			maxDistance = distance
+		end
+	end
+
+	-- Tally how many voxels land in each distance bucket.
+	for distance = 0, maxDistance do
+		counts[distance] = 0
+	end
+	for i = 1, count do
+		local distance = distances[i]
+		counts[distance] += 1
+	end
+
+	-- Turn the tallies into each bucket's starting output slot (prefix sum).
+	local slot = 1
+	for distance = 0, maxDistance do
+		local bucketCount = counts[distance]
+		counts[distance] = slot
+		slot += bucketCount
+	end
+
+	-- Scatter each voxel into its sorted slot.
+	-- Walking the source in order keeps voxels at equal distance in their original (stable) order.
+	for i = 1, count do
+		local distance = distances[i]
+		local outputIndex = counts[distance]
+		counts[distance] = outputIndex + 1
+		visibleVoxelKeys[outputIndex] = pendingVoxelKeys[i]
+	end
 end
 
 --[[
@@ -1118,6 +1228,7 @@ function VisibilitySearch.destroy(self: VisibilitySearch)
 	self._visibleVoxelCount = 0
 	tableClear(self._pendingVoxelKeys)
 	tableClear(self._pendingVoxelDistances)
+	tableClear(self._voxelDistanceCounts)
 	tableClear(self._volumesToCheck)
 	self._volumesToCheckSize = 0
 	-- The replayable output lived in the buffers just cleared.

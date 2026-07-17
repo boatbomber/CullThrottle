@@ -41,11 +41,11 @@ describe("CameraCache", function()
 	end)
 
 	describe("computeAspectRatio", function()
-		it("should return width over height for a normal viewport", function()
+		it("returns width over height for a normal viewport", function()
 			expect(CameraCache.computeAspectRatio(Vector2.new(1920, 1080))).toBeCloseTo(1920 / 1080)
 		end)
 
-		it("should not divide by zero for a zero-height viewport", function()
+		it("returns zero for a zero-height viewport", function()
 			-- This must be finite (0) and never inf/NaN, or it would poison the frustum bounds.
 			expect(CameraCache.computeAspectRatio(Vector2.new(800, 0))).toBe(0)
 		end)
@@ -69,6 +69,30 @@ describe("CameraCache", function()
 		end)
 	end)
 
+	describe("fovChanged", function()
+		it("caches the sine and cosine of both half angles", function()
+			local camera = makeCamera()
+			camera.MaxAxisFieldOfView = 70
+			CameraCache.init(camera)
+
+			-- The viewport is read-only in a headless run, so stage the 16:9
+			-- aspect ratio directly and drive the recompute. With a max-axis
+			-- FoV of 70 the horizontal half angle is exactly 35 degrees, and
+			-- the vertical half angle has tangent tan(35 degrees) * 9/16 =
+			-- 0.3938667. The four constants below are hand-derived from those
+			-- angles using sin = t / sqrt(1 + t^2) and cos = 1 / sqrt(1 + t^2),
+			-- so a swapped axis or a sin standing in for a cos can't slip
+			-- through by mirroring the implementation's own fields.
+			CameraCache.AspectRatio = 1920 / 1080
+			CameraCache.fovChanged()
+
+			expect(CameraCache.SinHalfHorizontalFOV).toBeCloseTo(0.5735764, 6)
+			expect(CameraCache.CosHalfHorizontalFOV).toBeCloseTo(0.8191520, 6)
+			expect(CameraCache.SinHalfVerticalFOV).toBeCloseTo(0.3664660, 6)
+			expect(CameraCache.CosHalfVerticalFOV).toBeCloseTo(0.9304314, 6)
+		end)
+	end)
+
 	describe("init", function()
 		it("bumps the generation without erroring when there is no camera", function()
 			local generationBefore = CameraCache.Generation
@@ -81,7 +105,7 @@ describe("CameraCache", function()
 			expect(CameraCache.Generation).toBeGreaterThan(generationBefore)
 		end)
 
-		it("should populate cached properties from a camera", function()
+		it("populates the cache from the live CurrentCamera", function()
 			CameraCache.init(workspace.CurrentCamera)
 
 			local camera = workspace.CurrentCamera
@@ -95,7 +119,7 @@ describe("CameraCache", function()
 			expect(CameraCache.AspectRatio).toBeCloseTo(viewport.X / viewport.Y)
 		end)
 
-		it("caches values that match the source camera", function()
+		it("caches staged values from a fabricated camera", function()
 			local camera = makeCamera()
 			camera.CFrame = CFrame.new(5, 6, 7)
 			camera.FieldOfView = 80
@@ -116,30 +140,34 @@ describe("CameraCache", function()
 			)
 		end)
 
-		it("disconnects the previous camera's connections when re-initialized", function()
+		it("stops tracking the previous camera when re-initialized", function()
 			local cameraA = makeCamera()
 			CameraCache.init(cameraA)
-
-			local oldConnections = {}
-			for _, connection in CameraCache._connections do
-				table.insert(oldConnections, connection)
-			end
-			expect(#oldConnections).toBeGreaterThan(0)
 
 			local cameraB = makeCamera()
 			CameraCache.init(cameraB)
 
-			-- The first camera's listeners must be dropped, not left double-firing.
-			for _, connection in oldConnections do
-				expect(connection.Connected).toBe(false)
-			end
+			-- A leftover listener on the first camera would re-read the current
+			-- camera and land on values the cache already holds, so comparing
+			-- against the second camera can't expose it. Sentinels planted in
+			-- the cached fields can, because only a leftover listener would
+			-- overwrite them when the first camera mutates.
+			local cframeSentinel = CFrame.new(-9999, -9999, -9999)
+			CameraCache.CFrame = cframeSentinel
+			CameraCache.TanHalfVertFOV = -123
+
+			cameraA.CFrame = CFrame.new(40, 50, 60)
+			cameraA.FieldOfView = 100
+			task.wait()
+
+			expect(CameraCache.CFrame).toBe(cframeSentinel)
+			expect(CameraCache.TanHalfVertFOV).toBe(-123)
 		end)
 	end)
 
 	describe("Generation", function()
-		it("holds still for camera motion and field of view changes", function()
+		it("holds still for rigid camera motion", function()
 			local camera = makeCamera()
-			camera.FieldOfView = 70
 			CameraCache.init(camera)
 
 			-- Rigid motion has a motion bound, so consumers keep their
@@ -149,10 +177,17 @@ describe("CameraCache", function()
 			camera.CFrame = CFrame.new(10, 20, 30)
 			task.wait()
 			expect(CameraCache.Generation).toBe(generationBefore)
+		end)
+
+		it("holds still for a field of view change", function()
+			local camera = makeCamera()
+			camera.FieldOfView = 70
+			CameraCache.init(camera)
 
 			-- A projection change swings the side planes by at most the half-angle
 			-- deltas, which CameraMotion charges as rotation, so the generation
-			-- must hold still here too while the cached trig refreshes.
+			-- must hold still while the cached trig refreshes.
+			local generationBefore = CameraCache.Generation
 			local halfVerticalBefore = CameraCache.HalfVerticalFOV
 			camera.FieldOfView = 90
 			task.wait()
@@ -199,7 +234,9 @@ describe("CameraCache", function()
 				math.atan(CameraCache.TanHalfVertFOV * CameraCache.AspectRatio)
 			)
 		end)
+	end)
 
+	describe("viewportSizeChanged", function()
 		it("reflows the aspect ratio and FOV terms from the viewport", function()
 			local camera = makeCamera()
 			camera.FieldOfView = 70
@@ -227,22 +264,26 @@ describe("CameraCache", function()
 	end)
 
 	describe("cleanup", function()
-		it("disconnects all change connections and clears the table", function()
+		it("stops tracking the camera's property changes", function()
 			local camera = makeCamera()
+			camera.CFrame = CFrame.new(1, 2, 3)
+			camera.FieldOfView = 70
 			CameraCache.init(camera)
 
-			local connections = {}
-			for _, connection in CameraCache._connections do
-				table.insert(connections, connection)
-			end
-			expect(#connections).toBeGreaterThan(0)
+			local cframeBefore = CameraCache.CFrame
+			local tanBefore = CameraCache.TanHalfVertFOV
 
 			CameraCache.cleanup()
 
-			for _, connection in connections do
-				expect(connection.Connected).toBe(false)
-			end
-			expect(next(CameraCache._connections)).toBeNil()
+			-- The cache still points at this camera after cleanup, so a
+			-- listener that survived would pull these mutations straight into
+			-- the cached fields.
+			camera.CFrame = CFrame.new(400, 500, 600)
+			camera.FieldOfView = 110
+			task.wait()
+
+			expect(CameraCache.CFrame).toBe(cframeBefore)
+			expect(CameraCache.TanHalfVertFOV).toBe(tanBefore)
 		end)
 	end)
 
@@ -268,11 +309,32 @@ describe("CameraCache", function()
 		it("re-initializes the cache when workspace.CurrentCamera changes", function()
 			local newCamera = makeCamera()
 			newCamera.CFrame = CFrame.new(123, 456, 789)
+			local generationBefore = CameraCache.Generation
 			workspaceRef.CurrentCamera = newCamera
 			task.wait()
 
 			expect(CameraCache.Object).toBe(newCamera)
 			expect(CameraCache.Position).toBe(Vector3.new(123, 456, 789))
+			-- A swap re-anchors the cache at a different camera, and no motion
+			-- bound relates frustum planes across a swap, so the generation
+			-- must move to tell consumers to discard frustum-derived state.
+			expect(CameraCache.Generation).toBeGreaterThan(generationBefore)
+		end)
+
+		it("recovers when a camera arrives after initializing with none", function()
+			CameraCache.init(nil)
+			expect(CameraCache.Object).toBeNil()
+
+			-- The nil init leaves no listeners behind, so recovery rides
+			-- entirely on the CurrentCamera handler re-initializing the cache
+			-- once a camera shows up.
+			local newCamera = makeCamera()
+			newCamera.CFrame = CFrame.new(11, 22, 33)
+			workspaceRef.CurrentCamera = newCamera
+			task.wait()
+
+			expect(CameraCache.Object).toBe(newCamera)
+			expect(CameraCache.Position).toBe(Vector3.new(11, 22, 33))
 		end)
 	end)
 
@@ -420,6 +482,44 @@ describe("CameraCache", function()
 			-- quantization no longer matches how points map to voxels.
 			expect(minBound).toBe(expectedMin)
 			expect(maxBound).toBe(expectedMax)
+		end)
+
+		it("stays finite for a zero aspect ratio", function()
+			local camera = makeCamera()
+			camera.CFrame = CFrame.new(0, 0, 0)
+			camera.FieldOfView = 70
+			CameraCache.init(camera)
+
+			-- A zero-height viewport caches a zero aspect ratio, which
+			-- collapses the far plane to zero width. The frustum comes out
+			-- degenerate but every output stays finite, which is what the
+			-- aspect-ratio fallback exists to guarantee. The degenerate plane
+			-- orientations aren't worth freezing, so this pins only that the
+			-- call succeeds and nothing in the output is NaN or infinite.
+			CameraCache.AspectRatio = 0
+			CameraCache.fovChanged()
+
+			local planes, minBound, maxBound
+			expect(function()
+				planes, minBound, maxBound = CameraCache.getPlanesAndBounds(500, 100)
+			end).never.toThrow()
+
+			expect(#planes).toBe(10)
+
+			local function expectFinite(vector: Vector3)
+				for _, component in { vector.X, vector.Y, vector.Z } do
+					-- NaN is the only value that doesn't equal itself, so the
+					-- comparison runs in Lua before the matcher sees it.
+					expect(component == component).toBe(true)
+					expect(math.abs(component) ~= math.huge).toBe(true)
+				end
+			end
+
+			for _, vector in planes do
+				expectFinite(vector)
+			end
+			expectFinite(minBound)
+			expectFinite(maxBound)
 		end)
 	end)
 end)

@@ -120,7 +120,7 @@ local function benchFrame(cullThrottle: any): (number, number, number, number)
 	cullThrottle:_onPreRender(frameStart)
 	local visibilityEnd = os.clock()
 
-	cullThrottle:_fillVisibleObjectsQueue()
+	cullThrottle._ingest:enqueueStagedObjects()
 	local fillEnd = os.clock()
 
 	local drained = 0

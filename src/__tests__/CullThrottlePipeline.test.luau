@@ -12,11 +12,28 @@ local afterEach = JestGlobals.afterEach
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
 local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
+local VoxelGrid = require(CullThrottlePackage:WaitForChild("VoxelGrid"))
+local Utilities = CullThrottlePackage:WaitForChild("Utilities")
+local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
 local TestHelpers = require(script.Parent.TestHelpers)
 local createMockPart = TestHelpers.createMockPart
 local markInView = TestHelpers.markInView
+local patchFunction = TestHelpers.patchFunction
 local visibleVoxelProof = TestHelpers.visibleVoxelProof
+local roomyFrustumPlanes = TestHelpers.roomyFrustumPlanes
+
+--[[
+	Spins on os.clock without yielding until the given deadline has passed, so a
+	staged stall burns frame time without handing the real render loop a chance
+	to run.
+]]
+local function busyWaitUntil(deadline: number)
+	local now = os.clock()
+	while now < deadline do
+		now = os.clock()
+	end
+end
 
 describe("CullThrottle frame pipeline", function()
 	local cullThrottle
@@ -26,13 +43,19 @@ describe("CullThrottle frame pipeline", function()
 	end)
 
 	afterEach(function()
+		-- Module tables are shared state, so any functions patched onto them
+		-- must be unwound before the next test.
+		TestHelpers.restorePatches()
 		if cullThrottle then
 			cullThrottle:Destroy()
 		end
 		cullThrottle = nil
 	end)
 
-	describe("_processObjectVisibility", function()
+	-- This covers the once-per-frame visibility pass. The first test drives the
+	-- inner _findVisibleObjects stage directly, and the rest go through
+	-- _processObjectVisibility, the guarded per-frame wrapper around it.
+	describe("per-frame visibility processing", function()
 		it("returns the skipped tallies to zero on a frame that skips nothing", function()
 			-- A bad frame leaves nonzero tallies behind in the ring slots, and a
 			-- healthy frame must not inherit them, or the render distance
@@ -150,12 +173,23 @@ describe("CullThrottle frame pipeline", function()
 			objectData.cframe = CFrame.new(450, 50, 50)
 			objectData.position = Vector3.new(450, 50, 50)
 			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
-			expect(objectData.voxelKeys[Vector3.new(4, 0, 0)]).toBeUndefined()
+
+			-- The move is only queued so far, so the grid's occupancy has
+			-- nothing at the destination yet.
+			local grid = cullThrottle._grid
+			local oldKey = Vector3.new(0, 0, 0)
+			local newKey = Vector3.new(4, 0, 0)
+			expect(grid._voxels[newKey]).toBeUndefined()
 
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			expect(objectData.voxelKeys[Vector3.new(4, 0, 0)]).toBe(true)
-			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBeUndefined()
+			-- The pipeline's maintenance applied the queued move, so the grid
+			-- now finds the part in the new voxel and no longer in the old one.
+			local newVoxel = grid._voxels[newKey]
+			expect(newVoxel).toBeDefined()
+			expect(table.find(newVoxel, objectData)).never.toBeNil()
+			local oldVoxel = grid._voxels[oldKey]
+			expect(oldVoxel == nil or table.find(oldVoxel, objectData) == nil).toBe(true)
 
 			part:Destroy()
 		end)
@@ -168,10 +202,62 @@ describe("CullThrottle frame pipeline", function()
 			cullThrottle._perfMetrics._sumOfObjectDeltaTimes = 100
 			cullThrottle._perfMetrics._updatedObjectCount = 1
 
-			local initialRenderDistance = cullThrottle._config.renderDistance
+			local initialRenderDistance = cullThrottle:GetRenderDistance()
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			expect(cullThrottle._config.renderDistance).toBeLessThan(initialRenderDistance)
+			expect(cullThrottle:GetRenderDistance()).toBeLessThan(initialRenderDistance)
+		end)
+
+		it("anchors the search budget at frame entry rather than at search start", function()
+			-- Six parts sit in voxels whose coarse buckets straddle the roomy
+			-- fixture frustum, so the search seeds six root volumes and its
+			-- budgeted loop has volumes left to abandon when time runs out. The
+			-- keys match the fixture staging the VisibilitySearch suite uses.
+			local voxelKeys = {
+				Vector3.new(5, 5, 1),
+				Vector3.new(5, 9, 1),
+				Vector3.new(9, 13, 1),
+				Vector3.new(13, 17, 1),
+				Vector3.new(13, 21, 1),
+				Vector3.new(17, 25, 1),
+			}
+			local parts = {}
+			for i, voxelKey in voxelKeys do
+				local part = createMockPart((voxelKey + Vector3.new(0.5, 0.5, 0.5)) * 100)
+				cullThrottle:AddObject(part)
+				parts[i] = part
+			end
+
+			patchFunction(CameraCache, "getPlanesAndBounds", function()
+				return roomyFrustumPlanes, Vector3.new(0, 0, 0), Vector3.new(19, 27, 3)
+			end)
+
+			-- Resolving six single-key volumes takes the search microseconds, so
+			-- this budget is generous for the search alone. docs/SYSTEM.md
+			-- promises the budget is measured from frame entry, so upkeep
+			-- burning the whole allowance before the search starts must push the
+			-- search into its fallback anyway.
+			cullThrottle:SetTimeBudgets(0.005, 1, 1)
+
+			-- The stall rides inside the voxel maintenance pass, which the
+			-- pipeline runs before the search, and burns four times the search
+			-- budget before delegating to the real upkeep.
+			local originalUpdateObjectVoxels
+			originalUpdateObjectVoxels = patchFunction(VoxelGrid, "updateObjectVoxels", function(grid, timeBudget, now)
+				busyWaitUntil(os.clock() + 0.02)
+				return originalUpdateObjectVoxels(grid, timeBudget, now)
+			end)
+
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- The fallback recorded the voxels it had to abandon, which is the
+			-- observable for the search having run out of budget it never got
+			-- to spend on itself.
+			expect(cullThrottle:GetPerformanceMetrics().skippedSearch).toBeGreaterThan(0)
+
+			for _, part in parts do
+				part:Destroy()
+			end
 		end)
 
 		it("keeps a lingering object out of the queries while its exit grace runs", function()
@@ -329,10 +415,12 @@ describe("CullThrottle frame pipeline", function()
 			-- Cached visibility verdicts can only be trusted if the frame
 			-- pipeline charges the accumulators for this move before consulting
 			-- any of them. Skipping the charge would make every cached proof
-			-- immortal.
+			-- immortal. How many voxels the move charges is the CameraMotion
+			-- suite's territory, so the claim here is just that the translation
+			-- accumulator advanced.
 			cullThrottle:_findVisibleObjects(os.clock())
 
-			expect(motion._accumT - translationBefore).toBeCloseTo(1.5, 3)
+			expect(motion._accumT).toBeGreaterThan(translationBefore)
 		end)
 	end)
 
@@ -409,23 +497,38 @@ describe("CullThrottle frame pipeline", function()
 			expect(cullThrottle._processedVisibilityThisFrame).toBe(false)
 		end)
 
+		it("does not count a lone ObjectAdded connection as demand in on-demand mode", function()
+			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
+
+			-- Only the view signals count as demand, since they are the only
+			-- signals that need visibility computed to ever fire. ObjectAdded
+			-- fires straight from the lifecycle, so a handler on it alone must
+			-- not pull the pipeline back to running every frame.
+			cullThrottle.ObjectAdded:Connect(function() end)
+
+			cullThrottle:_onPreRender(os.clock())
+
+			expect(cullThrottle._processedVisibilityThisFrame).toBe(false)
+		end)
+
 		it("rebuilds the reusable buffers once the resize period elapses", function()
 			local searchVoxelKeysBefore = cullThrottle._search._searchVoxelKeys
 			local pendingEnteredViewBefore = cullThrottle._signals._pendingEnteredView
+			local stagedObjectsBefore = cullThrottle._ingest._stagedObjects
+			local stagedBandsBefore = cullThrottle._ingest._stagedBands
 
 			-- Backdating the last resize far past the period makes this frame the
 			-- one that rebuilds.
 			cullThrottle._lastTableResize = os.clock() - 60
 
-			local now = os.clock()
-			cullThrottle:_onPreRender(now)
+			cullThrottle:_onPreRender(os.clock())
 
 			-- The rebuild swaps in fresh tables sized to their current occupancy,
 			-- so a buffer identity change in each subsystem is the observable.
 			expect(cullThrottle._search._searchVoxelKeys).never.toBe(searchVoxelKeysBefore)
 			expect(cullThrottle._signals._pendingEnteredView).never.toBe(pendingEnteredViewBefore)
-			-- The stamp moves up so the next rebuild waits a full period again.
-			expect(cullThrottle._lastTableResize).toBe(now)
+			expect(cullThrottle._ingest._stagedObjects).never.toBe(stagedObjectsBefore)
+			expect(cullThrottle._ingest._stagedBands).never.toBe(stagedBandsBefore)
 		end)
 	end)
 

@@ -97,7 +97,8 @@ function RenderDistanceController.adjust(self: RenderDistanceController)
 	local ingestTimeBudget = config.ingestTimeBudget
 	local updateTimeBudget = config.updateTimeBudget
 
-	-- Skipped frames mean we couldn't even keep up, regardless of budget load.
+	-- Skipped voxels mean a pass couldn't even cover the space it was asked
+	-- to, regardless of how the budget load reads.
 	local isSkipping = (ingestTimeBudget > 0 and perfMetrics._getAverage(perfMetrics._skippedIngest) ~= 0)
 		or (searchTimeBudget > 0 and perfMetrics._getAverage(perfMetrics._skippedSearch) ~= 0)
 

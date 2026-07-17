@@ -19,10 +19,11 @@ local VisibilityCache = {}
 VisibilityCache.__index = VisibilityCache
 
 type VisibilityCacheProto = {
-	-- This stores one packed proof per voxel. X is the visible expiry, Y is the
-	-- culled expiry (-1 marks the verdict the proof does not carry), and Z is the
-	-- arm factor the rotation debit is charged at. The proof is trusted while
-	-- (accumT + accumF) + accumR * Z stays at or under the stored expiry.
+	-- This stores one packed frustum proof per voxel, trusted while the
+	-- charged motion (accumT + accumF, plus accumR at the stored arm factor)
+	-- stays at or under the stored expiry. VisibilitySearch's
+	-- packVisibleVoxelProof and packCulledVoxelProof are the layout
+	-- authority, and their headers name the inlined decode sites.
 	_voxelProofs: { [types.VoxelKey]: Vector3 },
 	_bucketVerdicts: { [types.CoarseVoxelKey]: types.BucketVerdict },
 }

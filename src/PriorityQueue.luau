@@ -304,9 +304,10 @@ function PriorityQueue.dequeue<T>(self: PriorityQueue<T>): (T, number)
 end
 
 --[[
-	Returns (item, priority) for the queue front without removing it.
+	Returns (item, priority) for the queue front without removing it, or nils
+	when the queue is empty.
 ]]
-function PriorityQueue.peek<T>(self: PriorityQueue<T>): (T, number)
+function PriorityQueue.peek<T>(self: PriorityQueue<T>): (T?, number?)
 	return self._items[1], self._priorities[1]
 end
 

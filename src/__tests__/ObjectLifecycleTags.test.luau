@@ -31,8 +31,8 @@ describe("ObjectLifecycle tags", function()
 	end)
 
 	describe("CaptureTag", function()
-		it("should capture all objects with a tag", function()
-			local tag = "TestTag"
+		it("captures all objects with a tag", function()
+			local tag = "InitialCaptureTag"
 			local part1 = createMockPart()
 			local part2 = createMockPart()
 
@@ -51,8 +51,8 @@ describe("ObjectLifecycle tags", function()
 			part2:Destroy()
 		end)
 
-		it("should track new objects added with tag", function()
-			local tag = "TestTag"
+		it("tracks new objects tagged after the capture", function()
+			local tag = "LiveAddTag"
 			cullThrottle:CaptureTag(tag)
 
 			local part = createMockPart()
@@ -66,8 +66,8 @@ describe("ObjectLifecycle tags", function()
 			part:Destroy()
 		end)
 
-		it("should stop tracking objects when tag is removed", function()
-			local tag = "TestTag"
+		it("stops tracking an object when its tag is removed", function()
+			local tag = "TagLossUntrackTag"
 			local part = createMockPart()
 			CollectionService:AddTag(part, tag)
 
@@ -80,6 +80,37 @@ describe("ObjectLifecycle tags", function()
 
 			cullThrottle:ReleaseTag(tag)
 			part:Destroy()
+		end)
+
+		it("releases a tag-captured object exactly once when it is destroyed externally", function()
+			local tag = "DestroyedWhileCapturedTag"
+			cullThrottle:CaptureTag(tag)
+
+			local part = createMockPart()
+			CollectionService:AddTag(part, tag)
+			task.wait()
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+
+			local removedCount = 0
+			local connection = cullThrottle.ObjectRemoved:Connect(function(obj)
+				if obj == part then
+					removedCount += 1
+				end
+			end)
+
+			-- Destroying the part trips both the object's own Destroying watch and
+			-- the capture's deferred tag-removed handler. Both paths funnel into
+			-- the same removal, so it must come out as one untrack with one
+			-- ObjectRemoved and a tracked count that only drops once.
+			part:Destroy()
+			task.wait()
+
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+			expect(removedCount).toBe(1)
+
+			connection:Disconnect()
+			cullThrottle:ReleaseTag(tag)
 		end)
 
 		it("routes an unanchored tagged part to physics tracking and an anchored one to static", function()
@@ -183,7 +214,7 @@ describe("ObjectLifecycle tags", function()
 			part:Destroy()
 		end)
 
-		it("should skip an un-addable tagged instance without aborting the rest of the capture", function()
+		it("skips an un-addable tagged instance without aborting the rest of the capture", function()
 			local tag = "MixedCaptureTag"
 			local part1 = createMockPart()
 			-- A Folder has no resolvable CFrame or bounding box, so addObject errors on it.
@@ -241,7 +272,7 @@ describe("ObjectLifecycle tags", function()
 			part:Destroy()
 		end)
 
-		it("should not throw when every tagged instance is un-addable", function()
+		it("does not throw when every tagged instance is un-addable", function()
 			local tag = "UnaddableCaptureTag"
 			local folder = Instance.new("Folder")
 			folder.Parent = workspace
@@ -257,7 +288,39 @@ describe("ObjectLifecycle tags", function()
 			folder:Destroy()
 		end)
 
-		it("should disconnect the previous connections when a tag is re-captured", function()
+		it("keeps the live capture listening after a tagged instance is skipped", function()
+			local tag = "LiveIsolationTag"
+			cullThrottle:CaptureTag(tag)
+
+			-- A Folder resolves neither a cframe nor a bounding box, so its add
+			-- fails inside the deferred added handler. The handler pcalls each add,
+			-- so the failure is contained to a skip warning. The warning in the
+			-- test output here is expected.
+			local folder = Instance.new("Folder")
+			folder.Parent = workspace
+			expect(function()
+				CollectionService:AddTag(folder, tag)
+			end).never.toThrow()
+			task.wait()
+
+			expect(cullThrottle:IsTracking(folder)).toBe(false)
+
+			-- The listener survived the failed add, so a valid instance tagged
+			-- afterwards still tracks.
+			local part = createMockPart()
+			CollectionService:AddTag(part, tag)
+			task.wait()
+
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+
+			cullThrottle:ReleaseTag(tag)
+			CollectionService:RemoveTag(folder, tag)
+			CollectionService:RemoveTag(part, tag)
+			folder:Destroy()
+			part:Destroy()
+		end)
+
+		it("disconnects the previous connections when a tag is re-captured", function()
 			local tag = "RecaptureTag"
 			cullThrottle:CaptureTag(tag)
 
@@ -282,8 +345,8 @@ describe("ObjectLifecycle tags", function()
 	end)
 
 	describe("ReleaseTag", function()
-		it("should disconnect tag connections", function()
-			local tag = "TestTag"
+		it("stops tracking newly tagged instances after release", function()
+			local tag = "ReleasedWatchTag"
 			cullThrottle:CaptureTag(tag)
 
 			expect(cullThrottle._lifecycle._tagConnections[tag]).toBeDefined()
@@ -341,7 +404,7 @@ describe("ObjectLifecycle tags", function()
 			cullThrottle:ReleaseTag(capturedTag)
 		end)
 
-		it("should clear the tag connection entry", function()
+		it("clears the tag connection entry", function()
 			local tag = "ClearedTag"
 			cullThrottle:CaptureTag(tag)
 			expect(cullThrottle._lifecycle._tagConnections[tag]).toBeDefined()
@@ -353,11 +416,37 @@ describe("ObjectLifecycle tags", function()
 			-- connections.
 			expect(cullThrottle._lifecycle._tagConnections[tag]).toBeNil()
 		end)
+
+		it("untracks an object that still carries a tag that is not captured", function()
+			local capturedTag = "RetentionCapturedTag"
+			local releasedTag = "RetentionReleasedTag"
+			local part = createMockPart()
+			CollectionService:AddTag(part, capturedTag)
+			CollectionService:AddTag(part, releasedTag)
+
+			cullThrottle:CaptureTag(capturedTag)
+			cullThrottle:CaptureTag(releasedTag)
+			cullThrottle:ReleaseTag(releasedTag)
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+
+			-- Retention consults only the currently captured tags, so the released
+			-- tag still sitting on the part doesn't hold it. If release left its
+			-- entry behind, or retention checked every tag on the instance, the
+			-- part would wrongly survive losing its captured tag here.
+			CollectionService:RemoveTag(part, capturedTag)
+			task.wait()
+
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			cullThrottle:ReleaseTag(capturedTag)
+			CollectionService:RemoveTag(part, releasedTag)
+			part:Destroy()
+		end)
 	end)
 
 	describe("RemoveObjectsWithTag", function()
-		it("should remove all objects with specified tag", function()
-			local tag = "TestTag"
+		it("removes all tracked objects carrying the tag", function()
+			local tag = "BulkRemoveTag"
 			local part1 = createMockPart()
 			local part2 = createMockPart()
 			local part3 = createMockPart()
@@ -382,7 +471,38 @@ describe("ObjectLifecycle tags", function()
 			part3:Destroy()
 		end)
 
-		it("should snapshot before removing so an ObjectRemoved handler may mutate the tracked set", function()
+		it("keeps removed objects untracked while their tag is still captured", function()
+			local tag = "BulkRemoveWhileCapturedTag"
+			local part1 = createMockPart()
+			local part2 = createMockPart()
+			CollectionService:AddTag(part1, tag)
+			CollectionService:AddTag(part2, tag)
+
+			cullThrottle:CaptureTag(tag)
+			expect(cullThrottle:IsTracking(part1)).toBe(true)
+			expect(cullThrottle:IsTracking(part2)).toBe(true)
+
+			cullThrottle:RemoveObjectsWithTag(tag)
+
+			expect(cullThrottle:IsTracking(part1)).toBe(false)
+			expect(cullThrottle:IsTracking(part2)).toBe(false)
+
+			-- The parts still carry the tag and the capture is still live, but the
+			-- capture only reacts to tag adds and removes, so nothing resurrects
+			-- the objects after the deferred signals settle.
+			task.wait()
+			expect(cullThrottle:IsTracking(part1)).toBe(false)
+			expect(cullThrottle:IsTracking(part2)).toBe(false)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			cullThrottle:ReleaseTag(tag)
+			CollectionService:RemoveTag(part1, tag)
+			CollectionService:RemoveTag(part2, tag)
+			part1:Destroy()
+			part2:Destroy()
+		end)
+
+		it("snapshots before removing so an ObjectRemoved handler may mutate the tracked set", function()
 			-- RemoveObjectsWithTag must not iterate the tracked set live while
 			-- removing, because removeObject fires ObjectRemoved and a handler may
 			-- add or remove tracked objects. Snapshotting the matches first makes

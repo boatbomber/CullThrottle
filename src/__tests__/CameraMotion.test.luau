@@ -11,9 +11,14 @@ local afterEach = JestGlobals.afterEach
 
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
+local CameraMotion = require(CullThrottlePackage:WaitForChild("CameraMotion"))
 local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
 local Utilities = CullThrottlePackage:WaitForChild("Utilities")
 local CameraCache = require(Utilities:WaitForChild("CameraCache"))
+
+local TestHelpers = require(script.Parent.TestHelpers)
+local visibleVoxelProof = TestHelpers.visibleVoxelProof
+local culledVoxelProof = TestHelpers.culledVoxelProof
 
 describe("CameraMotion", function()
 	local cullThrottle
@@ -111,18 +116,18 @@ describe("CameraMotion", function()
 		expect(motion._accumF).toBeCloseTo(0.5, 5)
 	end)
 
-	it("flushes to re-anchor the accumulators before f32 precision can decay", function()
+	it("flushes to re-anchor when the rotation accumulator passes its limit", function()
 		-- Proof expiries are stored as f32 vector components, so the
 		-- accumulators are re-anchored at zero (with a full flush) once
 		-- enough total motion accumulates.
 		local visibilityCache = cullThrottle._visibilityCache
-		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
+		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = visibleVoxelProof(100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
 			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		local motion = cullThrottle._motion
 		motion._accumT = 3
 		motion._accumF = 2
-		motion._accumR = 65
+		motion._accumR = CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT + 1
 
 		motion:accumulate()
 
@@ -145,9 +150,9 @@ describe("CameraMotion", function()
 		-- distance change, so two accumulators each below the limit on their own
 		-- must still flush once their sum crosses it.
 		local motion = cullThrottle._motion
-		cullThrottle._visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
-		motion._accumT = 9000
-		motion._accumF = 8000
+		cullThrottle._visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = visibleVoxelProof(100, 1)
+		motion._accumT = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT * 0.75
+		motion._accumF = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT * 0.75
 
 		motion:accumulate()
 
@@ -159,28 +164,77 @@ describe("CameraMotion", function()
 	it("does not flush while the accumulators stay under their limits", function()
 		local motion = cullThrottle._motion
 		local proofKey = Vector3.new(1, 1, 1)
-		cullThrottle._visibilityCache._voxelProofs[proofKey] = Vector3.new(100, -1, 1)
-		motion._accumT = 9000
-		motion._accumF = 7300
-		motion._accumR = 63
+		cullThrottle._visibilityCache._voxelProofs[proofKey] = visibleVoxelProof(100, 1)
+		local stagedT = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT * 0.5
+		local stagedF = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT * 0.5 - 1
+		local stagedR = CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT - 1
+		motion._accumT = stagedT
+		motion._accumF = stagedF
+		motion._accumR = stagedR
 
 		motion:accumulate()
 
 		-- The limits are f32 precision guards, not correctness bounds, so they
-		-- must not fire early. A rotation of 63 radians sits just under its
-		-- limit, the translation plus render distance sum of 16300 sits just
-		-- under its own, and the cached proof must survive with every
-		-- accumulator keeping its reading rather than re-anchoring to zero.
-		expect(cullThrottle._visibilityCache._voxelProofs[proofKey]).toBe(Vector3.new(100, -1, 1))
-		expect(motion._accumT).toBe(9000)
-		expect(motion._accumF).toBe(7300)
-		expect(motion._accumR).toBe(63)
+		-- must not fire early. The staged rotation sits just under its limit,
+		-- the translation plus render distance sum sits just under its own, and
+		-- the cached proof must survive with every accumulator keeping its
+		-- reading rather than re-anchoring to zero.
+		expect(cullThrottle._visibilityCache._voxelProofs[proofKey]).toBe(visibleVoxelProof(100, 1))
+		expect(motion._accumT).toBe(stagedT)
+		expect(motion._accumF).toBe(stagedF)
+		expect(motion._accumR).toBe(stagedR)
+	end)
+
+	it("holds at exactly the flush limits and flushes just past them", function()
+		local motion = cullThrottle._motion
+		local proofs = cullThrottle._visibilityCache._voxelProofs
+		local proofKey = Vector3.new(1, 1, 1)
+
+		-- The re-anchor check is a strict comparison, so readings sitting
+		-- exactly at the limits are still trusted.
+		proofs[proofKey] = visibleVoxelProof(100, 1)
+		motion._accumT = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT
+		motion._accumR = CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT
+		motion:accumulate()
+
+		expect(proofs[proofKey]).toBe(visibleVoxelProof(100, 1))
+		expect(motion._accumT).toBe(CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT)
+		expect(motion._accumR).toBe(CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT)
+
+		-- One voxel past the translation limit is enough to re-anchor everything.
+		motion._accumT = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT + 1
+		motion:accumulate()
+
+		expect(next(proofs)).toBeNil()
+		expect(motion._accumT).toBe(0)
+		expect(motion._accumR).toBe(0)
+	end)
+
+	it("charges nothing after a flush re-anchors the render distance and projection baselines", function()
+		cullThrottle:SetVoxelSize(100)
+		local motion = cullThrottle._motion
+
+		-- Grow the render distance and pretend the projection's vertical
+		-- half-angle was smaller, then flush before any accumulate observes
+		-- either change. The flush anchors its baselines to the values it reads
+		-- right then, so both changes die with it.
+		cullThrottle._config.renderDistance += 100
+		motion._lastHalfVerticalFOV = CameraCache.HalfVerticalFOV - 0.1
+		motion:flushVisibilityCache()
+
+		-- An accumulate with unchanged inputs must charge nothing. A stale
+		-- baseline would charge the pre-flush render distance change or
+		-- half-angle swing as phantom motion here.
+		motion:accumulate()
+		expect(motion._accumT).toBe(0)
+		expect(motion._accumR).toBe(0)
+		expect(motion._accumF).toBe(0)
 	end)
 
 	it("charges a field of view change to the rotation accumulator and keeps cached proofs", function()
 		local visibilityCache = cullThrottle._visibilityCache
 		local proofKey = Vector3.new(1, 1, 1)
-		visibilityCache._voxelProofs[proofKey] = Vector3.new(100, -1, 1)
+		visibilityCache._voxelProofs[proofKey] = visibleVoxelProof(100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
 			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		local motion = cullThrottle._motion
@@ -207,7 +261,7 @@ describe("CameraMotion", function()
 		expect(expectedCharge).toBeGreaterThan(0)
 		expect(motion._accumR).toBeCloseTo(expectedCharge, 5)
 		expect(motion._accumT).toBeCloseTo(5, 5)
-		expect(visibilityCache._voxelProofs[proofKey]).toBe(Vector3.new(100, -1, 1))
+		expect(visibilityCache._voxelProofs[proofKey]).toBe(visibleVoxelProof(100, 1))
 		expect(visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)]).toBeDefined()
 
 		-- A settled projection must not keep charging on later frames.
@@ -232,8 +286,8 @@ describe("CameraMotion", function()
 
 	it("flushes all cached proofs when the camera is replaced", function()
 		local visibilityCache = cullThrottle._visibilityCache
-		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
-		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = Vector3.new(-1, 100, 1)
+		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = visibleVoxelProof(100, 1)
+		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = culledVoxelProof(100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
 			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		cullThrottle._motion._accumT = 5
@@ -251,15 +305,15 @@ describe("CameraMotion", function()
 		-- The flush re-anchors to the new generation, so accumulating again with
 		-- the same camera must keep a freshly cached proof instead of flushing
 		-- forever.
-		visibilityCache._voxelProofs[Vector3.new(3, 3, 3)] = Vector3.new(100, -1, 1)
+		visibilityCache._voxelProofs[Vector3.new(3, 3, 3)] = visibleVoxelProof(100, 1)
 		cullThrottle._motion:accumulate()
-		expect(visibilityCache._voxelProofs[Vector3.new(3, 3, 3)]).toBe(Vector3.new(100, -1, 1))
+		expect(visibilityCache._voxelProofs[Vector3.new(3, 3, 3)]).toBe(visibleVoxelProof(100, 1))
 	end)
 
 	it("flushes all cached proofs when the voxel size changes", function()
 		local visibilityCache = cullThrottle._visibilityCache
-		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = Vector3.new(100, -1, 1)
-		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = Vector3.new(-1, 100, 1)
+		visibilityCache._voxelProofs[Vector3.new(1, 1, 1)] = visibleVoxelProof(100, 1)
+		visibilityCache._voxelProofs[Vector3.new(2, 2, 2)] = culledVoxelProof(100, 1)
 		visibilityCache._bucketVerdicts[Vector3.new(0, 0, 0)] =
 			{ state = Frustum.BUCKET_CULLED, armFactor = 1, sideExpiry = 100, farExpiry = math.huge }
 		cullThrottle._motion._accumT = 5

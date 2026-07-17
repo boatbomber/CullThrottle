@@ -109,6 +109,19 @@ end
 	inherited slack, and this returns them as named fields so tests never
 	hand-copy the slot layout.
 ]]
+-- One volume spans this many consecutive slots on the search's flat stack.
+-- popVolume below names each slot, and volumeCount divides by it, so the
+-- stride lives here and nowhere else in the tests.
+local VOLUME_SLOT_COUNT = 10
+
+--[[
+	Returns how many volumes currently sit on a search's flat stack, so tests
+	can assert push counts without hand-multiplying the slot stride.
+]]
+local function volumeCount(search: any): number
+	return search._volumesToCheckSize / VOLUME_SLOT_COUNT
+end
+
 local function popVolume(search: any): { [string]: number }
 	local volumesToCheck = search._volumesToCheck
 	local n = search._volumesToCheckSize
@@ -124,7 +137,7 @@ local function popVolume(search: any): { [string]: number }
 		planeMask = volumesToCheck[n - 1],
 		inheritedSlack = volumesToCheck[n],
 	}
-	search._volumesToCheckSize = n - 10
+	search._volumesToCheckSize = n - VOLUME_SLOT_COUNT
 	return volume
 end
 
@@ -182,6 +195,24 @@ local function restorePatches()
 	table.clear(activePatches)
 end
 
+--[[
+	Wraps a module function with a counting shim (registered for the shared
+	patch restore) and returns a getter for how many calls have run since. The
+	shim delegates every call to the original with arguments and returns
+	untouched, so behavior is unchanged.
+]]
+local function countCalls(moduleTable: { [string]: any }, name: string): () -> number
+	local calls = 0
+	local original
+	original = patchFunction(moduleTable, name, function(...)
+		calls += 1
+		return original(...)
+	end)
+	return function()
+		return calls
+	end
+end
+
 -- This is a voxel-space frustum (a 70 FoV camera at the origin facing +Y, with
 -- the far plane one voxel out) whose planes all cut through the first coarse
 -- bucket's box, so seeding against it classifies that bucket as straddling and
@@ -224,10 +255,12 @@ return {
 	stubObjectData = stubObjectData,
 	visibleVoxelProof = visibleVoxelProof,
 	culledVoxelProof = culledVoxelProof,
+	volumeCount = volumeCount,
 	popVolume = popVolume,
 	drainVolumeStack = drainVolumeStack,
 	patchFunction = patchFunction,
 	restorePatches = restorePatches,
+	countCalls = countCalls,
 	straddlingFrustumPlanes = straddlingFrustumPlanes,
 	roomyFrustumPlanes = roomyFrustumPlanes,
 }

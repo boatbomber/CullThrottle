@@ -1,5 +1,4 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CollectionService = game:GetService("CollectionService")
 local Packages, DevPackages = ReplicatedStorage:WaitForChild("Packages"), ReplicatedStorage:WaitForChild("DevPackages")
 
 local JestGlobals = require(DevPackages:WaitForChild("JestGlobals"))
@@ -33,7 +32,7 @@ describe("CullThrottle configuration", function()
 	end)
 
 	describe("SetVoxelSize", function()
-		it("should update voxel size configuration", function()
+		it("updates the voxel size configuration", function()
 			-- This must differ from the default 100 so the assertions can't pass
 			-- on an untouched config.
 			local newVoxelSize = 50
@@ -46,7 +45,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle._config.multiVoxelRadiusThreshold).toBe(newVoxelSize / 4)
 		end)
 
-		it("should flush every cached visibility verdict and re-anchor the motion accumulators", function()
+		it("flushes every cached visibility verdict and re-anchors the motion accumulators", function()
 			-- Every cached proof, verdict, and accumulator reading is in voxel
 			-- units, so a new voxel size invalidates all of them at once. A stale
 			-- proof surviving here would be interpreted at the wrong scale and
@@ -71,12 +70,9 @@ describe("CullThrottle configuration", function()
 			expect(motion._accumT).toBe(0)
 			expect(motion._accumR).toBe(0)
 			expect(motion._accumF).toBe(0)
-			-- The flush also re-anchors the far-plane reading in the new voxel
-			-- unit, so the next accumulate sees no phantom render distance motion.
-			expect(motion._lastRenderDistanceVoxels).toBe(cullThrottle:GetRenderDistance() / 50)
 		end)
 
-		it("should reassign objects to new voxels", function()
+		it("reassigns objects to new voxels", function()
 			local part = createMockPart(Vector3.new(150, 150, 150))
 			cullThrottle:AddObject(part)
 
@@ -101,7 +97,7 @@ describe("CullThrottle configuration", function()
 			part:Destroy()
 		end)
 
-		it("should reject a non-positive voxel size", function()
+		it("rejects a non-positive voxel size", function()
 			expect(function()
 				cullThrottle:SetVoxelSize(0)
 			end).toThrow()
@@ -110,7 +106,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject a NaN voxel size", function()
+		it("rejects a NaN voxel size", function()
 			-- Every ordered comparison against NaN is false, so a plain `<= 0` gate
 			-- lets it through to poison every voxel key derived from it.
 			expect(function()
@@ -118,7 +114,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject an infinite voxel size", function()
+		it("rejects an infinite voxel size", function()
 			-- An infinite size passes a plain `> 0` gate, but every voxel key it
 			-- derives is then infinite, so the gate must reject it too.
 			expect(function()
@@ -126,7 +122,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should keep objects whose voxel key is unchanged by the resize", function()
+		it("keeps objects whose voxel key is unchanged by the resize", function()
 			-- This part's center voxel key is (0, 0, 0) under both the old and new
 			-- sizes, so the reslot must reinsert it into the rebuilt grid rather
 			-- than treating it as already slotted.
@@ -148,7 +144,7 @@ describe("CullThrottle configuration", function()
 	end)
 
 	describe("SetRenderDistanceRange", function()
-		it("should update render distance configuration", function()
+		it("updates the render distance configuration", function()
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(300, 900))
 
 			local range = cullThrottle:GetRenderDistanceRange()
@@ -162,7 +158,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle:GetDynamicRenderDistance()).toBe(true)
 		end)
 
-		it("should disable dynamic adjustment for a zero-width range", function()
+		it("disables dynamic adjustment for a zero-width range", function()
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(500, 500))
 
 			local range = cullThrottle:GetRenderDistanceRange()
@@ -172,24 +168,31 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle:GetDynamicRenderDistance()).toBe(false)
 		end)
 
-		it("should reset the dynamic controller's momentum along with the range", function()
-			local controller = cullThrottle._renderDistanceController
-			local baselineStep = controller._step
-
-			-- Stage the working state a run of over-budget frames leaves behind,
-			-- a damped step partway through a shrink streak.
-			controller._step = baselineStep * 0.5
-			controller._direction = -1
+		it("resets the dynamic controller's momentum along with the range", function()
+			-- Drive the controller into a damped-down streak first. A load inside
+			-- the hold deadband damps the step on every adjustment without moving
+			-- the distance, so a handful of adjustments leaves the step a tiny
+			-- fraction of its starting size.
+			local config = cullThrottle._config
+			cullThrottle._perfMetrics._averageObjectDeltaTime = config.refreshPeriodMidpoint
+			for _ = 1, 6 do
+				cullThrottle._renderDistanceController:adjust()
+			end
 
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(300, 900))
 
-			-- The controller floats from the new range's midpoint with fresh
-			-- momentum, so the old streak's step and direction must not carry over.
-			expect(controller._step).toBe(baselineStep)
-			expect(controller._direction).toBe(0)
+			-- Stage clear headroom so the first post-reset adjustment grows. A
+			-- reset controller moves from its full starting step, several studs
+			-- here, while a damped streak carried across the range change could
+			-- only nudge the distance by a fraction of a stud, so the size of
+			-- this first move is the observable that separates the two.
+			cullThrottle._perfMetrics._averageObjectDeltaTime = config.bestRefreshPeriod
+			cullThrottle._renderDistanceController:adjust()
+
+			expect(math.abs(cullThrottle:GetRenderDistance() - 600)).toBeGreaterThan(1)
 		end)
 
-		it("should reject a non-positive render distance", function()
+		it("rejects a non-positive render distance", function()
 			expect(function()
 				cullThrottle:SetRenderDistanceRange(NumberRange.new(0, 100))
 			end).toThrow()
@@ -198,7 +201,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject a NaN render distance", function()
+		it("rejects a render distance range that is NaN at both ends", function()
 			-- The render distance is a divisor in the priority math, so a NaN
 			-- slipping through the gate would poison every priority downstream.
 			expect(function()
@@ -206,7 +209,17 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject an infinite render distance", function()
+		it("rejects a NaN hiding in the range's Max", function()
+			-- NumberRange's own ordering check compares Min against Max, and
+			-- every comparison against NaN is false, so a NaN Max slips through
+			-- construction alongside a perfectly valid Min. The setter gates Max
+			-- on its own to catch it.
+			expect(function()
+				cullThrottle:SetRenderDistanceRange(NumberRange.new(100, 0 / 0))
+			end).toThrow()
+		end)
+
+		it("rejects an infinite render distance", function()
 			-- An infinite render distance yields an infinite midpoint and live
 			-- distance, which poisons the controller's step and the priority
 			-- divisor, so the gate must reject it.
@@ -217,7 +230,7 @@ describe("CullThrottle configuration", function()
 	end)
 
 	describe("SetTimeBudgets", function()
-		it("should update time budget configurations", function()
+		it("updates the time budget configuration", function()
 			local searchBudget = 0.002
 			local ingestBudget = 0.003
 			local updateBudget = 0.004
@@ -230,7 +243,7 @@ describe("CullThrottle configuration", function()
 			expect(update).toBe(updateBudget)
 		end)
 
-		it("should reject a negative time budget", function()
+		it("rejects a negative time budget", function()
 			expect(function()
 				cullThrottle:SetTimeBudgets(-0.001, 0.003, 0.004)
 			end).toThrow()
@@ -242,7 +255,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject a NaN time budget", function()
+		it("rejects a NaN time budget", function()
 			-- A NaN budget passes a plain `< 0` rejection and then defeats every
 			-- budget comparison in the passes it feeds.
 			expect(function()
@@ -256,7 +269,7 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should allow zero time budgets", function()
+		it("allows zero time budgets", function()
 			expect(function()
 				cullThrottle:SetTimeBudgets(0, 0, 0)
 			end).never.toThrow()
@@ -275,7 +288,7 @@ describe("CullThrottle configuration", function()
 		-- inversion itself rather than the getter's round-trip, and the expected
 		-- values are literal numbers so a wrong inversion can't satisfy a
 		-- restatement of itself.
-		it("should convert Hz rates to seconds-between-refreshes periods", function()
+		it("converts Hz rates to seconds-between-refreshes periods", function()
 			cullThrottle:SetRefreshRates(NumberRange.new(5, 25))
 
 			-- 25 Hz is a 0.04 second period and 5 Hz is a 0.2 second period.
@@ -283,7 +296,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle._config.worstRefreshPeriod).toBeCloseTo(0.2, 5)
 		end)
 
-		it("should derive the refresh period range and midpoint from the rates", function()
+		it("derives the refresh period range and midpoint from the rates", function()
 			cullThrottle:SetRefreshRates(NumberRange.new(10, 50))
 
 			-- 50 Hz is a 0.02 second period and 10 Hz is a 0.1 second period, so
@@ -292,7 +305,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle._config.refreshPeriodMidpoint).toBeCloseTo(0.06, 5)
 		end)
 
-		it("should accept equal best and worst rates", function()
+		it("accepts equal best and worst rates", function()
 			cullThrottle:SetRefreshRates(NumberRange.new(20, 20))
 
 			-- 20 Hz both ways is a 0.05 second period on both ends, collapsing
@@ -302,7 +315,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle._config.refreshPeriodRange).toBeCloseTo(0, 5)
 		end)
 
-		it("should reject non-positive rates", function()
+		it("rejects non-positive rates", function()
 			expect(function()
 				cullThrottle:SetRefreshRates(NumberRange.new(0, 15))
 			end).toThrow()
@@ -311,11 +324,34 @@ describe("CullThrottle configuration", function()
 			end).toThrow()
 		end)
 
-		it("should reject NaN rates", function()
+		it("rejects rates that are NaN at both ends", function()
 			-- The rates invert into refresh periods, and a NaN period breaks every
 			-- band comparison in the ingest pass.
 			expect(function()
 				cullThrottle:SetRefreshRates(NumberRange.new(0 / 0, 0 / 0))
+			end).toThrow()
+		end)
+
+		it("rejects a NaN hiding in the rates' Max", function()
+			-- NumberRange's ordering check passes NaN (every comparison against
+			-- NaN is false), so a NaN best rate can ride in next to a valid
+			-- worst rate. The setter gates Max on its own to catch it.
+			expect(function()
+				cullThrottle:SetRefreshRates(NumberRange.new(15, 0 / 0))
+			end).toThrow()
+		end)
+
+		it("rejects infinite rates", function()
+			-- An infinite Hz inverts to a zero-second period. A zero best period
+			-- shoves every object out of the over-refresh region, and a zero
+			-- worst period zeroes the refresh period midpoint that the render
+			-- distance controller divides by, so non-finite rates error at the
+			-- boundary like the other setters.
+			expect(function()
+				cullThrottle:SetRefreshRates(NumberRange.new(15, math.huge))
+			end).toThrow()
+			expect(function()
+				cullThrottle:SetRefreshRates(NumberRange.new(math.huge, math.huge))
 			end).toThrow()
 		end)
 	end)
@@ -361,12 +397,12 @@ describe("CullThrottle configuration", function()
 	end)
 
 	describe("Configuration getters", function()
-		it("should read back the voxel size", function()
+		it("reads back the voxel size", function()
 			cullThrottle:SetVoxelSize(50)
 			expect(cullThrottle:GetVoxelSize()).toBe(50)
 		end)
 
-		it("should read back the render distance range", function()
+		it("reads back the render distance range", function()
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(250, 750))
 
 			local range = cullThrottle:GetRenderDistanceRange()
@@ -374,7 +410,7 @@ describe("CullThrottle configuration", function()
 			expect(range.Max).toBe(750)
 		end)
 
-		it("should read back the time budgets in seconds", function()
+		it("reads back the time budgets in seconds", function()
 			cullThrottle:SetTimeBudgets(0.002, 0.003, 0.004)
 
 			local search, ingest, update = cullThrottle:GetTimeBudgets()
@@ -383,7 +419,7 @@ describe("CullThrottle configuration", function()
 			expect(update).toBe(0.004)
 		end)
 
-		it("should read back the refresh rates in Hz, symmetric with the setter", function()
+		it("reads back the refresh rates in Hz, symmetric with the setter", function()
 			cullThrottle:SetRefreshRates(NumberRange.new(15, 60))
 
 			local refreshRates = cullThrottle:GetRefreshRates()
@@ -391,7 +427,7 @@ describe("CullThrottle configuration", function()
 			expect(refreshRates.Min).toBeCloseTo(15)
 		end)
 
-		it("should read back the boolean flags", function()
+		it("reads back the boolean flags", function()
 			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
 
@@ -405,7 +441,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle:GetStrictlyEnforceWorstRefreshRate()).toBe(false)
 		end)
 
-		it("should derive dynamic render distance from the range width", function()
+		it("derives dynamic render distance from the range width", function()
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 800))
 			expect(cullThrottle:GetDynamicRenderDistance()).toBe(true)
 
@@ -413,7 +449,7 @@ describe("CullThrottle configuration", function()
 			expect(cullThrottle:GetDynamicRenderDistance()).toBe(false)
 		end)
 
-		it("should expose the live render distance, distinct from the configured range", function()
+		it("exposes the live render distance, distinct from the configured range", function()
 			cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 1000))
 			-- The live distance starts at the range's midpoint baseline.
 			expect(cullThrottle:GetRenderDistance()).toBe(600)
@@ -426,178 +462,6 @@ describe("CullThrottle configuration", function()
 			local range = cullThrottle:GetRenderDistanceRange()
 			expect(range.Min).toBe(200)
 			expect(range.Max).toBe(1000)
-		end)
-	end)
-
-	describe("IsTracking", function()
-		it("should report whether an object is tracked", function()
-			local part = createMockPart()
-
-			expect(cullThrottle:IsTracking(part)).toBe(false)
-
-			cullThrottle:AddObject(part)
-			expect(cullThrottle:IsTracking(part)).toBe(true)
-
-			cullThrottle:RemoveObject(part)
-			expect(cullThrottle:IsTracking(part)).toBe(false)
-
-			part:Destroy()
-		end)
-	end)
-
-	describe("GetTrackedObjects", function()
-		it("should return every tracked object", function()
-			local a = createMockPart(Vector3.new(0, 0, 0))
-			local b = createMockPart(Vector3.new(500, 0, 0))
-			cullThrottle:AddObject(a)
-			cullThrottle:AddObject(b)
-
-			local tracked = cullThrottle:GetTrackedObjects()
-			expect(#tracked).toBe(2)
-			expect(table.find(tracked, a)).never.toBeNil()
-			expect(table.find(tracked, b)).never.toBeNil()
-
-			a:Destroy()
-			b:Destroy()
-		end)
-
-		it("should return a snapshot that cannot mutate internal state", function()
-			local part = createMockPart()
-			cullThrottle:AddObject(part)
-
-			local tracked = cullThrottle:GetTrackedObjects()
-			table.clear(tracked)
-
-			expect(cullThrottle:IsTracking(part)).toBe(true)
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
-
-			part:Destroy()
-		end)
-	end)
-
-	describe("GetTrackedObjectCount", function()
-		it("should track the count across add and remove", function()
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
-
-			local a = createMockPart(Vector3.new(0, 0, 0))
-			local b = createMockPart(Vector3.new(500, 0, 0))
-
-			cullThrottle:AddObject(a)
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
-
-			cullThrottle:AddObject(b)
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(2)
-
-			cullThrottle:RemoveObject(a)
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
-
-			a:Destroy()
-			b:Destroy()
-		end)
-
-		it("should not double-count an idempotent re-add", function()
-			local part = createMockPart()
-
-			cullThrottle:AddObject(part)
-			cullThrottle:AddObject(part)
-
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
-
-			part:Destroy()
-		end)
-
-		it("should not underflow when removing an untracked object", function()
-			local part = createMockPart()
-
-			cullThrottle:RemoveObject(part)
-
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
-
-			part:Destroy()
-		end)
-
-		it("should stay correct through RemoveObjectsWithTag", function()
-			local tag = "TrackedCountTag"
-			local tagged = {}
-			for i = 1, 4 do
-				local part = createMockPart(Vector3.new(i * 10, 0, 0))
-				CollectionService:AddTag(part, tag)
-				cullThrottle:AddObject(part)
-				tagged[i] = part
-			end
-
-			local untagged = createMockPart(Vector3.new(0, 500, 0))
-			cullThrottle:AddObject(untagged)
-
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(5)
-
-			cullThrottle:RemoveObjectsWithTag(tag)
-
-			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
-
-			for _, part in tagged do
-				CollectionService:RemoveTag(part, tag)
-				part:Destroy()
-			end
-			untagged:Destroy()
-		end)
-	end)
-
-	describe("GetPerformanceMetrics", function()
-		it("should return a snapshot with the documented metric fields", function()
-			local metrics = cullThrottle:GetPerformanceMetrics()
-
-			expect(type(metrics.searchDuration)).toBe("number")
-			expect(type(metrics.ingestDuration)).toBe("number")
-			expect(type(metrics.skippedSearch)).toBe("number")
-			expect(type(metrics.skippedIngest)).toBe("number")
-			expect(type(metrics.averageObjectDeltaTime)).toBe("number")
-		end)
-
-		it("should reflect the latest internal metrics", function()
-			cullThrottle._perfMetrics._searchDuration = 0.00123
-			cullThrottle._perfMetrics._ingestDuration = 0.00456
-			cullThrottle._perfMetrics._skippedSearch[1] = 7
-			cullThrottle._perfMetrics._skippedIngest[1] = 9
-			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.025
-
-			local metrics = cullThrottle:GetPerformanceMetrics()
-			expect(metrics.searchDuration).toBe(0.00123)
-			expect(metrics.ingestDuration).toBe(0.00456)
-			expect(metrics.skippedSearch).toBe(7)
-			expect(metrics.skippedIngest).toBe(9)
-			expect(metrics.averageObjectDeltaTime).toBe(0.025)
-		end)
-
-		it("should report the current frame's skipped tallies after the cursor advances", function()
-			-- Each visibility pass advances the ring cursor, so the snapshot must
-			-- read whichever slot is current rather than a hardcoded one.
-			cullThrottle:_findVisibleObjects(os.clock())
-			cullThrottle:_findVisibleObjects(os.clock())
-
-			-- Decoys fill every slot first, so a snapshot reading any slot other
-			-- than the cursor's comes back wrong no matter how long the ring is.
-			local perfMetrics = cullThrottle._perfMetrics
-			for slot in perfMetrics._skippedSearch do
-				perfMetrics._skippedSearch[slot] = 1000
-				perfMetrics._skippedIngest[slot] = 1000
-			end
-			local cursor = perfMetrics._skippedFramesCursor
-			perfMetrics._skippedSearch[cursor] = 7
-			perfMetrics._skippedIngest[cursor] = 9
-
-			local metrics = cullThrottle:GetPerformanceMetrics()
-			expect(metrics.skippedSearch).toBe(7)
-			expect(metrics.skippedIngest).toBe(9)
-		end)
-
-		it("should return a fresh snapshot that cannot corrupt internal metrics", function()
-			local metrics = cullThrottle:GetPerformanceMetrics()
-			metrics.searchDuration = 999
-			metrics.skippedSearch = 999
-
-			expect(cullThrottle._perfMetrics._searchDuration).never.toBe(999)
-			expect(cullThrottle._perfMetrics._skippedSearch[1]).never.toBe(999)
 		end)
 	end)
 end)

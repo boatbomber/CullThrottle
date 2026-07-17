@@ -10,15 +10,17 @@ local expect = JestGlobals.expect
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local VisibilityCache = require(CullThrottlePackage:WaitForChild("VisibilityCache"))
 local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
+local types = require(CullThrottlePackage:WaitForChild("types"))
 
 local TestHelpers = require(script.Parent.TestHelpers)
 local visibleVoxelProof = TestHelpers.visibleVoxelProof
+local culledVoxelProof = TestHelpers.culledVoxelProof
 
 --[[
-	Builds a bucket verdict in the shape the search caches, defaulting to a
-	fully inside verdict with generous expiries.
+	Builds a fully inside bucket verdict with generous expiries, in the shape
+	the search caches.
 ]]
-local function insideBucketVerdict(): any
+local function insideBucketVerdict(): types.BucketVerdict
 	return {
 		state = Frustum.BUCKET_INSIDE,
 		armFactor = 1,
@@ -29,8 +31,9 @@ end
 
 describe("VisibilityCache", function()
 	it("gives each instance its own independent stores", function()
-		-- Several CullThrottle instances can coexist, so a proof cached by one
-		-- must never leak into another's visibility decisions.
+		-- Several CullThrottle instances can coexist, so a record cached by one
+		-- must never leak into another's visibility decisions, in either of the
+		-- two stores.
 		local a = VisibilityCache.new()
 		local b = VisibilityCache.new()
 
@@ -44,11 +47,15 @@ describe("VisibilityCache", function()
 	it("drops every proof and verdict on clear", function()
 		local cache = VisibilityCache.new()
 		cache._voxelProofs[Vector3.new(1, 2, 3)] = visibleVoxelProof(5, 1)
-		cache._voxelProofs[Vector3.new(4, 5, 6)] = visibleVoxelProof(2, 3)
+		cache._voxelProofs[Vector3.new(4, 5, 6)] = culledVoxelProof(2, 3)
 		cache._bucketVerdicts[Vector3.new(0, 0, 0)] = insideBucketVerdict()
 
 		cache:clear()
 
+		-- The flush that calls this re-anchors the motion odometer at zero, so
+		-- any record surviving here would compare its old expiry against the
+		-- restarted readings and validate long after its real motion bound
+		-- passed.
 		expect(next(cache._voxelProofs)).toBeNil()
 		expect(next(cache._bucketVerdicts)).toBeNil()
 	end)

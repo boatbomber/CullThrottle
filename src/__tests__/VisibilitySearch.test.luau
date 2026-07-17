@@ -21,6 +21,7 @@ local createMockPart = TestHelpers.createMockPart
 local stubObjectData = TestHelpers.stubObjectData
 local visibleVoxelProof = TestHelpers.visibleVoxelProof
 local culledVoxelProof = TestHelpers.culledVoxelProof
+local volumeCount = TestHelpers.volumeCount
 local popVolume = TestHelpers.popVolume
 local drainVolumeStack = TestHelpers.drainVolumeStack
 local patchFunction = TestHelpers.patchFunction
@@ -1912,6 +1913,339 @@ describe("VisibilitySearch", function()
 			search:run(os.clock())
 			expect(getSeeds()).toBe(2)
 			expect(search._visibleVoxelCount).toBe(6)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("Visible voxel ordering", function()
+		it("accumulates every added voxel into the pending buffer", function()
+			-- addVoxelKeyToVisible fills the pending buffer the sort under
+			-- test consumes. The order within the buffer is pinned
+			-- behaviorally by the stability test below, so this only asserts
+			-- the contents are complete.
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + Vector3.new(3, 0, 0))
+			cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + Vector3.new(1, 0, 0))
+
+			expect(cullThrottle._search._visibleVoxelCount).toBe(2)
+			local seen = {}
+			for i = 1, cullThrottle._search._visibleVoxelCount do
+				seen[cullThrottle._search._pendingVoxelKeys[i]] = true
+			end
+			expect(seen[cameraVoxel + Vector3.new(3, 0, 0)]).toBe(true)
+			expect(seen[cameraVoxel + Vector3.new(1, 0, 0)]).toBe(true)
+		end)
+
+		it("resets the visible count while leaving the pending slots in place for reuse", function()
+			local search = cullThrottle._search
+			local keys = { Vector3.new(1, 1, 1), Vector3.new(2, 2, 2) }
+			for _, key in keys do
+				search:addVoxelKeyToVisible(key)
+			end
+
+			search:clearVisibleVoxels()
+
+			-- Only the count resets. The slots keep their entries because the
+			-- next pass overwrites from slot one, and the whole-frame replay
+			-- depends on cleared slots staying untouched.
+			expect(search._visibleVoxelCount).toBe(0)
+			for i, key in keys do
+				expect(search._pendingVoxelKeys[i]).toBe(key)
+			end
+		end)
+
+		it("sorts visible voxels closest-first by manhattan distance to the camera", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- The offsets are deliberately added out of distance order.
+			local offsets = {
+				Vector3.new(5, 0, 0), -- This one sits at distance 5.
+				Vector3.new(0, 0, 0), -- This one sits at distance 0 (it's the camera's own voxel).
+				Vector3.new(-2, 1, 0), -- This one sits at distance 3.
+				Vector3.new(1, 0, 0), -- This one sits at distance 1.
+				Vector3.new(2, 2, 2), -- This one sits at distance 6.
+				Vector3.new(0, -3, 1), -- This one sits at distance 4.
+			}
+			for _, offset in offsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			expect(cullThrottle._search._visibleVoxelCount).toBe(#offsets)
+
+			-- Output distances are non-decreasing, and the nearest voxel is first.
+			local previousDistance = -1
+			for i = 1, cullThrottle._search._visibleVoxelCount do
+				local difference = cullThrottle._search._visibleVoxelKeys[i] - cameraVoxel
+				local distance = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+				expect(distance).toBeGreaterThanOrEqual(previousDistance)
+				previousDistance = distance
+			end
+			expect(cullThrottle._search._visibleVoxelKeys[1]).toBe(cameraVoxel)
+		end)
+
+		it("preserves every voxel exactly once through the sort, including ties", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- This is a spread of distinct voxels, several of which tie on distance.
+			local added = {}
+			for x = -3, 3 do
+				for y = -1, 1 do
+					local key = cameraVoxel + Vector3.new(x, y, 0)
+					cullThrottle._search:addVoxelKeyToVisible(key)
+					added[key] = true
+				end
+			end
+
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			local seen = {}
+			for i = 1, cullThrottle._search._visibleVoxelCount do
+				local key = cullThrottle._search._visibleVoxelKeys[i]
+				seen[key] = (seen[key] or 0) + 1
+			end
+
+			-- The same set comes out as went in, with each added key present
+			-- exactly once and nothing extra.
+			local addedCount = 0
+			for key in added do
+				expect(seen[key]).toBe(1)
+				addedCount += 1
+			end
+			expect(cullThrottle._search._visibleVoxelCount).toBe(addedCount)
+		end)
+
+		it("keeps equal-distance voxels in their original order through the sort", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- All four offsets sit at manhattan distance two in distinct
+			-- directions, so the documented stability is the only thing that
+			-- can order them.
+			local equalOffsets = {
+				Vector3.new(2, 0, 0),
+				Vector3.new(0, 2, 0),
+				Vector3.new(1, 1, 0),
+				Vector3.new(0, 1, 1),
+			}
+			for _, offset in equalOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			for i, offset in equalOffsets do
+				expect(cullThrottle._search._visibleVoxelKeys[i]).toBe(cameraVoxel + offset)
+			end
+		end)
+
+		it("sorts correctly on a second batch with a smaller max distance", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			-- The first sort fills the reused scratch counts out to a wide max
+			-- distance, leaving stale prefix sums behind in the higher buckets.
+			local wideOffsets = {
+				Vector3.new(3, 2, 1), -- This one sits at distance 6.
+				Vector3.new(1, 0, 0), -- This one sits at distance 1.
+				Vector3.new(2, 2, 0), -- This one sits at distance 4.
+			}
+			for _, offset in wideOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			-- The second batch tops out at distance 2, well inside the stale
+			-- range, so only a correct reset of the reused counts can place its
+			-- voxels in the right slots.
+			cullThrottle._search:clearVisibleVoxels()
+			local narrowOffsets = {
+				Vector3.new(0, 2, 0), -- This one sits at distance 2.
+				Vector3.new(0, 0, 0), -- This one sits at distance 0.
+				Vector3.new(-1, 0, 0), -- This one sits at distance 1.
+			}
+			for _, offset in narrowOffsets do
+				cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + offset)
+			end
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			expect(cullThrottle._search._visibleVoxelCount).toBe(3)
+			expect(cullThrottle._search._visibleVoxelKeys[1]).toBe(cameraVoxel)
+			expect(cullThrottle._search._visibleVoxelKeys[2]).toBe(cameraVoxel + Vector3.new(-1, 0, 0))
+			expect(cullThrottle._search._visibleVoxelKeys[3]).toBe(cameraVoxel + Vector3.new(0, 2, 0))
+		end)
+
+		it("sorts an empty batch without erroring and passes a lone voxel straight through", function()
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			expect(function()
+				cullThrottle._search:sortVisibleVoxelKeys()
+			end).never.toThrow()
+			expect(cullThrottle._search._visibleVoxelCount).toBe(0)
+
+			local onlyKey = cameraVoxel + Vector3.new(7, -2, 4)
+			cullThrottle._search:addVoxelKeyToVisible(onlyKey)
+			cullThrottle._search:sortVisibleVoxelKeys()
+			expect(cullThrottle._search._visibleVoxelCount).toBe(1)
+			expect(cullThrottle._search._visibleVoxelKeys[1]).toBe(onlyKey)
+		end)
+
+		it("keeps visible voxels ordered closest-first end to end", function()
+			-- Spread objects through the view at increasing depth so the search
+			-- produces a multi-voxel batch to order.
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 7 do
+				local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -120 * i)).Position)
+				cullThrottle:AddObject(part)
+				table.insert(parts, part)
+			end
+
+			-- Generous budgets let the search and ingest both run to completion.
+			cullThrottle._config.searchTimeBudget = 1
+			cullThrottle._config.ingestTimeBudget = 1
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- The sort only matters when several voxels are visible, so prove
+			-- the staging actually produced a batch.
+			expect(cullThrottle._search._visibleVoxelCount).toBeGreaterThan(1)
+
+			-- The batch must come out non-decreasing in manhattan distance to
+			-- the camera (the ingest passes depend on it).
+			local cameraVoxel = CameraCache.Position // cullThrottle._config.voxelSize
+			local previousDistance = -1
+			for i = 1, cullThrottle._search._visibleVoxelCount do
+				local difference = cullThrottle._search._visibleVoxelKeys[i] - cameraVoxel
+				local distance = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
+				expect(distance).toBeGreaterThanOrEqual(previousDistance)
+				previousDistance = distance
+			end
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+	end)
+
+	describe("Buffer lifecycle", function()
+		it("preserves live buffers when resized to current occupancy", function()
+			local search = cullThrottle._search
+			local keys = { Vector3.new(1, 1, 1), Vector3.new(2, 2, 2), Vector3.new(3, 3, 3) }
+			for i, key in keys do
+				search._visibleVoxelKeys[i] = key
+				search._pendingVoxelKeys[i] = key
+				search._searchVoxelKeys[i] = key
+			end
+			search._visibleVoxelCount = 3
+			search:pushVolume(1, 2, 3, 4, 5, 6, 1, 3, 0b10101, 0.5)
+
+			search:resizeBuffers()
+
+			for i, key in keys do
+				expect(search._visibleVoxelKeys[i]).toBe(key)
+				expect(search._pendingVoxelKeys[i]).toBe(key)
+				-- The leftover volume's [lo, hi] slice indexes into the seed
+				-- buffer, so those slots must survive alongside it.
+				expect(search._searchVoxelKeys[i]).toBe(key)
+			end
+			-- The leftover volume survives with every field intact.
+			expect(volumeCount(search)).toBe(1)
+			local volume = popVolume(search)
+			expect(volume.x0).toBe(1)
+			expect(volume.y0).toBe(2)
+			expect(volume.z0).toBe(3)
+			expect(volume.x1).toBe(4)
+			expect(volume.y1).toBe(5)
+			expect(volume.z1).toBe(6)
+			expect(volume.lo).toBe(1)
+			expect(volume.hi).toBe(3)
+			expect(volume.planeMask).toBe(0b10101)
+			expect(volume.inheritedSlack).toBe(0.5)
+		end)
+
+		it("rebuilds the seed and proof-walk scratch buffers on resize", function()
+			-- A burst frame can leave these two scratch buffers holding thousands
+			-- of slots that every later frame clears without shrinking. Capacity
+			-- isn't observable from Luau, so the rebuild is pinned by the buffers
+			-- coming back as fresh tables. With no volumes left on the stack,
+			-- nothing references the old contents.
+			local search = cullThrottle._search
+			for i = 1, 64 do
+				search._searchVoxelKeys[i] = Vector3.new(i, 0, 0)
+				search._unprovenVoxelKeys[i] = Vector3.new(i, 1, 0)
+			end
+			local searchKeysBefore = search._searchVoxelKeys
+			local unprovenBefore = search._unprovenVoxelKeys
+
+			search:resizeBuffers()
+
+			expect(search._searchVoxelKeys).never.toBe(searchKeysBefore)
+			expect(search._unprovenVoxelKeys).never.toBe(unprovenBefore)
+		end)
+
+		it("preserves the visible voxel keys when the backing tables are resized", function()
+			-- The subject here is the facade's _resizeTables, exercised here
+			-- because the sorted visible list is the buffer it must not corrupt.
+			cullThrottle:SetVoxelSize(100)
+			local cameraVoxel = CameraCache.Position // 100
+
+			cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + Vector3.new(1, 0, 0))
+			cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + Vector3.new(2, 0, 0))
+			cullThrottle._search:addVoxelKeyToVisible(cameraVoxel + Vector3.new(3, 0, 0))
+			cullThrottle._search:sortVisibleVoxelKeys()
+
+			local expectedCount = cullThrottle._search._visibleVoxelCount
+			local before = {}
+			for i = 1, expectedCount do
+				before[i] = cullThrottle._search._visibleVoxelKeys[i]
+			end
+
+			cullThrottle:_resizeTables()
+
+			-- The resize trims the unused tail without dropping any live key.
+			expect(cullThrottle._search._visibleVoxelCount).toBe(expectedCount)
+			for i = 1, expectedCount do
+				expect(cullThrottle._search._visibleVoxelKeys[i]).toBe(before[i])
+			end
+		end)
+
+		it("clears the buffers and disarms the replay on destroy", function()
+			local part = createMockPart()
+			local search = cullThrottle._search
+			cullThrottle._grid:insertToVoxel(Vector3.new(1, 1, 0), stubObjectData(part))
+			cullThrottle._grid:insertToVoxel(Vector3.new(0, 1, 1), stubObjectData(part))
+			patchFunction(CameraCache, "getPlanesAndBounds", function()
+				return straddlingFrustumPlanes, Vector3.new(0, 0, 0), Vector3.new(3, 3, 3)
+			end)
+
+			-- A complete pass fills the seed and pending buffers and arms the
+			-- replay, and the sort fills the ordered list and the distance
+			-- scratch.
+			cullThrottle._config.searchTimeBudget = 1
+			search:run(os.clock())
+			search:sortVisibleVoxelKeys()
+			expect(search._replayReady).toBe(true)
+			expect(search._visibleVoxelCount).toBe(2)
+
+			search:destroy()
+
+			-- Everything the buffers referenced is released, and the replay
+			-- can't hand back output that no longer exists.
+			expect(search._replayReady).toBe(false)
+			expect(search._visibleVoxelCount).toBe(0)
+			expect(search._volumesToCheckSize).toBe(0)
+			expect(next(search._searchVoxelKeys)).toBeNil()
+			expect(next(search._pendingVoxelKeys)).toBeNil()
+			expect(next(search._visibleVoxelKeys)).toBeNil()
+			expect(next(search._pendingVoxelDistances)).toBeNil()
+			expect(next(search._volumesToCheck)).toBeNil()
 
 			part:Destroy()
 		end)

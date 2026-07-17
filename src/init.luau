@@ -102,7 +102,6 @@ type CullThrottleProto = {
 
 	_renderConnection: RBXScriptConnection,
 	_processedVisibilityThisFrame: boolean,
-	_filledVisibleObjectsQueue: boolean,
 	_lastTableResize: number,
 }
 
@@ -115,14 +114,12 @@ export type CullThrottle = typeof(setmetatable({} :: CullThrottleProto, CullThro
 function CullThrottle._resizeTables(self: CullThrottle)
 	self._search:resizeBuffers()
 	self._signals:resizeBuffers()
+	self._ingest:resizeBuffers()
 end
 
 --[[
 	Resets the visible voxel and object accumulators for a fresh frame, and
 	commits the previous frame's update delta times into the average.
-	Resetting the count is enough because the search overwrites slots 1..count
-	from the start each frame, so any stale trailing entries in the reused
-	buffers are never read.
 ]]
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
 	-- Committing here, at the start of the next processed frame, gives one
@@ -136,28 +133,8 @@ function CullThrottle._clearVisibleObjects(self: CullThrottle)
 		perfMetrics._updatedObjectCount = 0
 	end
 
-	self._search._visibleVoxelCount = 0
-	self._filledVisibleObjectsQueue = false
-	self._ingest:clearStagedObjects()
-	self._ingest._visibleObjectsQueue:clear()
-end
-
---[[
-	Lays the visible objects staged by the ingest passes out in priority-band
-	order so IterateObjectsToUpdate can dequeue them. This happens at most
-	once per processed frame, since the staged batch survives until the next
-	frame and re-enqueueing it would hand a second same-frame iteration every
-	object the first one already updated.
-]]
-function CullThrottle._fillVisibleObjectsQueue(self: CullThrottle)
-	if self._filledVisibleObjectsQueue then
-		return
-	end
-	self._filledVisibleObjectsQueue = true
-
-	debug.profilebegin("fillVisibleObjectsQueue")
-	self._ingest:enqueueStagedObjects()
-	debug.profileend()
+	self._search:clearVisibleVoxels()
+	self._ingest:clearFrame()
 end
 
 --[[
@@ -181,13 +158,18 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	-- they must advance (or flush, on a projection change) before any are consulted.
 	self._motion:accumulate()
 
-	self._search:run(now)
+	local replayed = self._search:run(now)
 
 	-- The search appended visible voxels in subdivision order. We order them
-	-- closest-first so the ingest below spends its budget on the nearest voxels.
-	debug.profilebegin("sortVisibleVoxels")
-	self._ingest:sortVisibleVoxelKeys()
-	debug.profileend()
+	-- closest-first so the ingest below spends its budget on the nearest
+	-- voxels. A replayed frame skips the sort, since its inputs (the pending
+	-- keys and the camera voxel, both pinned by the replay gate's bit-identical
+	-- accumulators) match the anchor pass's and the sorted order still stands.
+	if not replayed then
+		debug.profilebegin("sortVisibleVoxels")
+		self._search:sortVisibleVoxelKeys()
+		debug.profileend()
+	end
 
 	self._ingest:ingestVisibleVoxels(now)
 
@@ -307,7 +289,6 @@ function CullThrottle.new(): CullThrottle
 
 	self._lastTableResize = os.clock()
 	self._processedVisibilityThisFrame = false
-	self._filledVisibleObjectsQueue = false
 	self._renderConnection = RunService.PreRender:Connect(function()
 		self:_onPreRender(os.clock())
 	end)
@@ -377,15 +358,16 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 	self:_processObjectVisibility(os.clock())
 
 	-- The ingest only staged this frame's objects, so the band layout cost
-	-- lands here and frames where nobody iterates never pay it.
-	self:_fillVisibleObjectsQueue()
+	-- lands here and frames where nobody iterates never pay it. The layout
+	-- runs at most once per staged batch, guarded inside the ingest.
+	self._ingest:enqueueStagedObjects()
 
 	local updateStartClock = os.clock()
 	local queue = self._ingest._visibleObjectsQueue
 	-- The queue hands its drain layout over so the loop below walks plain
 	-- arrays, writing each new cursor position back as it goes (which is
 	-- drainView's contract), instead of paying method calls per object.
-	local items, bands, cursor, size = queue:drainView()
+	local items, bands, drainStartCursor, size, epoch = queue:drainView()
 	local perfMetrics = self._perfMetrics
 	local updateTimeBudget = self._config.updateTimeBudget
 	-- The p0s can go a little over budget.
@@ -399,17 +381,25 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 	-- batch to cover about half the remaining budget at the average per-object
 	-- pace so far, capped at a few objects. The plan starts at one object
 	-- while the pace is unknown, grows toward the cap for cheap consumers, and
-	-- collapses back to per-object checks as the budget nears, so the overrun
-	-- past the old per-object precision stays around half of whatever budget
+	-- collapses back to per-object checks as the budget nears, so the added
+	-- overrun beyond a per-object check stays around half of whatever budget
 	-- remained. Because the layout is band ordered, the p0 region is a strict
 	-- prefix, and the first object past that prefix forces a check so the drop
 	-- from the raised p0 allowance to the plain budget never rides on a stale
 	-- plan.
-	local drainStartCursor = cursor
 	local objectsUntilClockCheck = 0
 	local inP0Prefix = true
 
 	return function()
+		-- A cleared or refilled queue means this iterator's frame is over, so
+		-- it ends here, before any cursor write, instead of stomping the fresh
+		-- layout's cursor or reading its cleared arrays.
+		if queue._fillEpoch ~= epoch then
+			return nil
+		end
+		-- The cursor rereads the queue on entry so two live iterators share
+		-- drain progress instead of each replaying the other's objects.
+		local cursor = queue._cursor
 		while cursor < size do
 			cursor += 1
 			queue._cursor = cursor
@@ -432,9 +422,10 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 					-- That's okay, they'll be higher priority next time.
 
 					-- Just in case the user iterates multiple times in a single frame,
-					-- let's clear out the leftovers so they don't spill into the second iter.
+					-- let's clear out the leftovers so they don't spill into the second
+					-- iter. The clear advances the fill epoch, which also ends this
+					-- closure and any sibling iterator on their next call.
 					queue:clear()
-					size = 0
 
 					return nil
 				end
@@ -610,17 +601,21 @@ end
 --[[
 	Sets the refresh rate range in Hz. The most frequent (best) rate is the
 	higher number, so it maps to the range's Max, and the least frequent (worst)
-	rate maps to Min. NumberRange already guarantees Min <= Max, so the best
-	rate can never be slower than the worst, and checking Min > 0 covers Max too.
+	rate maps to Min. NumberRange already guarantees Min <= Max for real
+	numbers, so the best rate can never be slower than the worst. Rates must be
+	finite and positive.
 ]]
 function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRange)
 	local worstHz = refreshRates.Min
 	local bestHz = refreshRates.Max
-	if not (worstHz > 0 and bestHz > 0) then
+	if not (worstHz > 0 and worstHz < math.huge and bestHz > 0 and bestHz < math.huge) then
 		-- The checks are phrased so NaN, which fails every comparison, errors
 		-- too. NumberRange guarantees Min <= Max for real numbers, but a NaN
-		-- slips through its ordering check, so Max gets its own gate here.
-		error("SetRefreshRates expects refresh rates in Hz greater than zero")
+		-- slips through its ordering check, so Max gets its own gate here. An
+		-- infinite rate is gated as well, since it inverts to a zero-second
+		-- period, which shoves every object out of the over-refresh region and
+		-- zeroes the refresh midpoint the render distance controller divides by.
+		error("SetRefreshRates expects finite refresh rates in Hz greater than zero")
 	end
 
 	-- The config stores periods (seconds between refreshes), so the rates

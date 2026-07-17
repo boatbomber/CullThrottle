@@ -49,19 +49,19 @@ Frustum.BUCKET_INSIDE = BUCKET_INSIDE
 	geometry.
 
 	When the box intersects, the slack is how far inside it sits from the
-	nearest tested non-straddled plane (in voxel units), so the box provably
-	stays inside those planes until camera motion accumulates past it. Planes
-	skipped by the mask contribute nothing, and callers combine the returned
-	slack with the slack inherited from the volume that was inside those planes.
+	nearest tested non-straddled plane (in voxel units), so the box stays inside
+	those planes until camera motion accumulates past it. Planes skipped by the
+	mask contribute nothing, and callers combine the returned slack with the
+	slack inherited from the volume that was inside those planes.
 	The exitSlack is how much motion the nearest straddled plane needs before it
-	can sweep fully past the box (the box provably keeps intersecting until
+	can sweep fully past the box (the box keeps intersecting until
 	then), or math.huge when no tested plane is straddled. The sideSlack and
 	farSlack are the same clearance as slack split by plane, the min over the
 	side planes and the far plane's own, kept separate because the far plane is
 	the only one a render distance change moves. When the box is rejected, the
-	slack is instead the margin past the rejecting plane (the box provably
-	stays outside until camera motion accumulates past that), and rejectedByFar
-	says whether the rejecting plane was the far plane.
+	slack is instead the margin past the rejecting plane (the box stays outside
+	until camera motion accumulates past that), and rejectedByFar says whether
+	the rejecting plane was the far plane.
 
 	Callers pass ordered voxel-space bounds (x0 <= x1, y0 <= y1, z0 <= z1)
 	because the root volumes are built min-to-max and splits preserve the
