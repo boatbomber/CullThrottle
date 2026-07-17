@@ -28,12 +28,38 @@
 	accumulators.
 
 	Above all three layers sits a whole-frame replay. The pass is a
-	deterministic function of the frustum, the occupied voxel set, and the
-	proof caches, so when every one of those provably stands exactly where the
-	last complete pass left it (no charged camera motion of any kind, no cache
-	flush, and no occupancy change), run hands back that pass's output instead
+	deterministic function of the frustum, the occupied voxel set, the built
+	umbrae, and the proof caches, so when every one of those stands
+	exactly where the last complete pass left it (no charged camera motion of
+	any kind, no cache flush, no occupancy change, no umbra rebuild, and both
+	occlusion generations unmoved), run hands back that pass's output instead
 	of re-deriving it. Any charged motion at all re-runs the search, so the
 	replay is a parked-camera fast path rather than an approximation.
+
+	Occlusion culling threads through the same layers when umbrae exist (see
+	OcclusionCulling). Seeding checks each bucket's cached occlusion proof
+	before any umbra work, where a hidden proof skips the bucket and a clear
+	proof sends it down the pure frustum path, and umbra-tests survivors. A
+	fully occluded bucket is skipped with a fresh hidden proof cached, a
+	bucket that prunes every umbra caches a clear proof, and a bucket that
+	an umbra merely straddles sends its keys to the subdivision search
+	carrying the mask of umbrae still in play, whether or not the frustum
+	straddles it too (negated when the box arrives unclipped, so the root
+	volume inherits the seeding test's verdict instead of repeating it). A
+	contested volume either proves itself fully occluded (stamping a hidden
+	proof on every voxel in its slice), proves itself fully clear the same
+	way (stamping not-occluded proofs slice-wide when its test prunes the
+	last umbra), or takes the same proof walk as everything else, where a
+	still-valid hidden proof settles a cell as hidden the way a frustum
+	proof settles one as culled, and a still-valid not-occluded proof hands
+	the cell back to its frustum proof alone. Whatever the walk can't settle
+	splits, the same way frustum straddling drives splitting, until children
+	either leave every umbra or land on single voxels that get their own
+	leaf test and stamp of whichever verdict the test proves. Occlusion runs
+	under the same search time budget as the frustum work, since every
+	umbra test that lands retires voxels the search would otherwise have to
+	resolve, and when the budget expires the leftover volumes take the
+	usual cached-verdict fallback, which errs toward visible.
 ]]
 
 local types = require(script.Parent.types)
@@ -41,6 +67,7 @@ local Config = require(script.Parent.Config)
 local Frustum = require(script.Parent.Frustum)
 local VoxelGrid = require(script.Parent.VoxelGrid)
 local CameraMotion = require(script.Parent.CameraMotion)
+local OcclusionCulling = require(script.Parent.OcclusionCulling)
 local VisibilityCache = require(script.Parent.VisibilityCache)
 local CameraCache = require(script.Parent.Utilities.CameraCache)
 local Gizmo = if _G.__DEV__ then require(script.Parent.Utilities.Gizmo) else nil :: any
@@ -51,6 +78,10 @@ local vectorAbs = (vector.abs :: any) :: (Vector3 | vector) -> Vector3
 local tableCreate = table.create
 local tableMove = table.move
 local tableClear = table.clear
+
+-- Dotting a componentwise absolute value against this sums its three lanes,
+-- which is how the voxel sort gets a manhattan distance in two vector ops.
+local VECTOR_ONE = Vector3.one
 
 -- This caps the slack any one voxel proof may store, in voxels. A proof's arm is
 -- inflated by its own slack (translation can carry the camera that much closer
@@ -71,9 +102,6 @@ local VOXEL_HALF_DIAGONAL = math.sqrt(3) / 2
 local BUCKET_HALF_DIAGONAL = VoxelGrid.COARSE_VOXEL_SIZE * math.sqrt(3) / 2
 -- Recenters an integer voxel key onto its cell center.
 local VOXEL_CENTER_OFFSET = Vector3.new(0.5, 0.5, 0.5)
--- Dotting a componentwise absolute value against this sums its three lanes,
--- which is how the voxel sort gets a manhattan distance in two vector ops.
-local VECTOR_ONE = Vector3.one
 -- The proof walk over a volume's voxels re-tests expired voxels cell by cell
 -- while they stay rare, so scattered expiries cost a few cell tests instead of
 -- re-subdividing the volume. Once unproven voxels outnumber proven ones by
@@ -103,6 +131,14 @@ local COARSE_VOXEL_SIZE = VoxelGrid.COARSE_VOXEL_SIZE
 local VisibilitySearch = {}
 VisibilitySearch.__index = VisibilitySearch
 
+-- This is how far past the frustum's AABB the search can seed a testable box,
+-- in voxels. Testable boxes come from coarse buckets overlapping that AABB,
+-- and a bucket-aligned box reaches at most one bucket span beyond it. The
+-- search owns this value because its seeding geometry decides it, and the
+-- facade hands it to OcclusionCulling so the umbra AABBs cover every box the
+-- search can ever test.
+VisibilitySearch.TESTABLE_REACH_EXPANSION = COARSE_VOXEL_SIZE
+
 -- The slack cap and shave are documented spec (docs/MATH.md section 10), so
 -- they're exported for the tests that pin the documented values and the
 -- float-safety relationship between the shave and the odometer flush limits.
@@ -114,6 +150,7 @@ type VisibilitySearchProto = {
 	_grid: VoxelGrid.VoxelGrid,
 	_motion: CameraMotion.CameraMotion,
 	_visibilityCache: VisibilityCache.VisibilityCache,
+	_occlusion: OcclusionCulling.OcclusionCulling,
 	_perfMetrics: types.PerfMetrics,
 
 	_searchVoxelKeys: { types.VoxelKey },
@@ -127,7 +164,7 @@ type VisibilitySearchProto = {
 	_visibleVoxelCount: number,
 	_pendingVoxelKeys: { types.VoxelKey },
 	_pendingVoxelDistances: { number },
-	-- This is the counting sort's tally scratch, keyed by manhattan distance.
+	-- This is the counting sort's tally scratch, reused across frames.
 	_voxelDistanceCounts: { number },
 
 	-- These record the state the last complete pass ran against, so run can
@@ -142,7 +179,20 @@ type VisibilitySearchProto = {
 	_replayAccumF: number,
 	_replayFlushCount: number,
 	_replayOccupancyGeneration: number,
+	_replayBuildCount: number,
+	-- The two occlusion generations overlap with the build count today (every
+	-- path that bumps either also moves a watched counter), but each is
+	-- watched independently so replay soundness assumes nothing about
+	-- OcclusionCulling's internal call graph.
+	_replayGeneration: number,
+	_replayClearGeneration: number,
+	-- The occluder cap is watched by value because flipping it re-decides
+	-- whether cached occlusion proofs are honored at all, which can change the
+	-- output even on frames with zero built umbrae (a proof outlives its
+	-- occluder's stay in the frustum).
+	_replayMaxOccluders: number,
 	_replayVisibleVoxelCount: number,
+	_replayOccludedVoxelCount: number,
 }
 
 export type VisibilitySearch = typeof(setmetatable({} :: VisibilitySearchProto, VisibilitySearch))
@@ -156,6 +206,7 @@ function VisibilitySearch.new(
 	grid: VoxelGrid.VoxelGrid,
 	motion: CameraMotion.CameraMotion,
 	visibilityCache: VisibilityCache.VisibilityCache,
+	occlusion: OcclusionCulling.OcclusionCulling,
 	perfMetrics: types.PerfMetrics
 ): VisibilitySearch
 	local self = setmetatable({
@@ -163,6 +214,7 @@ function VisibilitySearch.new(
 		_grid = grid,
 		_motion = motion,
 		_visibilityCache = visibilityCache,
+		_occlusion = occlusion,
 		_perfMetrics = perfMetrics,
 		_searchVoxelKeys = {},
 		_unprovenVoxelKeys = {},
@@ -180,7 +232,12 @@ function VisibilitySearch.new(
 		_replayAccumF = 0,
 		_replayFlushCount = 0,
 		_replayOccupancyGeneration = 0,
+		_replayBuildCount = 0,
+		_replayGeneration = 0,
+		_replayClearGeneration = 0,
+		_replayMaxOccluders = 0,
 		_replayVisibleVoxelCount = 0,
+		_replayOccludedVoxelCount = 0,
 	}, VisibilitySearch)
 
 	return self
@@ -322,8 +379,10 @@ end
 --[[
 	Appends one volume onto the flat stack. A volume is 6 bounds, its [lo, hi]
 	slice of _searchVoxelKeys, the mask of frustum planes it must still test,
-	and the min slack its ancestors proved against the planes masked out (so
-	stamps written inside this volume stay bounded by every plane, tested or not).
+	the min slack its ancestors proved against the planes masked out (so
+	stamps written inside this volume stay bounded by every plane, tested or
+	not), and the mask of umbrae that could still occlude it, which arrives
+	negated when the seeding already umbra-tested this exact box this frame.
 ]]
 function VisibilitySearch.pushVolume(
 	self: VisibilitySearch,
@@ -336,7 +395,8 @@ function VisibilitySearch.pushVolume(
 	lo: number,
 	hi: number,
 	planeMask: number,
-	inheritedSlack: number
+	inheritedSlack: number,
+	umbraMask: number
 )
 	local volumesToCheck = self._volumesToCheck
 	local base = self._volumesToCheckSize
@@ -350,7 +410,190 @@ function VisibilitySearch.pushVolume(
 	volumesToCheck[base + 8] = hi
 	volumesToCheck[base + 9] = planeMask
 	volumesToCheck[base + 10] = inheritedSlack
-	self._volumesToCheckSize = base + 10
+	volumesToCheck[base + 11] = umbraMask
+	self._volumesToCheckSize = base + 11
+end
+
+--[[
+	Copies the bucket's keys that fall inside the half-open query box into the
+	seed buffer and pushes the bucket's root search volume owning that slice,
+	clipped to the query bounds (the clipped box still bounds every seeded key,
+	and a tighter box subdivides less). Returns the new seeded-key count.
+	interior says the bucket already sits entirely inside the query box, the
+	caller-computed fact that licenses the unfiltered bulk copy. A bucket
+	whose keys all fall outside the box pushes nothing. A nonzero umbraMask is
+	the survivor set from this frame's umbra test of the bucket's unclipped
+	box, and when the bucket is interior the pushed volume is that exact box,
+	so the mask is negated as the signal for searchVolume to inherit the
+	verdict (re-testing an identical box against an identical mask in the
+	same frame could only repeat it).
+]]
+function VisibilitySearch.seedBucketVolume(
+	self: VisibilitySearch,
+	bucket: { types.VoxelKey },
+	count: number,
+	interior: boolean,
+	bx0: number,
+	by0: number,
+	bz0: number,
+	x0: number,
+	y0: number,
+	z0: number,
+	x1: number,
+	y1: number,
+	z1: number,
+	planeMask: number,
+	inheritedSlack: number,
+	umbraMask: number
+): number
+	local searchVoxelKeys = self._searchVoxelKeys
+	local lo = count + 1
+
+	if interior then
+		local bucketSize = #bucket
+		tableMove(bucket, 1, bucketSize, count + 1, searchVoxelKeys)
+		count += bucketSize
+	else
+		for i = 1, #bucket do
+			local voxelKey = bucket[i]
+			local kx, ky, kz = voxelKey.X, voxelKey.Y, voxelKey.Z
+			if kx >= x0 and kx < x1 and ky >= y0 and ky < y1 and kz >= z0 and kz < z1 then
+				count += 1
+				searchVoxelKeys[count] = voxelKey
+			end
+		end
+	end
+
+	if count >= lo then
+		self:pushVolume(
+			math.max(bx0, x0),
+			math.max(by0, y0),
+			math.max(bz0, z0),
+			math.min(bx0 + COARSE_VOXEL_SIZE, x1),
+			math.min(by0 + COARSE_VOXEL_SIZE, y1),
+			math.min(bz0 + COARSE_VOXEL_SIZE, z1),
+			lo,
+			count,
+			planeMask,
+			inheritedSlack,
+			if interior and umbraMask ~= 0 then -umbraMask else umbraMask
+		)
+	end
+
+	return count
+end
+
+--[[
+	Packs one hidden occlusion proof, valid until the translation odometer
+	passes the current reading plus the given allowance, anchored to the live
+	occluder generation. Buckets and voxels share this encoding, since
+	occlusion charges translation flat with no arm (it depends only on where
+	the camera is). The Z component of -1 marks the clear verdict this record
+	doesn't carry, and that sentinel is load-bearing: it's what keeps a
+	hidden record from satisfying a clear check when the two generations
+	happen to collide numerically, since a -1 expiry fails every accumT
+	comparison. The decode side is inlined at three hot sites that must all
+	read this layout identically: the bucket seeding loop, the leaf test in
+	searchSingleVoxel, and the volume proof walk.
+]]
+function VisibilitySearch.packOccludedProof(self: VisibilitySearch, allowance: number): Vector3
+	return Vector3.new(self._motion._accumT + allowance, self._occlusion._generation, -1)
+end
+
+--[[
+	Packs one clear-side occlusion proof, anchored to the live clear
+	generation (which also bumps when the occluder selection gains a member,
+	the one event that could falsify a clear-side verdict without touching
+	any occluder). The X component of -1 marks the hidden verdict this record
+	doesn't carry. Buckets store the strong form (outside every
+	umbra built this frame), and voxel records store either that form,
+	inherited slice-wide from a volume that pruned its last umbra, or the
+	weak not-occluded form measured at the leaf. All three share this
+	encoding and guard. The X component of -1 carries the same anti-collision
+	duty as packOccludedProof's Z, and the same three inlined decode sites
+	read this layout, so any change here must visit all of them.
+]]
+function VisibilitySearch.packClearProof(self: VisibilitySearch, allowance: number): Vector3
+	return Vector3.new(-1, self._occlusion._clearGeneration, self._motion._accumT + allowance)
+end
+
+--[[
+	Resolves what occlusion can settle about one bucket that is otherwise
+	headed into the visible set or the subdivision search. Its unclipped box
+	is tested against every umbra built this frame (unclipped so the cached
+	proof stays true as the query bounds move with the camera). Returns
+	whether the bucket is fully occluded, plus the mask of umbrae still
+	contesting it. A fully occluded bucket caches a hidden bucket proof, and
+	the caller skips it. A contested bucket comes back with the nonzero
+	survivor mask for the caller to seed into the subdivision search. A
+	bucket every umbra got pruned from returns a zero mask, since occlusion
+	has nothing more to say about it, but it first caches a clear bucket
+	proof when a second, margin-measuring pass earns one, so later frames
+	can take the pure frustum path without re-testing.
+]]
+function VisibilitySearch.resolveBucketOcclusion(
+	self: VisibilitySearch,
+	bucket: { types.VoxelKey },
+	coarseKey: types.CoarseVoxelKey,
+	bx0: number,
+	by0: number,
+	bz0: number
+): (boolean, number)
+	local occlusion = self._occlusion
+	local occluded, allowance, prunedMask = occlusion:testBoxOcclusion(
+		occlusion._fullUmbraMask,
+		bx0,
+		by0,
+		bz0,
+		bx0 + COARSE_VOXEL_SIZE,
+		by0 + COARSE_VOXEL_SIZE,
+		bz0 + COARSE_VOXEL_SIZE
+	)
+	if occluded then
+		-- A stamp is only worth its write if it can outlive the translation
+		-- the camera just did in one frame, so dead-on-arrival proofs are
+		-- skipped and the bucket just re-tests next frame. At a still camera
+		-- the floor is zero and every stamp qualifies.
+		if allowance >= occlusion._motionFloor then
+			self._visibilityCache._bucketOcclusionProofs[coarseKey] = self:packOccludedProof(allowance)
+		end
+		self._perfMetrics._occludedVoxelCount += #bucket
+		if _G.__DEV__ then
+			self:drawBox(
+				Color3.new(1, 0, 0),
+				0.5,
+				bx0,
+				by0,
+				bz0,
+				bx0 + COARSE_VOXEL_SIZE,
+				by0 + COARSE_VOXEL_SIZE,
+				bz0 + COARSE_VOXEL_SIZE
+			)
+		end
+		return true, 0
+	end
+	if prunedMask ~= 0 then
+		return false, prunedMask
+	end
+	-- Every umbra pruned, so the bucket may earn a clear proof. The margins
+	-- get measured in a second, ungated pass, paid once per stamp rather
+	-- than once per frame, and skipped entirely on frames where the shape
+	-- allowance ceiling says no measurement could outlive the motion floor.
+	if occlusion._measuresUseful then
+		local clearAllowance = occlusion:measureClearAllowance(
+			occlusion._fullUmbraMask,
+			bx0,
+			by0,
+			bz0,
+			bx0 + COARSE_VOXEL_SIZE,
+			by0 + COARSE_VOXEL_SIZE,
+			bz0 + COARSE_VOXEL_SIZE
+		)
+		if clearAllowance > 0 then
+			self._visibilityCache._bucketOcclusionProofs[coarseKey] = self:packClearProof(clearAllowance)
+		end
+	end
+	return false, 0
 end
 
 --[[
@@ -366,6 +609,17 @@ end
 	buckets the box overlaps, clamped to the occupied bounding box (without the
 	clamp, empty-space scanning grows cubically with the render distance).
 	Returns how many keys were seeded.
+
+	Occlusion resolves before everything else. A bucket with a still-valid
+	occlusion proof (the occluder generation matches and the translation
+	odometer sits at or under the expiry) skips outright in two comparisons.
+	Otherwise any bucket about to contribute voxels is tested against this
+	frame's umbrae. A fully occluded bucket caches a proof and skips, and a
+	bucket that an umbra merely straddles seeds its keys for the subdivision
+	search with the surviving umbra mask, even when it sits fully inside the
+	frustum. Such a volume carries an empty frustum plane mask plus a sound
+	inherited slack, this frame's measured clearance for a freshly classified
+	bucket or the verdict's remaining expiry margin for a cached one.
 
 	The box must contain the frustum (the caller passes the frustum's own
 	AABB). Fully-inside buckets append their keys with no per-key bounds
@@ -385,12 +639,21 @@ function VisibilitySearch.seedSearchVolumes(
 	local grid = self._grid
 	local motion = self._motion
 	local coarseVoxels = grid._coarseVoxels
-	local searchVoxelKeys = self._searchVoxelKeys
 	local bucketVerdicts = self._visibilityCache._bucketVerdicts
 	local accumT, accumR, accumF = motion._accumT, motion._accumR, motion._accumF
 	-- The side plane positions are the camera position in voxel coordinates.
 	local cameraPosVoxels = frustumPlanes[1]
 	local count = 0
+
+	local bucketOcclusionProofs = self._visibilityCache._bucketOcclusionProofs
+	local umbraCount = self._occlusion._umbraCount
+	local occlusionGeneration = self._occlusion._generation
+	local clearGeneration = self._occlusion._clearGeneration
+	-- When proofs aren't honored (isHonoringProofs explains the policy), the
+	-- per-bucket lookup would be a guaranteed miss and gets skipped, keeping
+	-- this loop free for places that never tag an occluder.
+	local occlusionEnabled = self._occlusion:isHonoringProofs()
+	local perfMetrics = self._perfMetrics
 
 	if grid._coarseBucketCount == 0 then
 		return 0
@@ -422,6 +685,48 @@ function VisibilitySearch.seedSearchVolumes(
 				end
 
 				local bz0 = cz * COARSE_VOXEL_SIZE
+				-- The bucket sits entirely inside the query box when all three
+				-- axes are interior. The bulk key copy and the umbra-mask
+				-- inheritance both hang off this one fact, so it's computed
+				-- once here and passed down to keep the two in lockstep.
+				local interior = interiorXY and bz0 >= z0 and bz0 + COARSE_VOXEL_SIZE <= z1
+
+				-- Occlusion contests this bucket unless a still-valid clear
+				-- proof says every umbra misses it.
+				local bucketContested = umbraCount > 0
+
+				if occlusionEnabled then
+					-- A still-valid occlusion proof settles the bucket before
+					-- any umbra work. Occlusion only depends on where the
+					-- camera is, so either verdict charges just the
+					-- translation odometer, and the generation match
+					-- guarantees what the proof was tested against hasn't
+					-- changed.
+					local occlusionProof = bucketOcclusionProofs[coarseKey]
+					if occlusionProof then
+						if occlusionProof.Y == occlusionGeneration and accumT <= occlusionProof.X then
+							perfMetrics._occludedVoxelCount += #bucket
+							if _G.__DEV__ then
+								self:drawBox(
+									Color3.new(1, 0, 0),
+									0.5,
+									bx0,
+									by0,
+									bz0,
+									bx0 + COARSE_VOXEL_SIZE,
+									by0 + COARSE_VOXEL_SIZE,
+									bz0 + COARSE_VOXEL_SIZE
+								)
+							end
+							continue
+						elseif occlusionProof.Y == clearGeneration and accumT <= occlusionProof.Z then
+							-- The bucket is outside every umbra, so
+							-- it takes the pure frustum path, exactly what a
+							-- fresh umbra test would conclude.
+							bucketContested = false
+						end
+					end
+				end
 
 				local verdict = bucketVerdicts[coarseKey]
 				if verdict then
@@ -432,10 +737,48 @@ function VisibilitySearch.seedSearchVolumes(
 					local m = accumT + accumR * verdict.armFactor
 					if m <= verdict.sideExpiry and m + accumF <= verdict.farExpiry then
 						if verdict.state == BUCKET_INSIDE then
+							local survivingMask = 0
+							if bucketContested then
+								local occludedBucket
+								occludedBucket, survivingMask =
+									self:resolveBucketOcclusion(bucket, coarseKey, bx0, by0, bz0)
+								if occludedBucket then
+									continue
+								end
+							end
+							if survivingMask ~= 0 then
+								-- Every frustum plane is already proven, so the
+								-- contested volume seeded here carries an empty
+								-- plane mask, and the verdict's remaining expiry
+								-- margin is a sound slack for stamps written
+								-- inside it. The stored expiry understates the
+								-- proof-time clearance and the charge since then
+								-- overstates the plane sweep, so the margin
+								-- between them can only understate the clearance
+								-- that remains right now.
+								count = self:seedBucketVolume(
+									bucket,
+									count,
+									interior,
+									bx0,
+									by0,
+									bz0,
+									x0,
+									y0,
+									z0,
+									x1,
+									y1,
+									z1,
+									0,
+									math.min(verdict.sideExpiry - m, verdict.farExpiry - m - accumF),
+									survivingMask
+								)
+								continue
+							end
 							self:appendWholeBucketToVisible(bucket, bx0, by0, bz0)
 						end
 						-- BUCKET_CULLED reaches here with nothing to do. The
-						-- bucket is provably still outside, so nothing is seeded.
+						-- bucket is still outside, so nothing is seeded.
 						continue
 					end
 				end
@@ -495,7 +838,41 @@ function VisibilitySearch.seedSearchVolumes(
 						sideExpiry = m0 + shavedSide
 						farExpiry = m0 + accumF + shavedFar
 
-						self:appendWholeBucketToVisible(bucket, bx0, by0, bz0)
+						-- The frustum verdict still gets cached below either
+						-- way, since it stays true independent of occlusion
+						-- and outlives any one occluder. A contested volume
+						-- seeded here carries an empty plane mask and this
+						-- frame's measured clearance as the inherited slack.
+						local appendBucket = true
+						if bucketContested then
+							local occludedBucket, survivingMask =
+								self:resolveBucketOcclusion(bucket, coarseKey, bx0, by0, bz0)
+							if occludedBucket then
+								appendBucket = false
+							elseif survivingMask ~= 0 then
+								appendBucket = false
+								count = self:seedBucketVolume(
+									bucket,
+									count,
+									interior,
+									bx0,
+									by0,
+									bz0,
+									x0,
+									y0,
+									z0,
+									x1,
+									y1,
+									z1,
+									0,
+									math.min(sideSlack, farSlack),
+									survivingMask
+								)
+							end
+						end
+						if appendBucket then
+							self:appendWholeBucketToVisible(bucket, bx0, by0, bz0)
+						end
 					end
 
 					if verdict then
@@ -521,43 +898,39 @@ function VisibilitySearch.seedSearchVolumes(
 					bucketVerdicts[coarseKey] = nil
 				end
 
-				local lo = count + 1
-
-				-- A bucket sitting fully inside the box needs no per-key filtering.
-				if interiorXY and bz0 >= z0 and bz0 + COARSE_VOXEL_SIZE <= z1 then
-					local bucketSize = #bucket
-					tableMove(bucket, 1, bucketSize, count + 1, searchVoxelKeys)
-					count += bucketSize
-				else
-					for i = 1, #bucket do
-						local voxelKey = bucket[i]
-						local kx, ky, kz = voxelKey.X, voxelKey.Y, voxelKey.Z
-						if kx >= x0 and kx < x1 and ky >= y0 and ky < y1 and kz >= z0 and kz < z1 then
-							count += 1
-							searchVoxelKeys[count] = voxelKey
-						end
+				-- A straddling bucket seeds either way. Occlusion may still
+				-- settle it outright or attach the surviving umbra mask to
+				-- the root volume it seeds.
+				local survivingMask = 0
+				if bucketContested then
+					local occludedBucket
+					occludedBucket, survivingMask = self:resolveBucketOcclusion(bucket, coarseKey, bx0, by0, bz0)
+					if occludedBucket then
+						continue
 					end
 				end
 
-				if count >= lo then
-					-- The bucket box clipped to the query bounds still bounds every
-					-- key in the slice, and a tighter box subdivides less. The root
-					-- volume continues from the classification's partial proof.
-					-- Only the straddled planes need re-testing, and the min slack
-					-- of the planes the box is already inside of travels with it.
-					self:pushVolume(
-						math.max(bx0, x0),
-						math.max(by0, y0),
-						math.max(bz0, z0),
-						math.min(bx0 + COARSE_VOXEL_SIZE, x1),
-						math.min(by0 + COARSE_VOXEL_SIZE, y1),
-						math.min(bz0 + COARSE_VOXEL_SIZE, z1),
-						lo,
-						count,
-						straddledMask,
-						math.min(sideSlack, farSlack)
-					)
-				end
+				-- The root volume continues from the classification's partial
+				-- proof. Only the straddled planes need re-testing, and the min
+				-- slack of the planes the box is already inside of travels with
+				-- it.
+				count = self:seedBucketVolume(
+					bucket,
+					count,
+					interior,
+					bx0,
+					by0,
+					bz0,
+					x0,
+					y0,
+					z0,
+					x1,
+					y1,
+					z1,
+					straddledMask,
+					math.min(sideSlack, farSlack),
+					survivingMask
+				)
 			end
 		end
 	end
@@ -605,6 +978,23 @@ end
 	taking a stack round-trip through searchVolume. voxelKey is the cell's own
 	key, so its components equal (x0, y0, z0). Callers pass both because each
 	already has both forms on hand.
+
+	A nonzero umbraMask means occlusion still contests this cell. A still-valid
+	occlusion proof settles that side first, hidden skipping the cell outright
+	and not-occluded handing it to the frustum work alone. Otherwise the cell
+	gets a leaf umbra test against the caller's mask. An occluded cell stamps
+	a hidden proof (so the proof walk settles it next frame) and is skipped,
+	leaving its frustum proof intact for whenever the occlusion lifts. A cell
+	the test can't prove hidden stamps a not-occluded proof instead, measured
+	against every built umbra rather than just the caller's mask (an umbra an
+	ancestor pruned was pruned without a measured margin, so the stamp
+	re-derives its own), which is what lets the walk settle boundary cells
+	from cache instead of re-testing them every frame. Either stamp is only
+	written when its allowance clears the frame's motion floor, since one
+	that can't would expire before it was ever trusted. At a still camera
+	the floor is zero and expiries compare inclusively, so even a
+	zero-allowance verdict is written and stays alive without re-testing,
+	matching the frustum proofs' zero-clearance semantics.
 ]]
 function VisibilitySearch.searchSingleVoxel(
 	self: VisibilitySearch,
@@ -616,8 +1006,55 @@ function VisibilitySearch.searchSingleVoxel(
 	x0: number,
 	y0: number,
 	z0: number,
-	voxelKey: types.VoxelKey
+	voxelKey: types.VoxelKey,
+	umbraMask: number
 )
+	if umbraMask ~= 0 then
+		local occlusion = self._occlusion
+		local accumT = self._motion._accumT
+		local voxelOcclusionProofs = self._visibilityCache._voxelOcclusionProofs
+		local occlusionProof = voxelOcclusionProofs[voxelKey]
+		local notOccluded = false
+		if occlusionProof then
+			local proofGeneration = occlusionProof.Y
+			if proofGeneration == occlusion._generation and accumT <= occlusionProof.X then
+				-- The cell is still hidden behind its occluder.
+				self._perfMetrics._occludedVoxelCount += 1
+				return
+			elseif proofGeneration == occlusion._clearGeneration and accumT <= occlusionProof.Z then
+				-- The cell is not inside any umbra, so only the
+				-- frustum work below is left.
+				notOccluded = true
+			end
+		end
+		if not notOccluded then
+			local occluded, allowance = occlusion:testBoxOcclusion(umbraMask, x0, y0, z0, x0 + 1, y0 + 1, z0 + 1)
+			if occluded then
+				if allowance >= occlusion._motionFloor then
+					voxelOcclusionProofs[voxelKey] = self:packOccludedProof(allowance)
+				end
+				self._perfMetrics._occludedVoxelCount += 1
+				if _G.__DEV__ then
+					self:drawBox(Color3.new(1, 0, 0), 0.5, x0, y0, z0, x0 + 1, y0 + 1, z0 + 1)
+				end
+				return
+			end
+			-- The measuring pass is skipped on frames where the shape
+			-- allowance ceiling says nothing it stamps could outlive the
+			-- motion floor, and a stamp is only written when its allowance
+			-- clears that floor. At a still camera the floor is zero, so the
+			-- zero-allowance stamp survives and keeps settling the cell from
+			-- cache without re-testing, which is the semantics the frustum
+			-- proofs' zero-clearance stamps share.
+			local notOccludedAllowance = if occlusion._measuresUseful
+				then occlusion:measureNotOccludedAllowance(occlusion._fullUmbraMask, x0, y0, z0, x0 + 1, y0 + 1, z0 + 1)
+				else 0
+			if notOccludedAllowance >= occlusion._motionFloor then
+				voxelOcclusionProofs[voxelKey] = self:packClearProof(notOccludedAllowance)
+			end
+		end
+	end
+
 	local voxelProofs = self._visibilityCache._voxelProofs
 
 	local proof = voxelProofs[voxelKey]
@@ -625,7 +1062,7 @@ function VisibilitySearch.searchSingleVoxel(
 	if proof then
 		local m = accumTF + accumR * proof.Z
 		if m <= proof.Y then
-			-- The cell is provably still outside the frustum.
+			-- The cell is still outside the frustum.
 			return
 		end
 		-- Landing above the visible expiry means the proof expired in both directions.
@@ -680,6 +1117,24 @@ end
 	is nothing to gather here. A volume whose slice survives the proof walk is
 	done on the spot. Otherwise it's box-tested and, when straddling, split in
 	two with its slice partitioned between the children.
+
+	Occlusion goes first, before the proof walk, because an occluded volume is
+	dead no matter what its frustum proofs say. A fully occluded volume stamps
+	a hidden proof on every voxel in its slice and returns with no splits
+	and no appends, leaving the frustum proofs intact for whenever the
+	occlusion lifts, and a volume whose test prunes its last umbra stamps a
+	not-occluded proof across its slice the same way before continuing as
+	pure frustum work. A root volume seeded from an unclipped bucket arrives
+	with its mask negated, meaning the seeding already ran this exact test,
+	so the surviving mask is inherited instead of re-derived. A volume whose
+	mask stays live takes the shared proof walk, where a valid hidden proof
+	settles a cell as skipped, a valid culled frustum proof still settles a
+	cell as culled, and a valid visible frustum proof settles a cell only
+	alongside a valid not-occluded proof (alone it can't say whether an
+	occluder hides the cell), so cells without one resolve through the leaf
+	umbra test. A walk that bails splits the same way a frustum straddle
+	does, children inherit the pruned mask, and children that leave every
+	umbra resume pure frustum work.
 ]]
 function VisibilitySearch.searchVolume(
 	self: VisibilitySearch,
@@ -695,16 +1150,29 @@ function VisibilitySearch.searchVolume(
 	lo: number,
 	hi: number,
 	planeMask: number,
-	inheritedSlack: number
+	inheritedSlack: number,
+	umbraMask: number
 )
 	if hi < lo then
 		return
 	end
 
-	local voxelProofs = self._visibilityCache._voxelProofs
 	local searchVoxelKeys = self._searchVoxelKeys
 
-	-- This is the special case for a single-voxel volume (a bucket clipped down to one cell).
+	-- A negative mask says the seeding already umbra-tested this exact box
+	-- this frame, so its surviving umbrae are inherited rather than
+	-- re-derived (an identical box against an identical mask in the same
+	-- frame can only repeat the verdict).
+	local preTested = false
+	if umbraMask < 0 then
+		umbraMask = -umbraMask
+		preTested = true
+	end
+
+	-- This is the special case for a single-voxel volume (a bucket clipped
+	-- down to one cell). The leaf owns its own proof checks, umbra test,
+	-- and stamps, so the volume-level machinery below would only duplicate
+	-- its work.
 	if x1 - x0 == 1 and y1 - y0 == 1 and z1 - z0 == 1 then
 		self:searchSingleVoxel(
 			accumTF,
@@ -715,44 +1183,137 @@ function VisibilitySearch.searchVolume(
 			x0,
 			y0,
 			z0,
-			searchVoxelKeys[lo]
+			searchVoxelKeys[lo],
+			umbraMask
 		)
 		return
 	end
 
-	-- Walk the slice's proofs. Valid-visible voxels accumulate into the visible
-	-- set, valid-culled ones are skipped, and unproven ones collect into a
-	-- scratch list. While unproven voxels stay rare relative to proven ones,
-	-- the walk keeps its partial run and re-tests just those cells directly, so
-	-- a few expired proofs cost a few cell tests instead of re-subdividing the
-	-- whole volume. Once unproven voxels outnumber proven ones by the bail
-	-- margin (a cold or mass-expired slice), the partial run is dropped and the
-	-- box test below takes over, since subdivision proves whole boxes at a
-	-- fraction of a test per voxel. This relies on searchVolume running
-	-- serially (it does today). Parallel volume workers would race on the
-	-- shared visible set here.
-	debug.profilebegin("walkVoxelProofs")
+	if umbraMask ~= 0 and not preTested then
+		local occlusion = self._occlusion
+		local occluded, allowance, prunedMask = occlusion:testBoxOcclusion(umbraMask, x0, y0, z0, x1, y1, z1)
+		if occluded then
+			-- Every voxel here sits inside the occluding umbra, so each gets
+			-- the umbra's occlusion proof stamped, one shared Vector3 since
+			-- the allowance and generation are the umbra's, not the cell's.
+			-- Frustum proofs stay untouched for whenever the occlusion lifts.
+			-- A stamp that can't outlive the last frame's translation is
+			-- skipped, since re-proving the whole slice next frame costs one
+			-- box test while the dead stamps would cost a write per cell.
+			if allowance >= occlusion._motionFloor then
+				debug.profilebegin("stampBoxOccluded")
+				local voxelOcclusionProofs = self._visibilityCache._voxelOcclusionProofs
+				local occlusionProof = self:packOccludedProof(allowance)
+				for i = lo, hi do
+					voxelOcclusionProofs[searchVoxelKeys[i]] = occlusionProof
+				end
+				debug.profileend()
+			end
+			self._perfMetrics._occludedVoxelCount += hi - lo + 1
+			if _G.__DEV__ then
+				self:drawBox(Color3.new(1, 0, 0), 0.5, x0, y0, z0, x1, y1, z1)
+			end
+			return
+		end
+		if prunedMask == 0 and occlusion._measuresUseful then
+			-- The test pruned the last umbra, so this box and everything in
+			-- it is outside them all. That claim inherits downward
+			-- (each cell is outside by at least the box's margins), so one
+			-- measuring pass against every built umbra stamps the whole
+			-- slice, and the walk settles these cells from their proofs on
+			-- later frames instead of re-deriving the subdivision. A zero
+			-- measurement (no single separating plane, or nothing that could
+			-- outlive the motion floor) suppresses the stamp, and frames
+			-- whose shape allowance ceiling rules every measurement out skip
+			-- the pass entirely.
+			debug.profilebegin("stampBoxClear")
+			local clearAllowance = occlusion:measureClearAllowance(occlusion._fullUmbraMask, x0, y0, z0, x1, y1, z1)
+			if clearAllowance > 0 then
+				local voxelOcclusionProofs = self._visibilityCache._voxelOcclusionProofs
+				local occlusionProof = self:packClearProof(clearAllowance)
+				for i = lo, hi do
+					voxelOcclusionProofs[searchVoxelKeys[i]] = occlusionProof
+				end
+			end
+			debug.profileend()
+		end
+		umbraMask = prunedMask
+	end
+
+	local voxelProofs = self._visibilityCache._voxelProofs
+
 	local pendingVoxelKeys = self._pendingVoxelKeys
+
+	-- Walk the slice's proofs, both families at once. Valid-occluded voxels
+	-- are skipped as hidden, and valid-culled ones are skipped as outside
+	-- (a culled cell is culled no matter what occludes it). Under a live
+	-- mask a frustum proof can't say whether an occluder hides the cell, so
+	-- each contested cell consults its occlusion record once. A valid hidden
+	-- verdict settles it outright, a valid not-occluded verdict hands it
+	-- back to its frustum proof alone (no umbra can swallow it while the
+	-- proof lives, so the frustum answer is the whole answer), and a cell
+	-- with neither joins the unproven scratch list to pick up a leaf umbra
+	-- test below. An uncontested volume skips the occlusion lookup entirely,
+	-- even for cells whose stored occlusion proofs are still valid. This
+	-- loop is the hottest in the search, and paying a per-cell lookup on
+	-- every uncontested walk to catch the rare proof whose occluder lost
+	-- this frame's selection isn't worth it, so those cells re-earn visible
+	-- through their frustum proofs until their occluder wins a slot again,
+	-- which only shows more. While unproven voxels stay rare relative to
+	-- proven ones, the walk keeps its partial run and re-tests just those
+	-- cells directly, so a few expired proofs cost a few cell tests instead
+	-- of re-subdividing the whole volume. Once unproven voxels outnumber
+	-- proven ones by the bail margin (a cold or mass-expired slice), the
+	-- partial run is dropped and the box test below takes over, since
+	-- subdivision proves whole boxes at a fraction of a test per voxel.
+	-- This relies on searchVolume running serially (it does today).
+	-- Parallel volume workers would race on the shared visible set here.
+	debug.profilebegin("walkVoxelProofs")
+	local contested = umbraMask ~= 0
+	local voxelOcclusionProofs = self._visibilityCache._voxelOcclusionProofs
+	local occlusionGeneration = if contested then self._occlusion._generation else 0
+	local occlusionClearGeneration = if contested then self._occlusion._clearGeneration else 0
+	local accumT = if contested then self._motion._accumT else 0
 	local unprovenVoxelKeys = self._unprovenVoxelKeys
 	local startCount = self._visibleVoxelCount
 	local visibleCount = startCount
+	local occludedCount = 0
 	local provenCount = 0
 	local unprovenCount = 0
 	local bailed = false
 	for i = lo, hi do
 		local voxelKey = searchVoxelKeys[i]
+		local cellContested = contested
+		if contested then
+			local occlusionProof = voxelOcclusionProofs[voxelKey]
+			if occlusionProof then
+				local proofGeneration = occlusionProof.Y
+				if proofGeneration == occlusionGeneration and accumT <= occlusionProof.X then
+					-- The cell is still hidden behind its occluder.
+					provenCount += 1
+					occludedCount += 1
+					continue
+				elseif proofGeneration == occlusionClearGeneration and accumT <= occlusionProof.Z then
+					-- The cell is not inside any umbra, so its
+					-- frustum proof decides alone.
+					cellContested = false
+				end
+			end
+		end
 		local proof = voxelProofs[voxelKey]
 		if proof then
 			local m = accumTF + accumR * proof.Z
-			if m <= proof.X then
+			if not cellContested and m <= proof.X then
 				visibleCount += 1
 				pendingVoxelKeys[visibleCount] = voxelKey
 				provenCount += 1
 			elseif m <= proof.Y then
-				-- It's provably still culled, so skip it silently.
+				-- It's still culled, so skip it silently.
 				provenCount += 1
 			else
-				-- The proof expired in both directions.
+				-- No proof settles this cell. A still-valid visible verdict
+				-- lands here too while the cell stays contested, since it
+				-- still needs an occlusion answer.
 				unprovenCount += 1
 				if unprovenCount > provenCount + UNPROVEN_WALK_BAIL_MARGIN then
 					bailed = true
@@ -772,11 +1333,13 @@ function VisibilitySearch.searchVolume(
 	debug.profileend()
 
 	if not bailed then
-		-- Keep the walk's appends and resolve the stragglers cell by cell. The
-		-- volume's own plane mask and inherited slack are sound for any cell it
-		-- contains (the mask only skips planes that provably cannot reject, and
-		-- the inherited slack only shrinks down the tree).
+		-- Keep the walk's appends and skips and resolve the stragglers cell
+		-- by cell. The volume's own plane mask, inherited slack, and umbra
+		-- mask are sound for any cell it contains (the masks only skip
+		-- planes and umbrae that cannot decide the cell, and the
+		-- inherited slack only shrinks down the tree).
 		self._visibleVoxelCount = visibleCount
+		self._perfMetrics._occludedVoxelCount += occludedCount
 		for i = 1, unprovenCount do
 			local voxelKey = unprovenVoxelKeys[i]
 			self:searchSingleVoxel(
@@ -788,10 +1351,11 @@ function VisibilitySearch.searchVolume(
 				voxelKey.X,
 				voxelKey.Y,
 				voxelKey.Z,
-				voxelKey
+				voxelKey,
+				umbraMask
 			)
 		end
-		if _G.__DEV__ and unprovenCount == 0 and visibleCount - startCount == hi - lo + 1 then
+		if _G.__DEV__ and unprovenCount == 0 and occludedCount == 0 and visibleCount - startCount == hi - lo + 1 then
 			self:drawBox(Color3.new(0, 1, 0), 0, x0, y0, z0, x1, y1, z1)
 		end
 		return
@@ -820,8 +1384,10 @@ function VisibilitySearch.searchVolume(
 	local effectiveSlack = if boxSlack < inheritedSlack then boxSlack else inheritedSlack
 
 	-- If the box straddles no plane it is entirely inside, so we know all voxels
-	-- contained inside are in the frustum and we can process them now and not split further.
-	if straddledMask == 0 then
+	-- contained inside are in the frustum and we can process them now and not
+	-- split further. A live umbra mask blocks this shortcut, since some of
+	-- those voxels may be hidden, and the split below sorts them out.
+	if straddledMask == 0 and umbraMask == 0 then
 		debug.profilebegin("isCompletelyInside")
 		-- Every voxel inherits the box's slack, since each is contained in the
 		-- box and so sits at least as far inside every plane as the box does.
@@ -879,7 +1445,8 @@ function VisibilitySearch.searchVolume(
 	local bHasVoxels = hi >= mid
 
 	-- A child that landed on a single voxel is resolved right here rather than
-	-- paying a push, a pop, and another searchVolume call for one cell.
+	-- paying a push, a pop, and another searchVolume call for one cell. The
+	-- surviving umbra mask rides along so the cell gets its leaf test.
 	if aHasVoxels and ax1 - ax0 == 1 and ay1 - ay0 == 1 and az1 - az0 == 1 then
 		self:searchSingleVoxel(
 			accumTF,
@@ -890,7 +1457,8 @@ function VisibilitySearch.searchVolume(
 			ax0,
 			ay0,
 			az0,
-			searchVoxelKeys[lo]
+			searchVoxelKeys[lo],
+			umbraMask
 		)
 		aHasVoxels = false
 	end
@@ -904,7 +1472,8 @@ function VisibilitySearch.searchVolume(
 			bx0,
 			by0,
 			bz0,
-			searchVoxelKeys[mid]
+			searchVoxelKeys[mid],
+			umbraMask
 		)
 		bHasVoxels = false
 	end
@@ -916,17 +1485,17 @@ function VisibilitySearch.searchVolume(
 	-- pushing them.
 	if self._volumeRotationCounter % 2 == 0 then
 		if aHasVoxels then
-			self:pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1, straddledMask, effectiveSlack)
+			self:pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1, straddledMask, effectiveSlack, umbraMask)
 		end
 		if bHasVoxels then
-			self:pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi, straddledMask, effectiveSlack)
+			self:pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi, straddledMask, effectiveSlack, umbraMask)
 		end
 	else
 		if bHasVoxels then
-			self:pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi, straddledMask, effectiveSlack)
+			self:pushVolume(bx0, by0, bz0, bx1, by1, bz1, mid, hi, straddledMask, effectiveSlack, umbraMask)
 		end
 		if aHasVoxels then
-			self:pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1, straddledMask, effectiveSlack)
+			self:pushVolume(ax0, ay0, az0, ax1, ay1, az1, lo, mid - 1, straddledMask, effectiveSlack, umbraMask)
 		end
 	end
 end
@@ -948,7 +1517,7 @@ function VisibilitySearch.reuseCachedVisibilityForRemainingVolumes(self: Visibil
 	local skipped = 0
 
 	local volumesToCheck = self._volumesToCheck
-	for base = 0, self._volumesToCheckSize - 1, 10 do
+	for base = 0, self._volumesToCheckSize - 1, 11 do
 		local lo, hi = volumesToCheck[base + 7], volumesToCheck[base + 8]
 		for i = lo, hi do
 			local voxelKey = searchVoxelKeys[i]
@@ -984,6 +1553,7 @@ end
 ]]
 function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 	local motion = self._motion
+	local occlusion = self._occlusion
 	local grid = self._grid
 	local perfMetrics = self._perfMetrics
 
@@ -1002,11 +1572,17 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 		and motion._accumF == self._replayAccumF
 		and motion._flushCount == self._replayFlushCount
 		and grid._occupancyGeneration == self._replayOccupancyGeneration
+		and occlusion._buildCount == self._replayBuildCount
+		and occlusion._generation == self._replayGeneration
+		and occlusion._clearGeneration == self._replayClearGeneration
+		and self._config.maxOccluders == self._replayMaxOccluders
 	then
 		-- Nothing the pass reads has changed, so the frame re-marks the
-		-- previous output. The caches are exactly as the anchor pass left
-		-- them, unaged because the odometers never moved.
+		-- previous output. The occluded count is restored alongside since the
+		-- same voxels still sit hidden, and the caches are exactly as the
+		-- anchor pass left them, unaged because the odometers never moved.
 		self._visibleVoxelCount = self._replayVisibleVoxelCount
+		perfMetrics._occludedVoxelCount = self._replayOccludedVoxelCount
 		perfMetrics._searchDuration = os.clock() - now
 		return true
 	end
@@ -1041,12 +1617,12 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 	-- Rotate which bucket volume sits on top (the stack is LIFO, so the top is
 	-- searched first), ensuring every region gets its turn at the front of the
 	-- budget when the search can't finish a whole frame.
-	local volumeCount = self._volumesToCheckSize // 10
+	local volumeCount = self._volumesToCheckSize // 11
 	if volumeCount > 1 then
-		local chosenBase = (self._volumeRotationCounter % volumeCount) * 10
-		local topBase = (volumeCount - 1) * 10
+		local chosenBase = (self._volumeRotationCounter % volumeCount) * 11
+		local topBase = (volumeCount - 1) * 11
 		if chosenBase ~= topBase then
-			for k = 1, 10 do
+			for k = 1, 11 do
 				volumesToCheck[chosenBase + k], volumesToCheck[topBase + k] =
 					volumesToCheck[topBase + k], volumesToCheck[chosenBase + k]
 			end
@@ -1062,24 +1638,41 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 	local accumR = motion._accumR
 	local volumesSinceClockCheck = 0
 	while self._volumesToCheckSize > 0 do
-		-- Pop the top volume, which is 10 numbers covering its 6 bounds, its
-		-- [lo, hi] slice, its plane mask, and its inherited slack. We read
-		-- everything into locals before shrinking the stack so searchVolume can
-		-- reuse the just-freed slots for any child volumes it pushes.
+		-- Pop the top volume, which is 11 numbers covering its 6 bounds, its
+		-- [lo, hi] slice, its plane mask, its inherited slack, and its umbra
+		-- mask. We read everything into locals before shrinking the stack so
+		-- searchVolume can reuse the just-freed slots for any child volumes it
+		-- pushes.
 		local n = self._volumesToCheckSize
-		local x0 = volumesToCheck[n - 9]
-		local y0 = volumesToCheck[n - 8]
-		local z0 = volumesToCheck[n - 7]
-		local x1 = volumesToCheck[n - 6]
-		local y1 = volumesToCheck[n - 5]
-		local z1 = volumesToCheck[n - 4]
-		local lo = volumesToCheck[n - 3]
-		local hi = volumesToCheck[n - 2]
-		local planeMask = volumesToCheck[n - 1]
-		local inheritedSlack = volumesToCheck[n]
-		self._volumesToCheckSize = n - 10
+		local x0 = volumesToCheck[n - 10]
+		local y0 = volumesToCheck[n - 9]
+		local z0 = volumesToCheck[n - 8]
+		local x1 = volumesToCheck[n - 7]
+		local y1 = volumesToCheck[n - 6]
+		local z1 = volumesToCheck[n - 5]
+		local lo = volumesToCheck[n - 4]
+		local hi = volumesToCheck[n - 3]
+		local planeMask = volumesToCheck[n - 2]
+		local inheritedSlack = volumesToCheck[n - 1]
+		local umbraMask = volumesToCheck[n]
+		self._volumesToCheckSize = n - 11
 
-		self:searchVolume(accumTF, accumR, frustumPlanes, x0, y0, z0, x1, y1, z1, lo, hi, planeMask, inheritedSlack)
+		self:searchVolume(
+			accumTF,
+			accumR,
+			frustumPlanes,
+			x0,
+			y0,
+			z0,
+			x1,
+			y1,
+			z1,
+			lo,
+			hi,
+			planeMask,
+			inheritedSlack,
+			umbraMask
+		)
 
 		volumesSinceClockCheck += 1
 		if volumesSinceClockCheck >= SEARCH_CLOCK_CHECK_VOLUME_INTERVAL then
@@ -1101,7 +1694,12 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number): boolean
 		self._replayAccumF = motion._accumF
 		self._replayFlushCount = motion._flushCount
 		self._replayOccupancyGeneration = grid._occupancyGeneration
+		self._replayBuildCount = occlusion._buildCount
+		self._replayGeneration = occlusion._generation
+		self._replayClearGeneration = occlusion._clearGeneration
+		self._replayMaxOccluders = config.maxOccluders
 		self._replayVisibleVoxelCount = self._visibleVoxelCount
+		self._replayOccludedVoxelCount = perfMetrics._occludedVoxelCount
 	else
 		self._replayReady = false
 	end
@@ -1202,7 +1800,7 @@ function VisibilitySearch.resizeBuffers(self: VisibilitySearch)
 	-- stack empty (the steady state between frames) this rebuilds the buffer
 	-- empty, and the next seed refills it from scratch.
 	local keptSeedKeys = 0
-	for base = 0, volumesSize - 1, 10 do
+	for base = 0, volumesSize - 1, 11 do
 		local hi = volumesToCheck[base + 8]
 		if hi > keptSeedKeys then
 			keptSeedKeys = hi

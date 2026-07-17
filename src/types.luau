@@ -76,6 +76,9 @@ export type PerfMetrics = {
 	_skippedSearch: { number },
 	_skippedIngest: { number },
 	_skippedFramesCursor: number,
+	-- This counts the voxels the current frame's search skipped because they
+	-- sat inside an occluder's umbra.
+	_occludedVoxelCount: number,
 	_searchDuration: number,
 	_ingestDuration: number,
 	_averageObjectDeltaTime: number,

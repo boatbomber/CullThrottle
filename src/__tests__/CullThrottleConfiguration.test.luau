@@ -356,6 +356,48 @@ describe("CullThrottle configuration", function()
 		end)
 	end)
 
+	describe("SetMaxOccluders", function()
+		it("accepts the boundary caps of zero and thirty-two", function()
+			-- Each umbra claims one bit of a 32-bit mask, so 32 is the highest
+			-- legal cap, and zero is the documented way to disable occlusion
+			-- culling entirely.
+			cullThrottle:SetMaxOccluders(0)
+			expect(cullThrottle:GetMaxOccluders()).toBe(0)
+
+			cullThrottle:SetMaxOccluders(32)
+			expect(cullThrottle:GetMaxOccluders()).toBe(32)
+		end)
+
+		it("rejects a fractional occluder cap", function()
+			-- A fractional count has no meaning as a table size, so the setter
+			-- refuses it instead of truncating silently.
+			expect(function()
+				cullThrottle:SetMaxOccluders(2.5)
+			end).toThrow()
+		end)
+
+		it("rejects a negative occluder cap", function()
+			expect(function()
+				cullThrottle:SetMaxOccluders(-1)
+			end).toThrow()
+		end)
+
+		it("rejects a cap above thirty-two", function()
+			-- The 33rd occluder would have no umbra mask bit to claim.
+			expect(function()
+				cullThrottle:SetMaxOccluders(33)
+			end).toThrow()
+		end)
+
+		it("rejects a NaN occluder cap", function()
+			-- Every comparison against NaN is false, so the bounds are phrased to
+			-- fail it into the error rather than let it through.
+			expect(function()
+				cullThrottle:SetMaxOccluders(0 / 0)
+			end).toThrow()
+		end)
+	end)
+
 	describe("SetComputeVisibilityOnlyOnDemand", function()
 		it("still resolves visibility when queried directly in on-demand mode", function()
 			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
@@ -425,6 +467,13 @@ describe("CullThrottle configuration", function()
 			local refreshRates = cullThrottle:GetRefreshRates()
 			expect(refreshRates.Max).toBeCloseTo(60)
 			expect(refreshRates.Min).toBeCloseTo(15)
+		end)
+
+		it("reads back the max occluders", function()
+			-- The probe value is distinct from the default 8 so the getter can't
+			-- pass by never reading the stored cap.
+			cullThrottle:SetMaxOccluders(5)
+			expect(cullThrottle:GetMaxOccluders()).toBe(5)
 		end)
 
 		it("reads back the boolean flags", function()

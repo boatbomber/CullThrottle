@@ -18,6 +18,16 @@ local function createMockPart(position: Vector3?, size: Vector3?, anchored: bool
 end
 
 --[[
+	Creates an anchored block part tagged as a CullThrottle occluder, the way
+	a consumer stages a wall for occlusion culling.
+]]
+local function createMockOccluder(position: Vector3, size: Vector3)
+	local part = createMockPart(position, size)
+	part:AddTag("CullThrottleOccluder")
+	return part
+end
+
+--[[
 	Creates a workspace model whose PrimaryPart is a fresh mock part.
 ]]
 local function createMockModel(position: Vector3?, size: Vector3?)
@@ -103,16 +113,36 @@ local function culledVoxelProof(expiry: number, arm: number): Vector3
 end
 
 --[[
+	Packs a hidden occlusion proof the way VisibilitySearch.packOccludedProof
+	stamps one, valid until the translation odometer passes the given absolute
+	expiry, anchored to the given occluder generation. The Z component of -1 is
+	the sentinel for the clear verdict this record doesn't carry. Buckets and
+	voxels share the encoding.
+]]
+local function hiddenOcclusionProof(expiry: number, generation: number): Vector3
+	return Vector3.new(expiry, generation, -1)
+end
+
+--[[
+	Packs a clear-side occlusion proof the way VisibilitySearch.packClearProof
+	stamps one, the mirror of hiddenOcclusionProof with the expiry in Z, the
+	clear generation in Y, and the -1 sentinel in X.
+]]
+local function clearOcclusionProof(expiry: number, generation: number): Vector3
+	return Vector3.new(-1, generation, expiry)
+end
+
+--[[
 	Pops the top volume off a search's flat stack, the way the search's run
-	loop reads one. Each volume spans ten consecutive slots holding its box
-	bounds, its [lo, hi] slice of the seed buffer, its plane mask, and its
-	inherited slack, and this returns them as named fields so tests never
-	hand-copy the slot layout.
+	loop reads one. Each volume spans eleven consecutive slots holding its box
+	bounds, its [lo, hi] slice of the seed buffer, its plane mask, its
+	inherited slack, and its umbra mask, and this returns them as named fields
+	so tests never hand-copy the slot layout.
 ]]
 -- One volume spans this many consecutive slots on the search's flat stack.
 -- popVolume below names each slot, and volumeCount divides by it, so the
 -- stride lives here and nowhere else in the tests.
-local VOLUME_SLOT_COUNT = 10
+local VOLUME_SLOT_COUNT = 11
 
 --[[
 	Returns how many volumes currently sit on a search's flat stack, so tests
@@ -126,16 +156,17 @@ local function popVolume(search: any): { [string]: number }
 	local volumesToCheck = search._volumesToCheck
 	local n = search._volumesToCheckSize
 	local volume = {
-		x0 = volumesToCheck[n - 9],
-		y0 = volumesToCheck[n - 8],
-		z0 = volumesToCheck[n - 7],
-		x1 = volumesToCheck[n - 6],
-		y1 = volumesToCheck[n - 5],
-		z1 = volumesToCheck[n - 4],
-		lo = volumesToCheck[n - 3],
-		hi = volumesToCheck[n - 2],
-		planeMask = volumesToCheck[n - 1],
-		inheritedSlack = volumesToCheck[n],
+		x0 = volumesToCheck[n - 10],
+		y0 = volumesToCheck[n - 9],
+		z0 = volumesToCheck[n - 8],
+		x1 = volumesToCheck[n - 7],
+		y1 = volumesToCheck[n - 6],
+		z1 = volumesToCheck[n - 5],
+		lo = volumesToCheck[n - 4],
+		hi = volumesToCheck[n - 3],
+		planeMask = volumesToCheck[n - 2],
+		inheritedSlack = volumesToCheck[n - 1],
+		umbraMask = volumesToCheck[n],
 	}
 	search._volumesToCheckSize = n - VOLUME_SLOT_COUNT
 	return volume
@@ -162,7 +193,8 @@ local function drainVolumeStack(search: any, accumTF: number, accumR: number, fr
 			volume.lo,
 			volume.hi,
 			volume.planeMask,
-			volume.inheritedSlack
+			volume.inheritedSlack,
+			volume.umbraMask
 		)
 	end
 end
@@ -248,6 +280,7 @@ local roomyFrustumPlanes: { Vector3 } = {
 
 return {
 	createMockPart = createMockPart,
+	createMockOccluder = createMockOccluder,
 	createMockModel = createMockModel,
 	ingestObjects = ingestObjects,
 	fastIngestObjects = fastIngestObjects,
@@ -255,6 +288,8 @@ return {
 	stubObjectData = stubObjectData,
 	visibleVoxelProof = visibleVoxelProof,
 	culledVoxelProof = culledVoxelProof,
+	hiddenOcclusionProof = hiddenOcclusionProof,
+	clearOcclusionProof = clearOcclusionProof,
 	volumeCount = volumeCount,
 	popVolume = popVolume,
 	drainVolumeStack = drainVolumeStack,

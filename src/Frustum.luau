@@ -96,7 +96,9 @@ function Frustum.isBoxInFrustum(
 	local minExitSlack = math.huge
 	local planeBit = 1
 
-	-- The far plane is the last pair in the planes array (i == 9).
+	-- The far plane is the pair at i == 9. Callers may append extra planes
+	-- past it (the occluder prefilter closes the frustum behind the camera
+	-- with a sixth), and those report like side planes.
 	for i = 1, #frustumPlanes, 2 do
 		if bit32.band(planeMask, planeBit) ~= 0 then
 			local planePos, planeNormal = frustumPlanes[i], frustumPlanes[i + 1]

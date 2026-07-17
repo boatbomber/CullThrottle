@@ -94,6 +94,24 @@ local function addAllObjects(cullThrottle: any, parts: { BasePart }): number
 end
 
 --[[
+	Builds a ring of big walls around the scene center for the occlusion
+	scenario. They stay unparented, since the bench registers them with the
+	occlusion module directly instead of going through the tag.
+]]
+local function createOccluderWalls(): { Part }
+	local walls = table.create(8)
+	for i = 1, 8 do
+		local angle = (i - 1) * math.pi / 4
+		local wall = Instance.new("Part")
+		wall.Anchored = true
+		wall.Size = Vector3.new(500, 250, 20)
+		wall.CFrame = CFrame.new(math.sin(angle) * 350, 125, math.cos(angle) * 350) * CFrame.Angles(0, angle, 0)
+		walls[i] = wall
+	end
+	return walls
+end
+
+--[[
 	Sorts a copy-free array of samples and returns (mean, p50, p95), all in
 	the samples' own unit.
 ]]
@@ -263,6 +281,16 @@ local function main()
 	local sceneCenter = Vector3.new(0, SCENE_HEIGHT / 2, 0)
 	local p50Sum = 0
 
+	-- The orbit scenarios share one camera path so the occluded runs stay a
+	-- true A/B against the plain orbit, differing only in what's registered
+	-- (and, for the slow variant, the angular rate).
+	local function orbitPose(degreesPerFrame: number): (number) -> CFrame
+		return function(frame)
+			local angle = math.rad(frame * degreesPerFrame)
+			return CFrame.lookAt(Vector3.new(math.sin(angle) * 900, 300, math.cos(angle) * 900), sceneCenter)
+		end
+	end
+
 	p50Sum += runScenario(cullThrottle, camera, "static", function(_frame)
 		return CFrame.lookAt(Vector3.new(0, 250, 1200), sceneCenter)
 	end)
@@ -275,10 +303,24 @@ local function main()
 		return CFrame.lookAt(Vector3.new(0, 200, 1500 - frame * 6), Vector3.new(0, 200, -SCENE_HALF_EXTENT))
 	end)
 
-	p50Sum += runScenario(cullThrottle, camera, "orbit", function(frame)
-		local angle = math.rad(frame * 0.6)
-		return CFrame.lookAt(Vector3.new(math.sin(angle) * 900, 300, math.cos(angle) * 900), sceneCenter)
-	end)
+	p50Sum += runScenario(cullThrottle, camera, "orbit", orbitPose(0.6))
+
+	local walls = createOccluderWalls()
+	for _, wall in walls do
+		cullThrottle._occlusion:_registerOccluder(wall)
+	end
+	p50Sum += runScenario(cullThrottle, camera, "occluded", orbitPose(0.6))
+	-- The same orbit at a sixth of the speed, about 1.6 studs per frame, which
+	-- is fast player movement rather than the scenario above's extreme sweep.
+	-- The fast orbit is adversarial for occlusion proof caching (every proof
+	-- expires within a frame or two), while this one moves slowly enough for
+	-- the translation allowances to pay off, so the pair brackets the layer's
+	-- worst and near-ideal cases.
+	p50Sum += runScenario(cullThrottle, camera, "occl-slow", orbitPose(0.1))
+	for _, wall in walls do
+		cullThrottle._occlusion:_unregisterOccluder(wall)
+		wall:Destroy()
+	end
 
 	p50Sum += runScenario(cullThrottle, camera, "teleport", function(frame)
 		local angle = math.rad((frame % 4) * 90)

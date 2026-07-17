@@ -38,6 +38,49 @@ end
 
 BlocksFolder.Parent = workspace
 
+-- Let's add occluders that can hide some blocks.
+local OccludersFolder = Instance.new("Folder")
+
+for _ = 1, 20 do
+	local occluder = Instance.new("Part")
+	occluder:AddTag("CullThrottleOccluder")
+	occluder.Anchored = true
+	occluder.CanCollide = false
+	occluder.Color = Color3.new(0, 0, 0)
+	occluder.Transparency = 0.3
+	occluder.Size = Vector3.new(math.random(5, 50), math.random(100, 200), math.random(300, 500))
+	occluder.CFrame = CFrame.lookAlong(
+		Vector3.new(math.random(-1000, 1000), math.random(-500, 500), math.random(-1000, 1000)),
+		Vector3.new(math.random(-100, 100) / 100, math.random(-100, 100) / 100, math.random(-100, 100) / 100)
+	)
+	occluder.Parent = OccludersFolder
+end
+
+task.delay(1, function()
+	-- Create a consistent occluder right in front of the camera.
+	-- Toggle it on and off to easily measure how much occlusion saves.
+	local occluder = Instance.new("Part")
+	occluder:AddTag("CullThrottleOccluder")
+	occluder.Anchored = true
+	occluder.CanCollide = false
+	occluder.Color = Color3.new(0, 1, 0)
+	occluder.Transparency = 0.6
+	occluder.Size = Vector3.new(400, 400, 10)
+	occluder.CFrame =
+		CFrame.lookAlong(CameraCache.Position + (CameraCache.CFrame.LookVector * 15), CameraCache.CFrame.LookVector)
+	occluder.Parent = OccludersFolder
+
+	while task.wait(5) do
+		occluder:RemoveTag("CullThrottleOccluder")
+		occluder.Color = Color3.new(1, 0, 0)
+		task.wait(5)
+		occluder:AddTag("CullThrottleOccluder")
+		occluder.Color = Color3.new(0, 1, 0)
+	end
+end)
+
+OccludersFolder.Parent = workspace
+
 -- We need to tell CullThrottle about all the objects that we want it to manage.
 local FloatingBlocksUpdater = CullThrottle.new()
 FloatingBlocksUpdater:CaptureTag(TAG)
@@ -116,7 +159,7 @@ TopLeftListLayout.Padding = UDim.new(0, 5)
 TopLeftListLayout.Parent = TopLeftGraphs
 
 local BottomLeftGraphs = Instance.new("Frame")
-BottomLeftGraphs.Size = UDim2.fromScale(0.2, 0.2)
+BottomLeftGraphs.Size = UDim2.fromScale(0.2, 0.25)
 BottomLeftGraphs.Position = UDim2.new(0, 5, 1, -5)
 BottomLeftGraphs.AnchorPoint = Vector2.new(0, 1)
 BottomLeftGraphs.BackgroundTransparency = 1
@@ -175,11 +218,14 @@ renderDistanceGraph.Frame.Parent = TopRightGraphs
 
 local objectsVisibleGraph = MetricGraph.new("Objects Visible", table.create(50, 0), 0, 900)
 local objectsUpdatedGraph = MetricGraph.new("Objects Updated", table.create(50, 0), 0, 450)
+local occludedVoxelsGraph = MetricGraph.new("Voxels Occluded", table.create(50, 0), 0, 100)
 
-objectsVisibleGraph.Frame.Size = UDim2.fromScale(1, 1 / 2)
-objectsUpdatedGraph.Frame.Size = UDim2.fromScale(1, 1 / 2)
+objectsVisibleGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
+objectsUpdatedGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
+occludedVoxelsGraph.Frame.Size = UDim2.fromScale(1, 1 / 3)
 objectsVisibleGraph.Frame.Parent = BottomLeftGraphs
 objectsUpdatedGraph.Frame.Parent = BottomLeftGraphs
+occludedVoxelsGraph.Frame.Parent = BottomLeftGraphs
 
 local gameRefreshRateGraph = MetricGraph.new("Game Refresh Rate", table.create(50, 0), 0, 144, "%dHz")
 local p05ObjectRefreshRateGraph =
@@ -237,6 +283,7 @@ RunService.PostSimulation:Connect(function(gameDelta)
 	-- The updated graph borrows the visible graph's peak as its max so the two graphs share a scale.
 	objectsUpdatedGraph.Max = math.max(table.unpack(objectsVisibleGraph._data))
 	objectsUpdatedGraph:measure(updatedObjectCount)
+	occludedVoxelsGraph:measure(perfMetrics.occludedVoxelCount)
 	p05ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.05)] or math.huge))
 	avgObjectRefreshRateGraph:measure(1 / perfMetrics.averageObjectDeltaTime)
 	p95ObjectRefreshRateGraph:measure(1 / (objectDeltas[math.floor(#objectDeltas * 0.95)] or math.huge))
@@ -252,6 +299,10 @@ end)
 
 -- We use a fake camera to get a third person view.
 if _G.__VISUALIZE__ then
+	-- We disable dynamic render distance since the cost of the debug visuals
+	-- cause it to end up near the smallest possible render distance.
+	FloatingBlocksUpdater:SetRenderDistanceRange(NumberRange.new(1000))
+
 	local testCam = Instance.new("Part")
 	testCam.Name = "_CullThrottleTestCam"
 	testCam.Size = Vector3.new(16, 9, 3)

@@ -78,15 +78,31 @@ describe("CameraMotion", function()
 		expect(motion._accumF).toBe(f)
 	end)
 
-	it("counts the flush when the cache flushes", function()
+	it("records how much translation the last processed frame added", function()
+		cullThrottle:SetVoxelSize(100)
 		local motion = cullThrottle._motion
+
+		-- A 100 stud move is one voxel of translation, and the occlusion stamp
+		-- gate reads it as the floor a fresh proof must outlive.
+		motion._lastCameraCFrame = CameraCache.CFrame * CFrame.new(0, 0, 100)
+		motion:accumulate()
+		expect(motion._lastTranslationDelta).toBeCloseTo(1, 5)
+
+		-- A still frame records zero, which is what re-arms every stamp.
+		motion:accumulate()
+		expect(motion._lastTranslationDelta).toBe(0)
+	end)
+
+	it("zeroes the recorded delta and counts the flush when the cache flushes", function()
+		local motion = cullThrottle._motion
+		motion._lastTranslationDelta = 3
 		local flushCountBefore = motion._flushCount
 
-		-- A flush leaves the accumulators at zero while re-anchoring what they
-		-- measure from, and the count is what tells the search's replay gate
-		-- that matching readings across one prove nothing.
+		-- A flush has no motion bound to report, and the count is what tells
+		-- the occlusion layer its build anchor died with the odometer.
 		motion:flushVisibilityCache()
 
+		expect(motion._lastTranslationDelta).toBe(0)
 		expect(motion._flushCount).toBe(flushCountBefore + 1)
 	end)
 
@@ -208,6 +224,24 @@ describe("CameraMotion", function()
 		expect(next(proofs)).toBeNil()
 		expect(motion._accumT).toBe(0)
 		expect(motion._accumR).toBe(0)
+	end)
+
+	it("records the frame's translation even when the same accumulate flushes at a limit", function()
+		cullThrottle:SetVoxelSize(100)
+		local motion = cullThrottle._motion
+
+		-- Stage the odometer right at the limit and pretend the camera sat 100
+		-- studs away last frame, so one accumulate call both records a voxel of
+		-- real translation and pushes the sum past the flush limit.
+		motion._accumT = CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT
+		motion._lastCameraCFrame = CameraCache.CFrame * CFrame.new(0, 0, 100)
+		motion:accumulate()
+
+		-- The flush re-anchored the odometer, but the camera really did move a
+		-- voxel this frame, and that rate is what the occlusion stamp gate must
+		-- see. Recording the delta before the flush would zero it instead.
+		expect(motion._accumT).toBe(0)
+		expect(motion._lastTranslationDelta).toBeCloseTo(1, 5)
 	end)
 
 	it("charges nothing after a flush re-anchors the render distance and projection baselines", function()
