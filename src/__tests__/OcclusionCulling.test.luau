@@ -291,6 +291,14 @@ describe("OcclusionCulling", function()
 
 		it("keeps both generations still when an occluder registers", function()
 			local occlusion = cullThrottle._occlusion
+
+			-- The instance's own PreRender loop would run buildUmbrae during
+			-- the yield below, and a build that selects the newcomer bumps the
+			-- clear generation by design. On-demand mode (with no view signals
+			-- connected) keeps the pipeline quiet so the test observes the
+			-- registration alone.
+			cullThrottle:SetComputeVisibilityOnlyOnDemand(true)
+
 			local generationBefore = occlusion._generation
 			local clearGenerationBefore = occlusion._clearGeneration
 
