@@ -248,38 +248,42 @@ describe("PriorityQueue", function()
 		end)
 
 		it("bubbles the replacement up when removing an interior node", function()
-			-- Insertion order produces the heap array [1, 5, 2, 6, 7, 3, 4].
+			-- Insertion order produces the 4-ary heap array
+			-- [1, 10, 2, 3, 4, 11, 12, 13, 14, 2.5].
 			local order = {
 				{ "p1", 1 },
-				{ "p5", 5 },
+				{ "p10", 10 },
 				{ "p2", 2 },
-				{ "p6", 6 },
-				{ "p7", 7 },
 				{ "p3", 3 },
 				{ "p4", 4 },
+				{ "p11", 11 },
+				{ "p12", 12 },
+				{ "p13", 13 },
+				{ "p14", 14 },
+				{ "p2.5", 2.5 },
 			}
 			for _, pair in order do
 				queue:enqueue(pair[1], pair[2])
 			end
 
-			-- Removing p6 (an interior node) replaces it with the last element p4,
-			-- which is smaller than p6's parent p5, so the replacement must sift up
-			-- toward the root rather than sink. Every other remove test sinks instead.
-			-- These checks prove the assumed layout still holds (p6 sits mid-heap
-			-- and its parent outranks the element that will replace it), so the
-			-- sift-up path can't silently stop being exercised if heap
-			-- construction ever changes.
-			local removeIndex = queue._indices["p6"]
+			-- Removing p11 (an interior node) replaces it with the last element
+			-- p2.5, which is smaller than p11's parent p10, so the replacement
+			-- must sift up toward the root rather than sink. Every other remove
+			-- test sinks instead. These checks prove the assumed layout still
+			-- holds (p11 sits mid-heap and its parent outranks the element that
+			-- will replace it), so the sift-up path can't silently stop being
+			-- exercised if heap construction ever changes.
+			local removeIndex = queue._indices["p11"]
 			expect(removeIndex).toBeGreaterThan(1)
 			expect(queue._size).toBeGreaterThan(removeIndex)
-			expect(queue._priorities[removeIndex // 2]).toBeGreaterThan(queue._priorities[queue._size])
-			expect(queue:remove("p6")).toBe(true)
+			expect(queue._priorities[(removeIndex + 2) // 4]).toBeGreaterThan(queue._priorities[queue._size])
+			expect(queue:remove("p11")).toBe(true)
 
 			local drained = {}
 			while not queue:isEmpty() do
 				table.insert(drained, (queue:dequeue()))
 			end
-			expect(drained).toEqual({ "p1", "p2", "p3", "p4", "p5", "p7" })
+			expect(drained).toEqual({ "p1", "p2", "p2.5", "p3", "p4", "p10", "p12", "p13", "p14" })
 		end)
 
 		it("should return false when removing from an empty queue", function()
@@ -765,7 +769,7 @@ describe("PriorityQueue", function()
 			local function queueIsValid(): boolean
 				local items, priorities, indices = queue._items, queue._priorities, queue._indices
 				for index = 2, queue._size do
-					if priorities[index // 2] > priorities[index] then
+					if priorities[(index + 2) // 4] > priorities[index] then
 						return false
 					end
 				end

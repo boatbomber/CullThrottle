@@ -20,6 +20,7 @@
 
 local vectorDot = (vector.dot :: any) :: (Vector3 | vector, Vector3 | vector) -> number
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
+local vectorAbs = (vector.abs :: any) :: (Vector3 | vector) -> Vector3
 
 -- This is the guard band for the frustum plane comparisons, in voxel-space
 -- units (the box test runs entirely in voxel coordinates).
@@ -82,7 +83,6 @@ function Frustum.isBoxInFrustum(
 	y1: number,
 	z1: number
 ): (boolean, number, number, number, number, number, boolean)
-	debug.profilebegin("isBoxInFrustum")
 	local center = Vector3.new((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5)
 	local extents = Vector3.new((x1 - x0) * 0.5, (y1 - y0) * 0.5, (z1 - z0) * 0.5)
 
@@ -106,18 +106,16 @@ function Frustum.isBoxInFrustum(
 
 			if dist > sphereRadius + EPSILON then
 				-- The circumscribing sphere is fully outside this plane, so the box is too.
-				debug.profileend()
 				return false, 0, dist - sphereRadius - EPSILON, 0, 0, 0, i == 9
 			elseif dist > -sphereRadius then
 				-- The sphere straddles this plane, which proves nothing about the
 				-- box, so fall back to the exact projection interval radius of the
-				-- box onto the plane normal.
-				local radius = math.abs(extents.X * planeNormal.X)
-					+ math.abs(extents.Y * planeNormal.Y)
-					+ math.abs(extents.Z * planeNormal.Z)
+				-- box onto the plane normal. The extents are componentwise
+				-- non-negative, so dotting them against the normal's componentwise
+				-- absolute value sums the three projection terms in two vector ops.
+				local radius = vectorDot(extents, vectorAbs(planeNormal))
 
 				if dist > radius + EPSILON then
-					debug.profileend()
 					return false, 0, dist - radius - EPSILON, 0, 0, 0, i == 9
 				end
 
@@ -154,7 +152,6 @@ function Frustum.isBoxInFrustum(
 		planeBit *= 2
 	end
 
-	debug.profileend()
 	local minSlack = if farSlack < sideSlack then farSlack else sideSlack
 	return true, straddledMask, minSlack, minExitSlack, sideSlack, farSlack, false
 end
