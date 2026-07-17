@@ -154,7 +154,7 @@ function MetricGraph.refresh(self: MetricGraph)
 		if line then
 			line.Size = UDim2.fromScale(1 / #self._data, height)
 			-- The color is keyed to the configured range rather than the widened one, so
-			-- out-of-range values just peg at the hot or cold end of the heatmap.
+			-- out-of-range values peg at the hot or cold end of the heatmap.
 			line.BackgroundColor3 = Utility.getHeatmapColor((datapoint - self.Min) / (self.Max - self.Min))
 		end
 		if i == #self._data then

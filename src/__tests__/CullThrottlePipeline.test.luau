@@ -416,7 +416,7 @@ describe("CullThrottle frame pipeline", function()
 			-- pipeline charges the accumulators for this move before consulting
 			-- any of them. Skipping the charge would make every cached proof
 			-- immortal. How many voxels the move charges is the CameraMotion
-			-- suite's territory, so the claim here is just that the translation
+			-- suite's territory, so the claim here is only that the translation
 			-- accumulator advanced.
 			cullThrottle:_findVisibleObjects(os.clock())
 

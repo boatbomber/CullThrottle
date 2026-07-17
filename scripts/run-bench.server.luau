@@ -3,13 +3,13 @@
 --[[
 	This is the performance benchmark for the per-frame pipeline. It stages a
 	large synthetic scene, then drives frames by hand through a handful of
-	camera motion scenarios with effectively unlimited time budgets, so
+	camera motion scenarios with time budgets that never bind, so
 	throughput improvements show up as lower frame times instead of shifted
 	degradation. Each scenario reports mean, median, and p95 frame times plus
 	a phase breakdown. Run it with scripts/bench.sh.
 
 	The printed per-frame voxel and object averages double as sanity checks.
-	An optimization that changes them likely changed behavior, not just speed.
+	An optimization that changes them changed behavior along with speed.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")

@@ -425,8 +425,8 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(5)
 
 			-- The bulk heapify has to restore the invariant across the whole array,
-			-- not just the appended region, so the merged queue must drain fully
-			-- sorted rather than merely surface the right root.
+			-- including the preexisting region, so the merged queue must drain
+			-- fully sorted rather than only surface the right root.
 			local drained = {}
 			while not queue:isEmpty() do
 				table.insert(drained, (queue:dequeue()))
@@ -503,7 +503,7 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(2)
 			local item, priority = queue:peek()
 			expect(item).toBe("dup")
-			-- The surviving priority must be one the caller actually staged, but
+			-- The surviving priority must be one the caller staged, but
 			-- which of the duplicates wins is unspecified.
 			expect(priority == 5 or priority == 2).toBe(true)
 		end)

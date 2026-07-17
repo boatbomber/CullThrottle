@@ -568,8 +568,8 @@ describe("ObjectDimensions", function()
 			end)
 
 			-- WorldCFrame is derived and never fires a property signal, so the
-			-- wiring must catch the stored properties that assignments actually
-			-- write, while still reporting the world-space frame.
+			-- wiring must catch the stored properties that assignments write,
+			-- while still reporting the world-space frame.
 			attachment.Position = Vector3.new(3, 0, 0)
 			task.wait()
 
@@ -649,7 +649,7 @@ describe("ObjectDimensions", function()
 			expect((received :: Vector3).X).toBeCloseTo(24)
 
 			-- Removal must refresh the box too. DescendantRemoving fires before the
-			-- part actually leaves, so the reported size isn't pinned here, only
+			-- part leaves, so the reported size isn't pinned here, only
 			-- that the wiring delivered a real box.
 			received = nil
 			wing.Parent = workspace
@@ -1081,7 +1081,7 @@ describe("ObjectDimensions", function()
 			part.Size = Vector3.new(4, 4, 4)
 			part.CFrame = CFrame.new(0, 0, 0)
 			part.Parent = model
-			-- PrimaryPart deliberately starts unset, so the model is tracked
+			-- PrimaryPart starts unset here, so the model is tracked
 			-- through its WorldPivot.
 			model.Parent = workspace
 

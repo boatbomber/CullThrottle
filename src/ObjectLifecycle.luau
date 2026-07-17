@@ -20,9 +20,8 @@ local ObjectDimensions = require(script.Parent.ObjectDimensions)
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
 local tableClear = table.clear
 
--- Each object's ingest refresh timing is nudged by a random offset in this
--- range (in seconds, either direction) so objects added together don't all
--- cross the refresh-period thresholds in the same frame.
+-- Each object's refresh timing is nudged by a random offset in this range (in
+-- seconds, either direction) so batch-added objects don't refresh in lockstep.
 local OBJECT_REFRESH_JITTER = 0.002
 
 local ObjectLifecycle = {}
@@ -31,13 +30,12 @@ ObjectLifecycle.__index = ObjectLifecycle
 type ObjectLifecycleProto = {
 	_grid: VoxelGrid.VoxelGrid,
 	_signals: VisibilitySignals.VisibilitySignals,
-	-- These are the facade's public signals, injected so this module fires them
-	-- without owning them.
+	-- The facade's public signals, injected so this module fires without owning them.
 	_objectAddedSignal: GoodSignal.Signal<Instance>,
 	_objectRemovedSignal: GoodSignal.Signal<Instance>,
 
-	-- This is the tracked-object map. The voxel grid holds an alias of this
-	-- table, so it must only ever be mutated in place, never reassigned.
+	-- The tracked-object map. The voxel grid holds an alias, so it must only
+	-- ever be mutated in place, never reassigned.
 	_objects: { [Instance]: types.ObjectData },
 	_objectCount: number,
 	_physicsObjects: { Instance },
@@ -88,9 +86,8 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 		return
 	end
 
-	-- Removals can leave the saved iteration index pointing past the end of the
-	-- list, where reads come back nil and the wrap-around check can trip before
-	-- anything is polled, so an out-of-range cursor restarts from the front.
+	-- Removals can leave the saved cursor past the end of the list, so an
+	-- out-of-range cursor restarts from the front.
 	if self._physicsObjectIterIndex > numPhysicsObjects then
 		self._physicsObjectIterIndex = 1
 	end
@@ -98,8 +95,7 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 
 	while os.clock() - now < timeBudget do
 		local object = self._physicsObjects[self._physicsObjectIterIndex]
-		-- Nothing in this loop mutates the list, so the length hoisted above
-		-- stays true for the whole poll.
+		-- Nothing in this loop mutates the list, so the hoisted length holds.
 		self._physicsObjectIterIndex = self._physicsObjectIterIndex % numPhysicsObjects + 1
 
 		if object then
@@ -107,8 +103,7 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 			if objectData then
 				local cframe = ObjectDimensions.getObjectCFrame(objectData)
 				if cframe then
-					-- The oriented-box voxel fill is the expensive part of a poll,
-					-- so only redo it when the object actually moved.
+					-- The voxel fill is the expensive part, so only redo it on a move.
 					local moved = cframe ~= objectData.cframe
 					local position = cframe.Position
 					objectData.cframe = cframe
@@ -121,7 +116,6 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 		end
 
 		if startIndex == self._physicsObjectIterIndex then
-			-- We've looped through the entire list, so there's no need to continue.
 			break
 		end
 	end
@@ -201,15 +195,11 @@ function ObjectLifecycle.addObject(self: ObjectLifecycle, object: Instance)
 		end,
 	})
 
-	-- The diff is applied directly below so a query made this same frame already
-	-- sees the object in its cells. Passing skipQueue keeps it out of the
-	-- deferred maintenance queue, which would otherwise just dequeue an empty
-	-- diff and discard it.
+	-- The diff is applied directly below so a query this same frame already sees
+	-- the object, and skipQueue keeps the now-empty diff out of the deferred queue.
 	self._grid:updateDesiredVoxelKeys(object, objectData, true)
 
 	self._objects[object] = objectData
-	-- The early-return at the top makes addObject idempotent, so a repeat add
-	-- can't double-count.
 	self._objectCount += 1
 
 	for voxelKey, desired in objectData.desiredVoxelKeys do
@@ -261,18 +251,15 @@ function ObjectLifecycle.removeObject(self: ObjectLifecycle, object: Instance)
 	self._objects[object] = nil
 	self._objectCount -= 1
 
-	-- Evict the object from the in-view set so the next signalVisibilityChanges
-	-- pass doesn't fire a spurious ObjectExitedView for an object we've already
-	-- removed (and already fired ObjectRemoved for). Removal is signalled by
-	-- ObjectRemoved, not ObjectExitedView.
+	-- Removal is signalled by ObjectRemoved, so evict from the in-view set to
+	-- prevent a spurious ObjectExitedView.
 	self._signals:forget(objectData)
 
 	self._grid:cancelQueuedUpdate(object)
 
 	local physicsObjectIndex = objectData.physicsObjectIndex
 	if physicsObjectIndex ~= 0 then
-		-- This is a fast unordered remove. The object swapped into this slot
-		-- carries its stored index along with it.
+		-- Unordered remove, with the swapped object carrying its index along.
 		objectData.physicsObjectIndex = 0
 		local physicsObjects = self._physicsObjects
 		local lastIndex = #physicsObjects
@@ -311,9 +298,7 @@ end
 
 --[[
 	Tracks every instance carrying the tag, now and as the tag set changes.
-	Capturing a tag is a bulk, declarative operation where the caller tags a set
-	of instances and expects CullThrottle to track whatever it can. But a tagged
-	instance may be something we can't size or position (a Folder, a
+	A tagged instance may be something we can't size or position (a Folder, a
 	Configuration, a Beam without attachments, ...), and addObject/addPhysicsObject
 	error() on those. We pcall each add so one un-addable instance can't abort
 	capture of the rest, nor throw out of a CollectionService signal handler.
@@ -332,8 +317,6 @@ function ObjectLifecycle.captureTag(self: ObjectLifecycle, tag: string)
 	self:releaseTag(tag)
 
 	local function tryAddTaggedObject(object: Instance)
-		-- The pcall takes the add function and its arguments directly, so a
-		-- bulk capture doesn't allocate a wrapper closure per instance.
 		local ok, err = pcall(addTaggedObject, self, object)
 		if not ok then
 			warn(`[CullThrottle] Skipping tagged instance {object:GetFullName()}: {err}`)
@@ -343,13 +326,10 @@ function ObjectLifecycle.captureTag(self: ObjectLifecycle, tag: string)
 	self._tagConnections[tag] = {
 		CollectionService:GetInstanceAddedSignal(tag):Connect(tryAddTaggedObject),
 		CollectionService:GetInstanceRemovedSignal(tag):Connect(function(object: Instance)
-			-- An object can carry several captured tags, so it only untracks once
-			-- it has lost all of them. The removed tag is already off the object
-			-- when this fires, so it can't match itself here. Tracking doesn't
-			-- record how an object arrived, so losing the last captured tag
-			-- untracks the object even when it was also added directly through
-			-- addObject. A caller who wants an object to outlive its tags should
-			-- re-add it after the tag toggle.
+			-- An object only untracks once it has lost every captured tag (the
+			-- removed tag is already off when this fires). Losing the last one
+			-- untracks even an object also added directly, so a caller who wants
+			-- it to outlive its tags should re-add it after the toggle.
 			for capturedTag in self._tagConnections do
 				if object:HasTag(capturedTag) then
 					return

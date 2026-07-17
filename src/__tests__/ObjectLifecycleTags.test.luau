@@ -148,7 +148,7 @@ describe("ObjectLifecycle tags", function()
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, physicsPart)).toBeDefined()
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, staticPart)).toBeNil()
 
-			-- Anchored is read once at capture and deliberately never watched, so
+			-- Anchored is read once at capture with no watch on it afterwards, so
 			-- flipping it afterwards must not migrate either part between modes.
 			physicsPart.Anchored = true
 			staticPart.Anchored = false

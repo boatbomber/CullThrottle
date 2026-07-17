@@ -84,9 +84,8 @@ function BandedQueue.enqueueBatch<T>(self: BandedQueue<T>, items: { T }, bands: 
 	end
 	local bandCounts = self._bandCounts
 
-	-- Tally how many staged items land in each band. The tallies arrive all
-	-- zeros (the constructor zeroes them and the reset below restores that),
-	-- so only the touched range needs re-zeroing afterward.
+	-- The tallies arrive all zeros, so only the touched range needs re-zeroing
+	-- afterward.
 	local maxBand = 1
 	for i = 1, size do
 		local band = bands[i]

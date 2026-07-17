@@ -184,7 +184,7 @@ describe("CullThrottle queries", function()
 
 			-- Nothing the whole-frame replay watches moves between these frames,
 			-- so it gets disarmed by hand to force the truncated frame to
-			-- actually re-run the search.
+			-- re-run the search.
 			cullThrottle._search._replayReady = false
 
 			cullThrottle:SetTimeBudgets(0, 1, 1)
@@ -611,7 +611,7 @@ describe("CullThrottle queries", function()
 			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, 5000)).Position)
 			cullThrottle:AddObject(part)
 
-			-- Strict enforcement raises the p0 budget to effectively unbounded,
+			-- Strict enforcement raises the p0 budget past anything the drain can spend,
 			-- making the two budgets maximally distinguishable.
 			cullThrottle:SetTimeBudgets(0, 0, 0)
 			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
@@ -761,7 +761,7 @@ describe("CullThrottle queries", function()
 				end
 			end
 
-			-- The zero budget really bound. No single frame drained anywhere
+			-- The zero budget held. No single frame drained anywhere
 			-- near the whole staged batch.
 			expect(maxYieldedInOneFrame).toBeLessThan(#parts)
 
@@ -922,7 +922,7 @@ describe("CullThrottle queries", function()
 		it("keeps the previous average object delta time across a frame that updates nothing", function()
 			-- Plant a recognizable committed average with no pending update
 			-- samples, then process a frame. The commit is guarded on having
-			-- actually updated something, since without the guard the frame
+			-- updated something, since without the guard the frame
 			-- would divide zero by zero and poison the average with NaN.
 			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.123
 			cullThrottle:_processObjectVisibility(os.clock())

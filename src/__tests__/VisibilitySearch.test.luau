@@ -503,7 +503,7 @@ describe("VisibilitySearch", function()
 			local getBoxTests = countBoxTests()
 			search:searchVolume(0, 0, roomyFrustumPlanes, 0, 40, 0, 4, 44, 4, 1, 7, 0b11111, math.huge, 0)
 
-			-- A single whole-box test proves the walk really bailed into the bulk
+			-- A single whole-box test proves the walk bailed into the bulk
 			-- path. Re-testing the cold cells one by one would reach the same
 			-- visible set with six tests instead.
 			expect(getBoxTests()).toBe(1)
@@ -2388,7 +2388,7 @@ describe("VisibilitySearch", function()
 			cullThrottle:SetVoxelSize(100)
 			local cameraVoxel = CameraCache.Position // 100
 
-			-- The offsets are deliberately added out of distance order.
+			-- The offsets go in out of distance order so the sort has work to do.
 			local offsets = {
 				Vector3.new(5, 0, 0), -- This one sits at distance 5.
 				Vector3.new(0, 0, 0), -- This one sits at distance 0 (it's the camera's own voxel).
@@ -2541,7 +2541,7 @@ describe("VisibilitySearch", function()
 			cullThrottle:_findVisibleObjects(os.clock())
 
 			-- The sort only matters when several voxels are visible, so prove
-			-- the staging actually produced a batch.
+			-- the staging produced a batch.
 			expect(cullThrottle._search._visibleVoxelCount).toBeGreaterThan(1)
 
 			-- The batch must come out non-decreasing in manhattan distance to

@@ -304,7 +304,7 @@ describe("OcclusionCulling", function()
 
 			-- Registration adds occlusion without changing any existing
 			-- umbra, so hidden proofs stay true, and clear proofs stay safe
-			-- until the newcomer actually wins a selection slot, which the
+			-- until the newcomer wins a selection slot, which the
 			-- build's selection tracking catches. Other suites stage proofs
 			-- right after registering an occluder directly and rely on this
 			-- contract.
@@ -1152,7 +1152,7 @@ describe("OcclusionCulling", function()
 			task.wait()
 
 			-- A moved occluder reshapes its umbra, which can falsify clear
-			-- proofs just as easily as hidden ones. The next build's pose poll
+			-- proofs and hidden ones alike. The next build's pose poll
 			-- catches the move and bumps both generations together.
 			local generationBefore = occlusion._clearGeneration
 			wall.CFrame = CFrame.new(50, 60, -300)

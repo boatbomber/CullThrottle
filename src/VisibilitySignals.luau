@@ -29,44 +29,33 @@ local GoodSignal = require(script.Parent.Utilities.GoodSignal)
 local tableCreate = table.create
 local tableClear = table.clear
 
--- This sets how long an object that was visible keeps its place in the in-view
--- set after its voxels stop being visible, before ObjectExitedView fires. This
--- is signal smoothing only, so an object oscillating across the frustum
--- boundary (head bob) doesn't fire entered/exited every frame. A lingering
--- object is not ingested or updated, and re-entry fires no duplicate
--- ObjectEnteredView because its lastVisibleClock never returns to zero while
--- it lingers.
+-- How long an object lingers in the in-view set after its voxels stop being
+-- visible, before ObjectExitedView fires. This is signal smoothing only (a
+-- lingering object is not ingested or updated), so boundary oscillation
+-- doesn't fire entered/exited every frame.
 local EXIT_SIGNAL_GRACE_PERIOD = 0.2
 
--- The due buckets quantize grace deadlines to this period. A bucket only comes
--- due once every deadline it covers has passed, so an exit can fire at most
--- one period late, which is a frame or two against the grace period's 0.2
--- seconds of deliberate smoothing.
+-- The due buckets quantize grace deadlines to this period, so an exit can fire
+-- at most one period late, a frame or two against the grace period's smoothing.
 local EXIT_SWEEP_BUCKET_PERIOD = 1 / 30
 
--- Every deadline is scheduled at most one grace period past a processed
--- frame's clock, so after a long stretch without processed frames (on-demand
--- mode idling, a minimized window), every bucket past this many indices from
--- the sweep's resume point is empty. The sweep clamps its walk to this span
--- and skips the rest, keeping the resume cost flat no matter how long the gap
--- was. The extra index is margin for the grace period not dividing evenly
--- into bucket periods.
+-- Every deadline lands at most one grace period past a processed frame's
+-- clock, so every bucket past this many indices from the sweep's resume point
+-- is empty and the walk clamps to this span. The extra index is margin for the
+-- grace period not dividing evenly into bucket periods.
 local MAX_LIVE_BUCKET_SPAN = math.ceil(EXIT_SIGNAL_GRACE_PERIOD / EXIT_SWEEP_BUCKET_PERIOD) + 1
 
 local VisibilitySignals = {}
 VisibilitySignals.__index = VisibilitySignals
 
 type VisibilitySignalsProto = {
-	-- These are the facade's public signals, injected so this module fires them
-	-- without owning them.
+	-- The facade's public signals, injected so this module fires without owning them.
 	_enteredViewSignal: GoodSignal.Signal<Instance>,
 	_exitedViewSignal: GoodSignal.Signal<Instance>,
 
-	-- These are the exit sweep's due buckets, keyed by deadline quantum, each a
-	-- compact array with its occupancy tracked alongside. Every in-view object
-	-- sits in exactly one bucket (its record stores which, and where), and the
-	-- sweep consumes whole buckets as they come due. Emptied bucket arrays are
-	-- recycled through the pool.
+	-- The exit sweep's due buckets, keyed by deadline quantum. Every in-view
+	-- object sits in exactly one bucket (its record stores which, and where),
+	-- and emptied bucket arrays are recycled through the pool.
 	_exitSweepBuckets: { [number]: { types.ObjectData } },
 	_exitSweepBucketSizes: { [number]: number },
 	_nextSweepBucketIndex: number,
@@ -137,10 +126,8 @@ function VisibilitySignals.scheduleExitSweep(self: VisibilitySignals, objectData
 	objectData.exitSweepBucketIndex = bucketIndex
 	objectData.exitSweepSlot = slot
 
-	-- The sweep's resume point must never sit past a scheduled entry, or that
-	-- entry's bucket would be skipped and its exit lost. Live clocks only move
-	-- forward, so this only pulls the resume point back when a caller schedules
-	-- against a clock older than one the sweep already advanced past.
+	-- The resume point must never sit past a scheduled entry, or that entry's
+	-- bucket would be skipped and its exit lost.
 	if bucketIndex < self._nextSweepBucketIndex then
 		self._nextSweepBucketIndex = bucketIndex
 	end
@@ -160,10 +147,8 @@ function VisibilitySignals.markEnteredView(self: VisibilitySignals, objectData: 
 
 	local inViewCount = self._inViewCount
 	if inViewCount == 0 then
-		-- Nothing was scheduled anywhere, and the sweep may not have run for a
-		-- long stretch (on-demand mode can idle for minutes), so re-anchor the
-		-- sweep at the present rather than letting it walk every empty bucket
-		-- index since the last time something was in view.
+		-- Nothing was scheduled anywhere, so re-anchor the sweep at the present
+		-- rather than letting it walk every empty index since the last in-view.
 		local currentBucketIndex = now // EXIT_SWEEP_BUCKET_PERIOD
 		if self._nextSweepBucketIndex <= currentBucketIndex then
 			self._nextSweepBucketIndex = currentBucketIndex + 1
@@ -180,9 +165,7 @@ end
 ]]
 function VisibilitySignals.markVisible(self: VisibilitySignals, objectData: types.ObjectData, now: number)
 	if objectData.lastVisibleClock == 0 then
-		-- A lastVisibleClock of zero means this object isn't in view (it's
-		-- freshly tracked or the exit sweep gave up on it), so it's entering
-		-- view now.
+		-- A zero clock means out of view, so this is the flip into view.
 		self:markEnteredView(objectData, now)
 	end
 	objectData.lastVisibleClock = now
@@ -199,8 +182,8 @@ function VisibilitySignals.forget(self: VisibilitySignals, objectData: types.Obj
 	if objectData.lastVisibleClock == 0 then
 		return
 	end
-	-- The count pairs with the clock (in view means a nonzero clock), not
-	-- with bucket residency, so the decrement rides the clock flip.
+	-- The count pairs with the clock, not bucket residency, so the decrement
+	-- rides the clock flip.
 	objectData.lastVisibleClock = 0
 	self._inViewCount -= 1
 
@@ -212,8 +195,7 @@ function VisibilitySignals.forget(self: VisibilitySignals, objectData: types.Obj
 	local bucket = self._exitSweepBuckets[bucketIndex]
 	if not bucket then
 		-- Destroy empties the buckets while per-object stamps survive, so a
-		-- straggling Destroying connection routing through here after
-		-- teardown finds no bucket and has nothing left to unhook.
+		-- straggling Destroying connection after teardown finds nothing to unhook.
 		return
 	end
 	local bucketSize = self._exitSweepBucketSizes[bucketIndex]
@@ -257,8 +239,7 @@ function VisibilitySignals.signalVisibilityChanges(self: VisibilitySignals, now:
 	end
 	local inViewCount = self._inViewCount
 	if inViewCount == 0 then
-		-- Nothing is scheduled anywhere, so skip straight past the due range
-		-- instead of walking empty bucket indices one by one.
+		-- Nothing is scheduled, so skip straight past the due range.
 		self._nextSweepBucketIndex = currentBucketIndex + 1
 		debug.profileend()
 		return
@@ -270,10 +251,8 @@ function VisibilitySignals.signalVisibilityChanges(self: VisibilitySignals, now:
 	local pendingExitedView = self._pendingExitedView
 	local pendingExitedViewSize = self._pendingExitedViewSize
 
-	-- Every live deadline sits within one grace period of the last processed
-	-- frame, so everything past this clamp is an empty index the walk can
-	-- skip. Without it, a sweep resuming after a long idle gap would crawl
-	-- one empty index per thirtieth of a second of wall-clock gap.
+	-- Everything past this clamp is an empty index, so a sweep resuming after a
+	-- long idle gap doesn't crawl one index per bucket period of wall clock.
 	local sweepEnd = nextSweepBucketIndex + MAX_LIVE_BUCKET_SPAN
 	if sweepEnd > currentBucketIndex then
 		sweepEnd = currentBucketIndex
@@ -293,11 +272,10 @@ function VisibilitySignals.signalVisibilityChanges(self: VisibilitySignals, now:
 			bucket[slot] = nil
 			local lastVisibleClock = objectData.lastVisibleClock
 			if now - lastVisibleClock < EXIT_SIGNAL_GRACE_PERIOD then
-				-- It was seen again after this bucket was scheduled, so its
-				-- real deadline moved. Reschedule it there.
+				-- Seen again since this bucket was scheduled, so its real
+				-- deadline moved. Reschedule it there.
 				self:scheduleExitSweep(objectData, lastVisibleClock + EXIT_SIGNAL_GRACE_PERIOD)
 			else
-				-- The object left view and stayed out past the signal grace.
 				objectData.lastVisibleClock = 0
 				objectData.exitSweepBucketIndex = 0
 				objectData.exitSweepSlot = 0
@@ -333,9 +311,9 @@ end
 	instances no longer tracked because they hand back objects for the consumer
 	to act on, the flush trusts its buffer and fires every slot. So an entered
 	handler that removes another instance still buffered this frame will still
-	see that instance's entered event fire, which is intended. The event records
-	that the object was visible this frame, and refiltering here would let one
-	handler silently cancel a peer's buffered notification.
+	see that instance's entered event fire. The event records that the object
+	was visible this frame, and refiltering here would let one handler cancel
+	a peer's buffered notification.
 ]]
 function VisibilitySignals.flushVisibilitySignals(self: VisibilitySignals)
 	debug.profilebegin("flushVisibilitySignals")

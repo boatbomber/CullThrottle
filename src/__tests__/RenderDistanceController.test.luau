@@ -349,7 +349,7 @@ describe("RenderDistanceController", function()
 		-- every move after the first is a reversal and the controller damps
 		-- over and over. The step must converge on its floor rather than
 		-- damping toward zero, because a step that damped all the way out
-		-- would leave the controller unable to respond once the scene actually
+		-- would leave the controller unable to respond once the scene
 		-- changed.
 		local magnitudes = {}
 		for cycle = 1, 24 do

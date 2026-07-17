@@ -3,73 +3,26 @@
 --!native
 
 --[[
-	This module owns occlusion culling. Consumers tag big opaque box parts with
-	the CullThrottleOccluder tag, and each frame this module scores the tagged
-	set, picks the most promising few, and builds their umbra volumes, the
-	regions the camera cannot see because the occluder blocks every
-	sightline into them. The visibility search tests coarse buckets and search
-	volumes against those umbrae and skips whatever sits fully inside one.
+	This module owns occlusion culling. Consumers tag big opaque box parts
+	with the CullThrottleOccluder tag, and each frame this module scores the
+	tagged set, picks the most promising few, and builds their umbra volumes,
+	the regions the camera cannot see because the occluder blocks every
+	sightline into them. The visibility search tests coarse buckets and
+	search volumes against those umbrae and skips whatever sits fully inside
+	one. SYSTEM.md's occlusion section walks the whole mechanism, and MATH.md
+	sections 12 and 13 derive the AABB hull and the allowance bounds.
 
-	Each umbra is the intersection of half-spaces stored as unit normals with
-	precomputed scalar offsets, so a signed distance is one dot and one
-	subtract. Cap planes (one world-fixed plane per camera-facing face, so
-	nothing between the camera and the occluder can be culled) are laid out
-	ahead of the silhouette planes (through the camera and each edge where a
-	camera-facing face meets a back face), because the prune path breaks on the
-	first fully-outside plane and the cap is what rejects the common box
-	sitting in front of the occluder. A per-umbra AABB covering everything the
-	umbra can reach within the search's range gates each test in six
-	comparisons before any plane math runs.
-
-	Every umbra is built from the occluder's box eroded inward by a pad, which
-	is the uniform floor under every cached occlusion proof's translation
-	allowance. When a sightline from the camera passes through the eroded box,
-	any camera within pad of that position still has its sightline into the
-	same point blocked by the full box. On top of that floor, a verdict deep
-	inside (or well clear of) an umbra earns a depth-scaled allowance from the
-	pivot bound, using the box's measured plane margins together with the
-	umbra's shape margin and its minimum camera-to-edge distance. MATH.md
-	section 13 derives both bounds. Occlusion depends only on where the camera
-	is, never which way it faces, so cached occlusion proofs charge only the
-	translation accumulator and survive any amount of rotation, FOV change, or
-	render distance change.
-
-	Verdicts cache in both directions with separate guards. Hidden proofs are
-	witnessed by one occluder and store the occluder generation, which bumps on
-	any occluder mutation. The clear side quantifies over every umbra built in
-	a frame, so those proofs store the clear generation, which additionally
-	bumps when the frame's selection admits an occluder that the previous
-	frame's didn't. It comes in two strengths. The clear verdict proper says
-	the box is fully outside every umbra, whose margins inherit downward to
-	everything the box contains, so buckets and whole search volumes carry it.
-	The not-occluded verdict says only that no umbra fully contains the box,
-	witnessed by a single support point poking out of one plane per umbra,
-	which inherits nothing and so belongs solely to leaf cells, the boundary
-	huggers the strong form can't cover. Both are measured in ungated passes
-	over every umbra's planes, paid once per stamp rather than once per frame.
-
-	The pad also lets a built umbra set outlive its frame. Selection still
-	runs every frame (it's the cheap part, and it's what notices an occluder
-	entering the view or winning a slot), and its fresh pose reads double as
-	the change poll that bumps the generation the same frame an occluder moves
-	or resizes, ahead of the reuse gate and every proof consult, without
-	waiting on deferred property signals. While the selected set matches
-	the built one, no occluder has mutated, no cache flush intervened, and the
-	translation odometer has moved less than the tightest built pad since the
-	build, the plane sets, anchors, and AABBs are reused as they stand. Every
-	allowance handed out on a reuse frame is debited by that drift, so a
-	stored proof still bounds total motion from the build anchor. A stale AABB
-	or plane set can only misjudge toward visible, so reuse never costs
-	soundness, only culling reach, and the pad crossing rebuilds before the
-	reach loss can grow past the pad.
-
-	Stamps are also gated by worth. A proof whose allowance is smaller than
-	the translation the camera just did in one frame would expire before it
-	could ever be trusted, so the measuring passes bail to zero as soon as
-	any umbra's ceiling (its shape allowance) can't clear that floor, and
-	callers skip writing stamps that fall under it. At a still camera the
-	floor is zero and every stamp survives, including zero-allowance ones,
-	which keeps the still-camera fast paths exactly as they were.
+	Each umbra is a half-space intersection with cap planes laid out ahead of
+	silhouette planes, built from the occluder's box eroded inward by a pad
+	that becomes the floor under every cached proof's translation allowance,
+	with depth-scaled allowances layered on top from the pivot bound.
+	Occlusion depends only on where the camera is, never which way it faces,
+	so cached occlusion proofs charge only the translation accumulator.
+	Hidden proofs ride the occluder generation, and clear and not-occluded
+	proofs (which quantify over every built umbra) ride the clear generation.
+	The pad also lets a built umbra set outlive its frame, with every reuse
+	frame's allowances debited by the drift since the build, and stamps whose
+	allowance can't outlive the frame's own motion are skipped as dead.
 
 	Erring falsely visible is the rule throughout. A box that straddles an
 	umbra boundary stays visible, a degenerate umbra is skipped entirely, the
@@ -79,10 +32,9 @@
 	Two kinds of code share this file, the occluder registry (tag watching,
 	qualification, and the cached poses) and the umbra geometry. They stay
 	together because the soundness invariant behind every hidden proof, that
-	any occluder mutation bumps the generation, is enforced from both halves,
-	by the watchers when a part disqualifies and by the build's pose poll and
-	camera-entry transitions. If occluder qualification ever grows past
-	simple parts, the registry section is the seam to split along.
+	any occluder mutation bumps the generation, is enforced from both halves.
+	If occluder qualification ever grows past simple parts, the registry
+	section is the seam to split along.
 ]]
 
 local CollectionService = game:GetService("CollectionService")
@@ -101,23 +53,19 @@ local tableSort = table.sort
 local tableCreate = table.create
 local tableMove = table.move
 
--- This is the CollectionService tag that marks a part as an occluder.
 local OCCLUDER_TAG = "CullThrottleOccluder"
 
--- This is the guard band for the umbra plane comparisons, in voxel-space
--- units, matching the frustum tests. Occlusion only counts when the box is
--- inside every plane by more than this, so float noise errs toward visible.
+-- Guard band for the plane comparisons in voxel units, matching the frustum
+-- tests, so float noise errs toward visible.
 local EPSILON = 1e-4
 
--- This gets shaved off every stored translation allowance so the f32 packing
--- of the cached proof can only make it expire sooner, never later. It matches
--- the SLACK_SAFETY the search shaves off its frustum proofs.
+-- Shaved off every stored translation allowance so the f32 packing of the
+-- cached proof can only make it expire sooner, matching the search's shave.
 local SLACK_SAFETY = 1e-2
 
--- The umbra is built from the occluder eroded inward by this fraction of its
--- smallest half extent (capped at one voxel), and that pad becomes the floor
--- under the cached proofs' translation allowances. Eroding by at most half
--- the smallest half extent keeps every eroded extent positive.
+-- The erosion pad is this fraction of the smallest half extent (capped at one
+-- voxel), which keeps every eroded extent positive and becomes the floor
+-- under the cached proofs' translation allowances.
 local EROSION_FRACTION = 0.5
 
 -- A silhouette plane is skipped (taking the whole occluder with it) when the
@@ -143,9 +91,7 @@ local EDGE_FACE_B = { 3, 4, 3, 4, 5, 6, 5, 6, 5, 6, 5, 6 }
 local EDGE_CORNER_A = { 7, 5, 3, 1, 6, 5, 2, 1, 4, 3, 2, 1 }
 local EDGE_CORNER_B = { 8, 6, 4, 2, 8, 7, 4, 3, 8, 7, 6, 5 }
 
--- This maps a face index to its axis (1 for X, 2 for Y, 3 for Z), used to
--- read the eroded half extent that separates a face's center from an
--- adjacent edge line.
+-- This maps a face index to its axis (1 for X, 2 for Y, 3 for Z).
 local FACE_AXIS = { 1, 1, 2, 2, 3, 3 }
 
 local OcclusionCulling = {}
@@ -157,60 +103,39 @@ type OcclusionCullingProto = {
 	_config: Config.Config,
 	_visibilityCache: VisibilityCache.VisibilityCache,
 	_motion: CameraMotion.CameraMotion,
-	-- This is how far past the frustum's AABB the search can seed a testable
-	-- box, in voxels. The search owns the value (its seeding geometry decides
-	-- it) and the facade passes it in, so the umbra AABBs' reach stays
-	-- correct if the seeding ever widens.
+	-- How far past the frustum's AABB the search can seed a testable box, in
+	-- voxels. The search owns the value and the facade passes it in.
 	_searchReachExpansion: number,
 
-	-- The occluder generation versions the occluder set for hidden proofs.
-	-- Any mutation of a registered occluder bumps it, and every cached hidden
-	-- proof stores the generation it was proven under, so a mismatch
-	-- invalidates the proof in one comparison with no cache walk. Merely
-	-- rotating which occluders get selected each frame does not bump it,
-	-- because a hidden proof anchored to an unchanged occluder stays true
-	-- whether or not that occluder is selected right now.
+	-- The occluder generation versions the occluder set for hidden proofs
+	-- and bumps on any occluder mutation, never on mere selection churn.
 	_generation: number,
-	-- The clear generation versions the umbra set for clear proofs, which
-	-- quantify over every umbra built in a frame. It bumps whenever the
-	-- occluder generation bumps, and whenever a frame's built selection
-	-- contains an occluder the previous frame's didn't, since that new
-	-- umbra is one no cached clear proof was tested against. A selection
-	-- that only shrinks doesn't bump it, because losing an umbra can't put
-	-- a box inside one.
+	-- The clear generation versions the umbra set for clear proofs. It also
+	-- bumps when the built selection gains a member, since no cached clear
+	-- proof was tested against the newcomer.
 	_clearGeneration: number,
 
 	_occluders: { Part },
 	_occluderIndices: { [Part]: number },
 	-- Every tagged Part keeps a watcher set (anchored, shape, ancestry) for
-	-- its whole tagged lifetime, so a part that qualifies later registers the
-	-- moment it does and one that stops qualifying drops out the same way.
+	-- its whole tagged lifetime, so qualification stays live.
 	_watchedParts: { [Part]: { RBXScriptConnection } },
 	_tagConnections: { RBXScriptConnection },
-	-- These cache each registered occluder's pose as of the last build's
-	-- poll, the comparison anchor that catches a moved or resized occluder
-	-- the same frame without waiting on deferred property signals.
+	-- Each occluder's pose as of the last build's poll, the comparison
+	-- anchor that catches a moved or resized occluder the same frame.
 	_occluderCFrames: { [Part]: CFrame },
 	_occluderHalfSizes: { [Part]: Vector3 },
-	-- This marks occluders the camera currently sits inside of, so the entry
-	-- transition bumps the generation exactly once rather than every frame
-	-- the camera stays embedded.
+	-- Occluders the camera currently sits inside of, so the entry transition
+	-- bumps the generation exactly once.
 	_cameraInsideOccluder: { [Part]: true? },
-	-- This is the selection prefilter's scratch copy of the frustum planes,
-	-- so the closing plane it appends never mutates the camera cache's table.
+	-- The selection prefilter's scratch copy of the frustum planes, so the
+	-- closing plane it appends never mutates the camera cache's table.
 	_frustumPlanesScratch: { Vector3 },
 
-	-- These hold the umbrae built this frame, indexed by umbra slot. Each
-	-- plane is a unit normal plus a scalar offset (the dot of a point on the
-	-- plane with the normal), all in voxel coordinates, with caps laid out
-	-- ahead of silhouette planes and the counts alongside (the arrays are
-	-- reused across frames, so slots past the count are stale). The
-	-- allowance is the pad floor, the shape allowance bounds how far the
-	-- camera can move before the plane set changes shape (a face flips its
-	-- classification or an orienting face center crosses its plane), and the
-	-- edge distance is the camera's minimum distance to a silhouette edge
-	-- line, all in voxels. The bounds box every point the umbra can reach
-	-- within the search's range, for the six-comparison gate.
+	-- The umbrae built this frame, indexed by umbra slot, all in voxel
+	-- coordinates, caps ahead of silhouette planes with the counts
+	-- alongside. The arrays are reused across frames, so slots past the
+	-- count are stale.
 	_umbraPlaneNormals: { { Vector3 } },
 	_umbraPlaneOffsets: { { number } },
 	_umbraPlaneCounts: { number },
@@ -221,25 +146,22 @@ type OcclusionCullingProto = {
 	_umbraBoundsMin: { Vector3 },
 	_umbraBoundsMax: { Vector3 },
 	_umbraCount: number,
-	-- This is the bitmask with one bit set per built umbra, what a search
-	-- volume starts from before any pruning.
+	-- The bitmask with one bit set per built umbra, what a search volume
+	-- starts from before any pruning.
 	_fullUmbraMask: number,
-	-- This is the camera position in voxel coordinates as of this frame's
-	-- build, read by the depth-scaled allowance math in the box test.
+	-- The camera position in voxel coordinates as of this frame's build,
+	-- read by the depth-scaled allowance math in the box test.
 	_cameraPosVoxels: Vector3,
 
-	-- These track which occluders built umbrae last frame, so the clear
-	-- generation can bump exactly when the selection admits a new member.
+	-- Which occluders built umbrae last frame, so the clear generation can
+	-- bump exactly when the selection admits a new member.
 	_lastSelection: { [Part]: boolean },
 	_lastSelectionCount: number,
 
-	-- These anchor the built umbra set for reuse. The build records the
-	-- translation odometer, the flush count, the occluder generation, the
-	-- pre-degeneracy top scorers it selected, and two minima over what it
-	-- built, the tightest pad allowance (the drift budget reuse must stay
-	-- under) and the tightest shape allowance (the ceiling no measuring pass
-	-- can beat). A frame that matches all of it skips construction and keeps
-	-- the plane sets as they stand.
+	-- These anchor the built umbra set for reuse, recording the odometer,
+	-- flush count, occluder generation, pre-degeneracy top scorers, the
+	-- tightest pad allowance (the drift budget reuse must stay under), and
+	-- the tightest shape allowance (the ceiling no measuring pass can beat).
 	_buildAccumT: number,
 	_buildFlushCount: number,
 	_buildGeneration: number,
@@ -247,29 +169,23 @@ type OcclusionCullingProto = {
 	_minShapeAllowance: number,
 	_builtTentativeSet: { [Part]: true },
 	_builtTentativeCount: number,
-	-- This counts every frame whose umbra set may differ from the frame
-	-- before it, meaning any actual reconstruction plus the teardown of
-	-- planes a previous build left standing. Frames that reuse the built
-	-- planes leave it alone, so the search's whole-frame replay can trust an
-	-- unchanged count to mean geometrically identical umbrae.
+	-- Counts every frame whose umbra set may differ from the frame before
+	-- it. Reuse frames leave it alone, so the search's whole-frame replay
+	-- can trust an unchanged count to mean geometrically identical umbrae.
 	_buildCount: number,
 
-	-- These are the frame's stamp-gate values, set by buildUmbrae on every
-	-- path. The debit is the odometer drift since the build anchor, charged
-	-- against every allowance handed out this frame. The motion floor is the
-	-- translation the last processed frame added, the least a stamp must
-	-- outlive to ever be trusted. The bail threshold folds floor, debit, and
-	-- the safety shave into the raw value a measuring pass must reach before
-	-- its result can matter, and the useful flag is the whole-frame verdict
-	-- from the shape-allowance ceiling, letting callers skip the measuring
-	-- passes outright on frames where nothing they stamp could survive.
+	-- The frame's stamp-gate values, set by buildUmbrae on every path. The
+	-- debit is the odometer drift since the build anchor, the motion floor
+	-- is the translation the last processed frame added (the least a stamp
+	-- must outlive to ever be trusted), the bail threshold folds floor,
+	-- debit, and shave together, and the useful flag lets callers skip
+	-- measuring on frames where nothing they stamp could survive.
 	_allowanceDebit: number,
 	_motionFloor: number,
 	_measureBailThreshold: number,
 	_measuresUseful: boolean,
 
-	-- These are per-frame scratch buffers for candidate scoring, selection
-	-- tracking, and umbra construction, reused to avoid allocation churn.
+	-- Per-frame scratch buffers, reused to avoid allocation churn.
 	_builtOccluders: { Part },
 	_candidateIndices: { number },
 	_candidateScores: { [number]: number },
@@ -296,8 +212,6 @@ function OcclusionCulling.new(
 	motion: CameraMotion.CameraMotion,
 	searchReachExpansion: number
 ): OcclusionCulling
-	-- The comparator closes over the persistent score table once, so the
-	-- per-frame selection sort allocates nothing.
 	local candidateScores: { [number]: number } = {}
 	local self = setmetatable({
 		_config = config,
@@ -336,8 +250,6 @@ function OcclusionCulling.new(
 		_builtTentativeSet = {},
 		_builtTentativeCount = 0,
 		_buildCount = 0,
-		-- The gate defaults describe a still camera with a fresh build, so
-		-- allowances pass through undebited and every stamp is worth writing.
 		_allowanceDebit = 0,
 		_motionFloor = 0,
 		_measureBailThreshold = SLACK_SAFETY,
@@ -602,13 +514,8 @@ function OcclusionCulling._buildUmbra(
 	local localCamera = cframe:PointToObjectSpace(cameraPos)
 	local absLocalX, absLocalY, absLocalZ = math.abs(localCamera.X), math.abs(localCamera.Y), math.abs(localCamera.Z)
 	if absLocalX <= halfSize.X and absLocalY <= halfSize.Y and absLocalZ <= halfSize.Z then
-		-- The camera is inside the part itself, where the renderer draws
-		-- backfaces transparent and the player sees straight through it, so
-		-- no shadow it casts can be trusted. This also covers the camera
-		-- inside the eroded box, where no face is classified visible and no
-		-- stable shadow exists geometrically either. The selection loop runs
-		-- this same full-box test to exclude candidates and bump the
-		-- generation on entry, so the two must stay in lockstep.
+		-- The camera is inside the part and sees through its backfaces. The
+		-- selection loop runs this same test, and the two stay in lockstep.
 		return false
 	end
 
@@ -620,11 +527,8 @@ function OcclusionCulling._buildUmbra(
 	faceVisible[5] = localCamera.Z > hz
 	faceVisible[6] = localCamera.Z < -hz
 
-	-- The topology term of the shape margin, in studs. Each face's
-	-- classification compares a local camera coordinate against an eroded
-	-- half extent, and a translation of magnitude t moves each local
-	-- coordinate by at most t, so this is how far the camera can go before
-	-- any face flips.
+	-- The topology term of the shape margin in studs, how far the camera
+	-- can go before any face flips its classification.
 	local shapeMargin = math.min(math.abs(absLocalX - hx), math.abs(absLocalY - hy), math.abs(absLocalZ - hz))
 
 	local position = cframe.Position
@@ -672,8 +576,6 @@ function OcclusionCulling._buildUmbra(
 		self._umbraPlaneOffsets[umbraIndex] = offsets
 	end
 
-	-- Caps go first so the prune path can reject boxes in front of the
-	-- occluder on its first plane.
 	local planeCount = 0
 	for face = 1, 6 do
 		if faceVisible[face] then
@@ -698,8 +600,7 @@ function OcclusionCulling._buildUmbra(
 			local magnitude = vectorMagnitude(normal)
 			if magnitude <= COLLINEAR_EPSILON * vectorMagnitude(toCornerA) * vectorMagnitude(toCornerB) then
 				-- The camera is in line with this edge, so the plane has no
-				-- stable orientation. Skip the whole occluder rather than
-				-- build a leaky umbra.
+				-- stable orientation.
 				return false
 			end
 			normal = normal / magnitude
@@ -714,8 +615,8 @@ function OcclusionCulling._buildUmbra(
 			elseif side < -ORIENTATION_EPSILON then
 				sideMagnitude = -side
 			else
-				-- The orienting face center lies on the plane, so inside and
-				-- outside are indistinguishable here.
+				-- The orienting face center lies on the plane, so inside
+				-- and outside are indistinguishable.
 				return false
 			end
 
@@ -724,16 +625,14 @@ function OcclusionCulling._buildUmbra(
 			offsets[planeCount] = vectorDot(cameraPosVoxels, normal)
 
 			-- The cross magnitude over the edge length is the camera's
-			-- distance to this edge's line, the pivot radius of its plane.
+			-- distance to this edge's line.
 			local edgeDistance = magnitude / vectorMagnitude(toCornerA - toCornerB)
 			if edgeDistance < minEdgeDistance then
 				minEdgeDistance = edgeDistance
 			end
 
 			-- The orienting face center must keep its side as the plane
-			-- pivots, so its own pivot bound joins the shape margin. Its
-			-- distance to the edge line is exactly the eroded half extent
-			-- along the hidden face's axis.
+			-- pivots, so its own pivot bound joins the shape margin.
 			local orientationBound = sideMagnitude * edgeDistance / faceHalfExtents[FACE_AXIS[hiddenFace]]
 			if orientationBound < shapeMargin then
 				shapeMargin = orientationBound
@@ -741,10 +640,8 @@ function OcclusionCulling._buildUmbra(
 		end
 	end
 
-	-- The AABB covers the eroded corners and their images scaled about the
-	-- camera, a hull containing every umbra point within farRadius of the
-	-- camera. The scale never drops below one so the corners' own span
-	-- always survives.
+	-- The scale never drops below one so the corners' own span always
+	-- survives.
 	local excessX = math.max(absLocalX - hx, 0)
 	local excessY = math.max(absLocalY - hy, 0)
 	local excessZ = math.max(absLocalZ - hz, 0)
@@ -789,12 +686,9 @@ function OcclusionCulling._selectCandidates(
 	frustumPlanes: { Vector3 },
 	voxelSize: number
 ): number
-	-- A sixth plane closes the frustum behind the camera. The four side
-	-- planes all meet at the camera, so a box straddling the region directly
-	-- behind it isn't fully outside any one of them, and this plane is the
-	-- one that rejects it. The extra plane lives in this module's own scratch
-	-- copy, since the camera cache owns the returned table and every other
-	-- consumer sizes its plane loop from that table's length.
+	-- A sixth plane closes the frustum behind the camera, rejecting boxes
+	-- back there that no single side plane fully excludes. It lives in this
+	-- module's own scratch copy so the camera cache's table stays unmutated.
 	local selectionPlanes = self._frustumPlanesScratch
 	tableMove(frustumPlanes, 1, 10, 1, selectionPlanes)
 	selectionPlanes[11] = cameraPosVoxels
@@ -810,11 +704,9 @@ function OcclusionCulling._selectCandidates(
 		local part = occluders[i]
 		local cframe = part.CFrame
 		local halfSize = part.Size * 0.5
-		-- Reading the pose fresh every frame doubles as a synchronous change
-		-- poll. Property signals arrive deferred, so leaning on them would let
-		-- this frame reuse umbrae and honor proofs anchored to a pose the part
-		-- no longer holds, while this compare catches the change before the
-		-- reuse gate or any proof consult runs.
+		-- Reading the pose fresh doubles as the synchronous change poll,
+		-- catching a move before the reuse gate or any proof consult runs
+		-- rather than waiting on deferred property signals.
 		if cframe ~= occluderCFrames[part] or halfSize ~= occluderHalfSizes[part] then
 			occluderCFrames[part] = cframe
 			occluderHalfSizes[part] = halfSize
@@ -822,9 +714,8 @@ function OcclusionCulling._selectCandidates(
 		end
 		local hx, hy, hz = halfSize.X, halfSize.Y, halfSize.Z
 		local xVector, yVector, zVector = cframe.XVector, cframe.YVector, cframe.ZVector
-		-- These are the world-aligned bounding half extents of the oriented
-		-- box, so the frustum test sees a box containing the occluder and a
-		-- rejection can only drop an occluder that truly can't help.
+		-- The world-aligned bounding half extents contain the oriented box,
+		-- so a frustum rejection can only drop an occluder that can't help.
 		local extents = vectorAbs(xVector) * hx + vectorAbs(yVector) * hy + vectorAbs(zVector) * hz
 		local ex, ey, ez = extents.X, extents.Y, extents.Z
 		local position = cframe.Position
@@ -841,14 +732,9 @@ function OcclusionCulling._selectCandidates(
 		if not intersects then
 			continue
 		end
-		-- A camera inside the part itself sees through it, because the
-		-- renderer draws backfaces transparent, so its umbra must not cull
-		-- anything. Skipping the candidate keeps it out of the tentative
-		-- selection (tearing down a reused umbra on entry), and the entry
-		-- bump expires the hidden proofs it anchored, whose sightline
-		-- argument outlives the pad but not the see-through rendering.
-		-- The same full-box test guards _buildUmbra directly, and the two
-		-- must stay in lockstep.
+		-- A camera inside the part sees through its backfaces, so the skip
+		-- keeps it out of the tentative selection and the entry bump expires
+		-- the hidden proofs it anchored. Stays in lockstep with _buildUmbra.
 		local localCamera = cframe:PointToObjectSpace(cameraPos)
 		if math.abs(localCamera.X) <= hx and math.abs(localCamera.Y) <= hy and math.abs(localCamera.Z) <= hz then
 			if not self._cameraInsideOccluder[part] then
@@ -916,45 +802,21 @@ function OcclusionCulling._anchorBuild(self: OcclusionCulling, tentativeCount: n
 end
 
 --[[
-	Runs one frame's occluder selection and umbra construction. An occluder
-	whose box sits fully outside the view frustum is dropped before scoring,
-	because an umbra lives entirely along rays from the camera through its
-	occluder, so it can't contain anything the frustum shows (MATH.md section
-	12 has the argument). Survivors are scored by a projected-size heuristic
-	(radius squared over distance squared) and the top maxOccluders build
-	umbrae, skipping degenerates and pulling in the next candidate, so the
-	occluder cap is only ever spent on occluders that can contribute. With no
-	tagged occluders or a zero occluder cap, this leaves zero umbrae and the
-	search runs exactly as if occlusion didn't exist.
+	Runs one frame's occluder selection and umbra construction. The top
+	maxOccluders candidates build umbrae, skipping degenerates and pulling in
+	the next candidate, so the cap is only spent on occluders that can
+	contribute. With no tagged occluders or a zero cap, the search runs
+	exactly as if occlusion didn't exist.
 
-	The build also compares this frame's selection against last frame's and
-	bumps the clear generation when a new member arrives, since cached clear
-	proofs were never tested against the newcomer's umbra. A selection that
-	only shrinks leaves the counter alone, because losing an umbra can't
-	falsify a clear verdict.
-
-	Construction itself is skipped when the last build still holds. The
-	candidates are filtered and scored every frame regardless, because the
-	scoring is cheap and it's what notices an occluder entering the view or
-	winning a slot, but when the top scorers match the built set, no occluder
-	mutated, no cache flush re-anchored the odometer, and the camera has
-	translated less than the tightest built pad since the build, the built
-	planes stay sound as they stand (any sightline through an eroded box is
-	still blocked by the full box for every camera within the pad). The frame
-	then just refreshes the gate values, with the drift since the build
-	debited from every allowance handed out. The umbra AABBs and the anchor
-	the depth-scaled math measures from stay at their build values too, which
-	can only misjudge toward visible until the pad crossing rebuilds them.
-
-	Whatever the path, the build leaves the frame's stamp-gate values behind.
-	The motion floor is how much translation the last processed frame added,
-	and a stamp whose allowance can't clear it would expire before it was
-	ever trusted, so the measuring passes and stamp writers skip that work.
-
-	Every path that can leave different umbrae than the frame before, a
-	rebuild that built anything or a teardown of planes that existed, also
-	bumps the build count, which is how the search's whole-frame replay knows
-	the umbra inputs held still.
+	The build bumps the clear generation when the selection gains a member,
+	since cached clear proofs were never tested against the newcomer's umbra,
+	while a selection that only shrinks can't falsify one. Construction is
+	skipped when the last build still holds (same top scorers, no mutation,
+	no flush, drift under the tightest built pad), in which case only the
+	gate values refresh with the drift debited from every allowance.
+	SYSTEM.md covers the reuse argument. Every path leaves the frame's
+	stamp-gate values behind, and every path that can change the umbra set
+	bumps the build count for the search's whole-frame replay.
 ]]
 function OcclusionCulling.buildUmbrae(self: OcclusionCulling)
 	local motion = self._motion
@@ -965,9 +827,8 @@ function OcclusionCulling.buildUmbrae(self: OcclusionCulling)
 	local occluderCount = #occluders
 	local maxOccluders = config.maxOccluders
 	if occluderCount == 0 or maxOccluders <= 0 then
-		-- Tearing down umbrae a previous build left standing changes what the
-		-- search tests against, so it counts as a build, while a bare frame
-		-- following a bare frame doesn't and keeps the replay gate open.
+		-- Tearing down standing umbrae counts as a build, while a bare frame
+		-- following a bare frame keeps the replay gate open.
 		if self._umbraCount ~= 0 then
 			self._buildCount += 1
 		end
@@ -983,10 +844,8 @@ function OcclusionCulling.buildUmbrae(self: OcclusionCulling)
 	local frustumPlanes, minBound, maxBound = CameraCache.getPlanesAndBounds(config.renderDistance, voxelSize)
 	local cameraPosVoxels = cameraPos / voxelSize
 
-	-- This is the farthest reach of any box the search can test, in voxels.
-	-- The search declares how far past the frustum's AABB its seeding can
-	-- reach, so expanding the AABB by that much covers every point of every
-	-- testable box, and the umbra AABBs only need to extend that far.
+	-- farRadius is the farthest any testable box can sit from the camera,
+	-- in voxels, from the frustum AABB expanded by the seeding reach.
 	local reach = self._searchReachExpansion
 	local expandedMin = minBound - Vector3.one * reach
 	local expandedMax = maxBound + Vector3.one * (reach + 1)
@@ -996,14 +855,9 @@ function OcclusionCulling.buildUmbrae(self: OcclusionCulling)
 	local candidateCount = self:_selectCandidates(cameraPos, cameraPosVoxels, frustumPlanes, voxelSize)
 	local candidates = self._candidateIndices
 
-	-- The tentative selection is the top scorers before any degeneracy
-	-- skips, which is the cheapest stable identity the selection has. When
-	-- it matches the built one and every other reuse condition holds, the
-	-- built umbrae are kept as they stand and only the gate values refresh.
-	-- Comparing pre-degeneracy sets means a build that skipped a degenerate
-	-- and pulled in a replacement keeps reusing even if the degeneracy would
-	-- resolve at the current camera, which forgoes that one umbra until the
-	-- pad crossing rebuilds, erring toward visible.
+	-- Comparing pre-degeneracy top scorers means a build that skipped a
+	-- degenerate keeps reusing even where the degeneracy would now resolve,
+	-- forgoing that one umbra until the pad crossing, erring toward visible.
 	local tentativeCount = math.min(maxOccluders, candidateCount)
 	if
 		self._umbraCount > 0
@@ -1043,18 +897,14 @@ function OcclusionCulling.buildUmbrae(self: OcclusionCulling)
 			builtOccluders[built] = part
 		end
 	end
-	-- A rebuild that produced planes, or one that tore down planes a previous
-	-- build left standing, may leave different umbrae than the frame before,
-	-- so the build count moves. A rebuild from nothing to nothing doesn't,
-	-- keeping the replay gate open while every candidate stays degenerate.
+	-- A rebuild from nothing to nothing keeps the replay gate open while
+	-- every candidate stays degenerate.
 	if built > 0 or self._umbraCount > 0 then
 		self._buildCount += 1
 	end
 	self._umbraCount = built
 	self._fullUmbraMask = 2 ^ built - 1
 
-	-- Bump the clear generation when the selection gained a member, then
-	-- keep the tracked set current either way.
 	local lastSelection = self._lastSelection
 	local changed = false
 	for i = 1, built do
@@ -1111,9 +961,8 @@ function OcclusionCulling.testBoxOcclusion(
 	-- Like the frustum tests, the circumscribing sphere resolves the clear
 	-- cases cheaply and the exact projection interval settles the rest.
 	local sphereRadius = vectorMagnitude(extents)
-	-- Every point of the box sits within this far of the camera, the
-	-- conservative reach the pivot bound divides by. It costs a square root,
-	-- and most tests never reach a pivot term, so it fills in lazily.
+	-- The conservative box-to-camera reach the pivot bound divides by,
+	-- filled in lazily since most tests never need its square root.
 	local boxDistanceMax = -1
 
 	local umbraPlaneNormals = self._umbraPlaneNormals
@@ -1136,8 +985,6 @@ function OcclusionCulling.testBoxOcclusion(
 				or z1 < boundsMin.Z
 				or z0 > boundsMax.Z
 			then
-				-- The box misses the umbra's AABB, so the umbra can never
-				-- touch it and the plane loop is skipped.
 				mask = bit32.band(mask, bit32.bnot(planeBit))
 			else
 				local normals = umbraPlaneNormals[i]
@@ -1151,25 +998,21 @@ function OcclusionCulling.testBoxOcclusion(
 					local dist = vectorDot(center, planeNormal) - offsets[j]
 
 					if dist - sphereRadius > EPSILON then
-						-- The box is fully outside this plane, so this umbra
-						-- can never occlude any part of it.
 						mask = bit32.band(mask, bit32.bnot(planeBit))
 						fullyInside = false
 						break
 					elseif dist + sphereRadius > -EPSILON then
-						-- The extents are componentwise non-negative, so this dot
-						-- sums the three projection terms, matching the frustum test.
+						-- The extents are componentwise non-negative, so this
+						-- dot is the exact projection radius, matching the
+						-- frustum test.
 						local radius = vectorDot(extents, vectorAbs(planeNormal))
 						if dist - radius > EPSILON then
 							mask = bit32.band(mask, bit32.bnot(planeBit))
 							fullyInside = false
 							break
 						elseif dist + radius > -EPSILON then
-							-- The box straddles this plane, so this umbra can't
-							-- fully occlude it. The bit stays set because children
-							-- of the box may still land fully inside. The scan
-							-- keeps going only to catch a fully-outside plane that
-							-- would prune the bit.
+							-- A straddle keeps the bit set for the box's
+							-- children, scanning on for a pruning plane.
 							fullyInside = false
 						elseif j > capCount then
 							local silhouetteMargin = -dist - radius
@@ -1178,8 +1021,8 @@ function OcclusionCulling.testBoxOcclusion(
 							end
 						end
 					elseif j > capCount then
-						-- The sphere radius overstates the projection radius,
-						-- so this margin only ever understates.
+						-- The sphere radius overstates the projection
+						-- radius, so this margin only ever understates.
 						local silhouetteMargin = -dist - sphereRadius
 						if silhouetteMargin < minSilhouetteMargin then
 							minSilhouetteMargin = silhouetteMargin
@@ -1187,18 +1030,9 @@ function OcclusionCulling.testBoxOcclusion(
 					end
 				end
 				if fullyInside then
-					-- The hidden allowance is the larger of the pad floor and
-					-- the pivot bound, the minimum silhouette margin scaled
-					-- by edge distance over (box reach + edge distance) and
-					-- capped by the shape allowance (MATH.md section 13). Cap
-					-- margins never enter it because cap planes are world
-					-- fixed, and with no silhouette margin measured (a
-					-- hand-built plane set can be all caps) the shape
-					-- allowance alone bounds the pivot term. Both bounds are
-					-- measured from the build anchor, so on a reuse frame the
-					-- drift already spent comes off the grant, keeping the
-					-- stored expiry equal to the anchor reading plus the
-					-- geometric bound.
+					-- The hidden allowance is the larger of the pad floor
+					-- and the pivot bound (MATH.md section 13), with the
+					-- drift already spent on a reuse frame debited off.
 					local pivotAllowance = self._umbraShapeAllowances[i]
 					if minSilhouetteMargin < math.huge then
 						if boxDistanceMax < 0 then
@@ -1217,8 +1051,6 @@ function OcclusionCulling.testBoxOcclusion(
 			end
 		end
 		if mask == 0 then
-			-- Every umbra is pruned, so the verdict and the returned mask are
-			-- final and the remaining slots have nothing left to test.
 			break
 		end
 		planeBit *= 2
@@ -1271,9 +1103,8 @@ local function measureAllowance(
 		if bit32.band(umbraMask, planeBit) ~= 0 then
 			local shapeAllowance = self._umbraShapeAllowances[i]
 			if shapeAllowance < bailThreshold then
-				-- Every witness this umbra can offer is capped by its shape
-				-- allowance, so the result can't clear the motion floor and
-				-- the whole pass is a dead stamp. Zero suppresses it.
+				-- Every witness this umbra can offer is likely
+				-- invalid by next frame, so don't bother stamping.
 				return 0
 			end
 			local normals = umbraPlaneNormals[i]
@@ -1288,8 +1119,8 @@ local function measureAllowance(
 					local dist = vectorDot(center, planeNormal) - offsets[j]
 					local margin = dist - sphereRadius
 					if margin <= EPSILON then
-						-- The sphere straddles this plane, so try the exact
-						-- projection interval before moving on.
+						-- The sphere straddles, so try the exact projection
+						-- interval before moving on.
 						margin = dist - vectorDot(extents, vectorAbs(planeNormal))
 						if margin <= EPSILON then
 							continue
@@ -1363,21 +1194,15 @@ end
 	leaf cell's box that testBoxOcclusion already found no umbra fully
 	containing. The claim is weaker than the clear verdict (the box may
 	straddle umbrae, it just isn't swallowed by any), so the witness is one
-	point rather than the whole box. For each umbra, any plane whose maximum
-	signed distance p = dist + radius is strictly positive puts the box's
-	support point strictly outside it, and that point keeps its side for the
-	shape allowance when the plane is a world-fixed cap, or for the pivot
-	bound p * edgeDistance / (boxDistanceMax + edgeDistance) when it's a
-	silhouette plane (MATH.md section 13). Caps are scanned first because a
-	cap witness already achieves the shape-allowance ceiling and ends that
-	umbra's scan, and the radius must be the exact projection radius, since
-	the sphere overestimate would inflate p and grant unearned durability.
-	Poke-out witnesses don't inherit downward (a box can poke out of an
-	umbra while a cell inside it sits fully hidden), so only leaf cells,
-	which have no contents, ever store this measurement. The mask must cover
-	every umbra built this frame, because the stored proof quantifies over
-	all of them. Returns zero when some umbra offers no witness, which
-	suppresses durability and never soundness.
+	support point poking out of a plane per umbra, riding the shape
+	allowance for a cap or the pivot bound for a silhouette plane (MATH.md
+	section 13). The radius must be the exact projection radius, since the
+	sphere overestimate would inflate the poke-out and grant unearned
+	durability. Poke-out witnesses don't inherit downward, so only leaf
+	cells, which have no contents, ever store this measurement, and the mask
+	must cover every umbra built this frame because the stored proof
+	quantifies over all of them. Returns zero when some umbra offers no
+	witness, which suppresses durability and never soundness.
 ]]
 function OcclusionCulling.measureNotOccludedAllowance(
 	self: OcclusionCulling,

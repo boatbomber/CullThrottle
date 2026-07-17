@@ -20,10 +20,8 @@ local tableInsert = table.insert
 local tableFind = table.find
 local tableClear = table.clear
 
--- The visibility search collects occupied voxel keys once per frame. To avoid
--- touching empty cells, occupied voxel keys are also bucketed into a coarse grid
--- (each bucket spans COARSE_VOXEL_SIZE voxels per axis) so the collection iterates
--- only the occupied keys it overlaps instead of every cell within the bounds.
+-- Occupied voxel keys are bucketed into a coarse grid (this many voxels per
+-- axis per bucket) so the search's seed scan touches only occupied keys.
 local COARSE_VOXEL_SIZE = 4
 
 local VoxelGrid = {}
@@ -34,18 +32,16 @@ VoxelGrid.COARSE_VOXEL_SIZE = COARSE_VOXEL_SIZE
 type VoxelGridProto = {
 	_config: Config.Config,
 	_visibilityCache: VisibilityCache.VisibilityCache,
-	-- This is an alias of ObjectLifecycle's tracked-object map, injected so the
-	-- grid can look up queued objects without a module dependency on its owner.
-	-- It's only ever mutated in place, never reassigned.
+	-- An alias of ObjectLifecycle's tracked-object map, mutated in place and
+	-- never reassigned.
 	_objects: { [Instance]: types.ObjectData },
 
 	_voxels: { [types.VoxelKey]: types.Voxel },
 	_coarseVoxels: { [types.CoarseVoxelKey]: { types.VoxelKey } },
 	_coarseBucketCount: number,
-	-- The bounding box (inclusive, in coarse-cell coordinates) of the occupied
-	-- coarse buckets clamps the seed scan to space that can actually hold voxels.
-	-- It goes dirty after a boundary bucket is removed, and the next scan lazily
-	-- recomputes it.
+	-- Inclusive bounding box of the occupied coarse buckets, in coarse-cell
+	-- coordinates. It goes dirty when a boundary bucket is removed and the next
+	-- seed scan lazily recomputes it.
 	_coarseBoundsDirty: boolean,
 	_coarseMinX: number,
 	_coarseMinY: number,
@@ -53,11 +49,8 @@ type VoxelGridProto = {
 	_coarseMaxX: number,
 	_coarseMaxY: number,
 	_coarseMaxZ: number,
-	-- This counts every change to the set of occupied voxel keys, meaning a
-	-- voxel created or emptied, plus the wholesale clears. The search's
-	-- whole-frame replay compares it across frames, because with the camera
-	-- and occluders holding still the visible voxel set can only change
-	-- through this set.
+	-- Counts every change to the occupied voxel key set (created, emptied, or
+	-- cleared). The search's whole-frame replay compares it across frames.
 	_occupancyGeneration: number,
 	_updateObjectVoxelsQueue: PriorityQueue.PriorityQueue<Instance>,
 }
@@ -156,10 +149,9 @@ function VoxelGrid.updateDesiredVoxelKeys(
 	local voxelSize = self._config.voxelSize
 	local multiVoxelRadiusThreshold = self._config.multiVoxelRadiusThreshold
 
-	-- The diff table is cleared and reused to avoid allocation churn. That's
-	-- safe even while the object sits in the update queue, since the queue
-	-- stores only the object and reads this table at dequeue time, so a
-	-- recompute simply supersedes the old diff.
+	-- The diff table is cleared and reused. That's safe while the object sits in
+	-- the update queue, since the queue reads it at dequeue time, so a recompute
+	-- simply supersedes the old diff.
 	local desiredVoxelKeys = objectData.desiredVoxelKeys
 	tableClear(desiredVoxelKeys)
 
@@ -167,13 +159,10 @@ function VoxelGrid.updateDesiredVoxelKeys(
 	local position = cframe.Position
 
 	if not (isFinite(position.X) and isFinite(position.Y) and isFinite(position.Z) and isFinite(objectData.radius)) then
-		-- A non-finite position or extent poisons the voxel coordinate math. A
-		-- NaN can't even be used as a voxel key, and it would feed a NaN into the
-		-- queue priority that corrupts the heap's dequeue order, while an infinite
-		-- extent makes the multi-voxel fill loop's bounds never advance and hangs
-		-- the frame. We leave the object in its current voxels and reslot it once
-		-- it has finite geometry again. The diff was cleared above, so returning
-		-- it now enqueues nothing.
+		-- Non-finite geometry poisons the voxel math (a NaN corrupts keys and the
+		-- heap order, an infinite extent hangs the fill loop), so leave the
+		-- object in its current voxels until it's finite again. The diff was
+		-- cleared above, so returning it now enqueues nothing.
 		return desiredVoxelKeys
 	end
 
@@ -181,25 +170,17 @@ function VoxelGrid.updateDesiredVoxelKeys(
 	desiredVoxelKeys[desiredVoxelKey] = true
 
 	if objectData.radius > multiVoxelRadiusThreshold then
-		-- The bounding box is oriented, so we can't just fill its world-space
-		-- AABB. For a rotated object that AABB bulges past the box and its corner
-		-- voxels would be empty. Instead the AABB only bounds which voxels are
-		-- worth checking, and we keep a voxel only if it truly overlaps the box.
-		--
-		-- Overlap is a separating-axis test against the box's own 3 face axes.
-		-- (The 3 world axes are already covered by the AABB candidate range, so
-		-- no candidate can be separated along them.) We skip the 9 edge-edge
-		-- cross-product axes. Omitting them can only ever over-include, never
-		-- wrongly cull, and it leaves at most a thin sliver of corner voxels.
+		-- The world-space AABB only bounds the candidates, since it bulges past a
+		-- rotated box. Each candidate then takes a separating-axis test against
+		-- the box's 3 face axes (the world axes are covered by the AABB range).
+		-- Skipping the 9 edge-edge axes can only over-include, never wrongly cull.
 		local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = cframe:GetComponents()
 		local hx, hy, hz = halfBoundingBox.X, halfBoundingBox.Y, halfBoundingBox.Z
 		local halfVoxel = voxelSize / 2
 
-		-- The box axes in world space are the columns of the rotation matrix:
-		-- axisX = (r00, r10, r20), axisY = (r01, r11, r21), axisZ = (r02, r12, r22).
-		-- A voxel (an axis-aligned cube) projected onto a box axis reaches
-		-- halfVoxel * (|axis.X| + |axis.Y| + |axis.Z|), and adding the box's own
-		-- extent gives the separation threshold along that axis.
+		-- The box axes are the rotation matrix columns. A voxel projected onto a
+		-- box axis reaches halfVoxel times the axis's absolute component sum, and
+		-- adding the box's own extent gives the separation threshold.
 		local reachX = hx + halfVoxel * (math.abs(r00) + math.abs(r10) + math.abs(r20))
 		local reachY = hy + halfVoxel * (math.abs(r01) + math.abs(r11) + math.abs(r21))
 		local reachZ = hz + halfVoxel * (math.abs(r02) + math.abs(r12) + math.abs(r22))
@@ -213,24 +194,17 @@ function VoxelGrid.updateDesiredVoxelKeys(
 		local minVoxelKey = (position - worldHalf) // voxelSize
 		local maxVoxelKey = (position + worldHalf) // voxelSize
 
-		-- Within one z-row (fixed x and y) the voxels that pass form a single
-		-- contiguous run, because the passing region (the box, inflated by half a
-		-- voxel on each axis) is convex. Each box-local coordinate is linear in the
-		-- row index, so every reach test reduces to an interval of z, and the run
-		-- we fill is the integers common to all three intervals.
-		--
-		-- As the inner loop steps one voxel along world Z, each box-local coordinate
-		-- moves by a fixed amount, the world-Z component of that box axis times the
-		-- voxel size. We precompute those per-step increments so a row reduces to
-		-- lx + t * lxStep (and likewise ly and lz), where t counts steps from the
-		-- row's first voxel.
+		-- Within one z-row the passing voxels form a single contiguous run,
+		-- because the inflated box is convex and each box-local coordinate is
+		-- linear in the row index. These per-step increments reduce a row to
+		-- lx + t * lxStep and friends, with t counting steps from the row's
+		-- first voxel.
 		local lxStep, lyStep, lzStep = voxelSize * r20, voxelSize * r21, voxelSize * r22
 		local firstRowDz = (minVoxelKey.Z + 0.5) * voxelSize - position.Z
 		local rowLen = maxVoxelKey.Z - minVoxelKey.Z
 
-		-- A box axis perpendicular to world Z has a ~zero step, so its coordinate is
-		-- constant down the row. Flag those (we hold them constant rather than divide
-		-- by ~zero) and precompute reciprocals of the steps that do vary.
+		-- An axis perpendicular to world Z has a ~zero step, so hold it constant
+		-- rather than divide by ~zero.
 		local stepEpsilon = 1e-9
 		local lxVaries = math.abs(lxStep) > stepEpsilon
 		local lyVaries = math.abs(lyStep) > stepEpsilon
@@ -239,8 +213,8 @@ function VoxelGrid.updateDesiredVoxelKeys(
 		local invLyStep = if lyVaries then 1 / lyStep else 0
 		local invLzStep = if lzVaries then 1 / lzStep else 0
 
-		-- Round the surviving span outward by a hair so a center sitting exactly on
-		-- the boundary is kept rather than lost to float error.
+		-- Rounds the surviving span outward so a center exactly on the boundary
+		-- isn't lost to float error.
 		local boundaryBias = 1e-6
 
 		for x = minVoxelKey.X, maxVoxelKey.X do
@@ -250,19 +224,16 @@ function VoxelGrid.updateDesiredVoxelKeys(
 			for y = minVoxelKey.Y, maxVoxelKey.Y do
 				local dy = (y + 0.5) * voxelSize - position.Y
 
-				-- These are the box-local coordinates of the row's first voxel center (z = minVoxelKey.Z).
+				-- The box-local coordinates of the row's first voxel center.
 				local lx = dxR00 + dy * r10 + firstRowDz * r20
 				local ly = dxR01 + dy * r11 + firstRowDz * r21
 				local lz = dxR02 + dy * r12 + firstRowDz * r22
 
-				-- Start from the whole row, then clip it to each box axis's reach.
-				-- What survives is the run of voxels this row actually occupies.
 				local lo, hi = 0, rowLen
 				lo, hi = clampRowToAxis(lo, hi, lx, reachX, invLxStep, lxVaries)
 				lo, hi = clampRowToAxis(lo, hi, ly, reachY, invLyStep, lyVaries)
 				lo, hi = clampRowToAxis(lo, hi, lz, reachZ, invLzStep, lzVaries)
 
-				-- Round the surviving [lo, hi] span to the integer voxels it covers.
 				local firstZ = minVoxelKey.Z + math.ceil(lo - boundaryBias)
 				local lastZ = minVoxelKey.Z + math.floor(hi + boundaryBias)
 				for z = firstZ, lastZ do
@@ -272,10 +243,8 @@ function VoxelGrid.updateDesiredVoxelKeys(
 		end
 	end
 
-	-- Diff the desired set against the current voxels. After this loop the table
-	-- holds only the changes, where true means enter that voxel, false means
-	-- leave it, and a voxel the object already occupies and keeps drops out of
-	-- the table entirely.
+	-- Diff against the current voxels, leaving only the changes (true enters,
+	-- false leaves, kept voxels drop out).
 	for voxelKey in objectData.voxelKeys do
 		if desiredVoxelKeys[voxelKey] then
 			desiredVoxelKeys[voxelKey] = nil
@@ -285,8 +254,7 @@ function VoxelGrid.updateDesiredVoxelKeys(
 	end
 
 	if not skipQueue and next(desiredVoxelKeys) and not self._updateObjectVoxelsQueue:contains(object) then
-		-- Manhattan distance to the camera is close enough for ordering the
-		-- queue and skips the square root.
+		-- Manhattan distance orders the queue well enough and skips the square root.
 		local difference = position - CameraCache.Position
 		local priority = math.abs(difference.X) + math.abs(difference.Y) + math.abs(difference.Z)
 
@@ -309,7 +277,6 @@ function VoxelGrid.insertToVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, obje
 		self._voxels[voxelKey] = { objectData }
 		self._occupancyGeneration += 1
 
-		-- This voxel just became occupied, so add it to its coarse bucket.
 		local coarseX = voxelKey.X // COARSE_VOXEL_SIZE
 		local coarseY = voxelKey.Y // COARSE_VOXEL_SIZE
 		local coarseZ = voxelKey.Z // COARSE_VOXEL_SIZE
@@ -320,9 +287,8 @@ function VoxelGrid.insertToVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, obje
 		else
 			self._coarseVoxels[coarseKey] = { voxelKey }
 
-			-- Grow the occupied coarse bounding box. While the bounds are dirty
-			-- they may be loose, but growing them here keeps them containing every
-			-- occupied cell until the lazy recompute tightens them.
+			-- Growing the bounds here keeps them containing every occupied cell
+			-- even while dirty, until the lazy recompute tightens them.
 			if self._coarseBucketCount == 0 then
 				self._coarseMinX, self._coarseMinY, self._coarseMinZ = coarseX, coarseY, coarseZ
 				self._coarseMaxX, self._coarseMaxY, self._coarseMaxZ = coarseX, coarseY, coarseZ
@@ -376,7 +342,6 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 		self._visibilityCache._voxelProofs[voxelKey] = nil
 		self._visibilityCache._voxelOcclusionProofs[voxelKey] = nil
 
-		-- This voxel is no longer occupied, so remove it from its coarse bucket.
 		local coarseX = voxelKey.X // COARSE_VOXEL_SIZE
 		local coarseY = voxelKey.Y // COARSE_VOXEL_SIZE
 		local coarseZ = voxelKey.Z // COARSE_VOXEL_SIZE
@@ -387,16 +352,12 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 			if bucketIndex then
 				local bucketN = #bucket
 				if bucketN == 1 then
-					-- This was the last voxel in this bucket, so drop the bucket
-					-- entirely, along with any cached verdict or occlusion
-					-- proof for it.
 					self._coarseVoxels[coarseKey] = nil
 					self._visibilityCache._bucketVerdicts[coarseKey] = nil
 					self._visibilityCache._bucketOcclusionProofs[coarseKey] = nil
 					self._coarseBucketCount -= 1
 
-					-- Only a bucket on the surface of the occupied bounding box can
-					-- tighten it. The recompute is deferred to the next seed scan.
+					-- Only a bucket on the surface of the bounds can tighten them.
 					if
 						coarseX == self._coarseMinX
 						or coarseX == self._coarseMaxX
@@ -408,16 +369,12 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 						self._coarseBoundsDirty = true
 					end
 				else
-					-- Swap with the last key to avoid shifting the array.
 					bucket[bucketIndex] = bucket[bucketN]
 					bucket[bucketN] = nil
 				end
 			end
 		end
 	else
-		-- To avoid shifting the whole array, the last object overwrites this
-		-- one (a self-assignment when they coincide), since order doesn't
-		-- matter in this list.
 		voxel[objectIndex] = voxel[n]
 		voxel[n] = nil
 	end

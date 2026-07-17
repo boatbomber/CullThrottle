@@ -7,8 +7,8 @@
 	throughout. It's a stateless function library where every input arrives as
 	an argument, so the tests have no instance to construct.
 
-	Both tests measure how far a box sits from each frustum plane and report not
-	just the verdict but the clearance that proves it, meaning how much camera
+	Both tests measure how far a box sits from each frustum plane and report the
+	verdict together with the clearance that proves it, meaning how much camera
 	motion (translation, plus rotation charged at the box's arm) must accumulate
 	before the verdict could flip. Those clearances are what the voxel proof and
 	bucket verdict caches store as expiries.
@@ -22,14 +22,11 @@ local vectorDot = (vector.dot :: any) :: (Vector3 | vector, Vector3 | vector) ->
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
 local vectorAbs = (vector.abs :: any) :: (Vector3 | vector) -> Vector3
 
--- This is the guard band for the frustum plane comparisons, in voxel-space
--- units (the box test runs entirely in voxel coordinates).
+-- Guard band for the plane comparisons, in voxel units.
 local EPSILON = 1e-4
 
--- These are the cached bucket verdict states. A bucket proven fully outside
--- (culled) or fully inside the frustum keeps that verdict until camera motion
--- could overturn it. A straddling bucket has no cacheable verdict and is
--- re-searched while it straddles.
+-- Bucket verdict states. Only culled and inside are cacheable, a straddling
+-- bucket is re-searched while it straddles.
 local BUCKET_STRADDLING = 0
 local BUCKET_CULLED = 1
 local BUCKET_INSIDE = 2
@@ -86,8 +83,7 @@ function Frustum.isBoxInFrustum(
 	local center = Vector3.new((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5)
 	local extents = Vector3.new((x1 - x0) * 0.5, (y1 - y0) * 0.5, (z1 - z0) * 0.5)
 
-	-- We test the radius of the sphere that circumscribes the box.
-	-- If the sphere is fully inside/outside, we can skip the more exact check.
+	-- The circumscribing sphere settles most planes without the exact box test.
 	local sphereRadius = vectorMagnitude(extents)
 
 	local straddledMask = 0
@@ -107,13 +103,10 @@ function Frustum.isBoxInFrustum(
 			local slack = nil
 
 			if dist > sphereRadius + EPSILON then
-				-- The circumscribing sphere is fully outside this plane, so the box is too.
 				return false, 0, dist - sphereRadius - EPSILON, 0, 0, 0, i == 9
 			elseif dist > -sphereRadius then
-				-- The sphere straddles this plane, which proves nothing about the
-				-- box, so fall back to the exact projection interval radius of the
-				-- box onto the plane normal. The extents are componentwise
-				-- non-negative, so dotting them against the normal's componentwise
+				-- The sphere straddles, so fall back to the box's exact projection
+				-- radius. Dotting the non-negative extents against the normal's
 				-- absolute value sums the three projection terms in two vector ops.
 				local radius = vectorDot(extents, vectorAbs(planeNormal))
 
@@ -121,11 +114,9 @@ function Frustum.isBoxInFrustum(
 					return false, 0, dist - radius - EPSILON, 0, 0, 0, i == 9
 				end
 
-				-- If the distance plus the radius is positive, the box is not
-				-- completely inside this plane, so volumes within it must keep
-				-- testing it. The box still intersects until the plane sweeps
-				-- past it entirely, and that exit clearance is a provable
-				-- visibility bound for the box itself.
+				-- The box straddles this plane, so volumes within it must keep
+				-- testing it, and the exit clearance bounds when the plane could
+				-- sweep fully past.
 				if dist + radius > EPSILON then
 					straddledMask = bit32.bor(straddledMask, planeBit)
 					local exitSlack = radius + EPSILON - dist
@@ -136,8 +127,7 @@ function Frustum.isBoxInFrustum(
 					slack = -(dist + radius)
 				end
 			else
-				-- The sphere is fully inside this plane. Its slack is a lower
-				-- bound on the box's, and it is already computed.
+				-- The sphere is fully inside, and its slack lower-bounds the box's.
 				slack = -dist - sphereRadius
 			end
 
@@ -149,8 +139,7 @@ function Frustum.isBoxInFrustum(
 				end
 			end
 		end
-		-- The bit advances even for masked-out planes so it stays aligned with
-		-- the plane index.
+		-- The bit advances even for masked-out planes to stay aligned with the index.
 		planeBit *= 2
 	end
 
@@ -158,9 +147,8 @@ function Frustum.isBoxInFrustum(
 	return true, straddledMask, minSlack, minExitSlack, sideSlack, farSlack, false
 end
 
--- classifyBucket reaches the core through this local upvalue, so a counting
--- shim swapped onto the module table observes only the direct isBoxInFrustum
--- callers and bucket classification stays separately countable.
+-- classifyBucket reaches the core through this upvalue, so a counting shim on
+-- the module table only sees direct isBoxInFrustum callers.
 local isBoxInFrustum = Frustum.isBoxInFrustum
 
 --[[
@@ -190,7 +178,6 @@ function Frustum.classifyBucket(
 		isBoxInFrustum(frustumPlanes, 0b11111, x0, y0, z0, x1, y1, z1)
 
 	if not intersects then
-		-- The rejection slack is the culled margin, and there is no partial proof.
 		return BUCKET_CULLED, 0, 0, 0, slack, rejectedByFar
 	end
 	if straddledMask ~= 0 then

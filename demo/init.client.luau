@@ -58,7 +58,7 @@ end
 
 task.delay(1, function()
 	-- Create a consistent occluder right in front of the camera.
-	-- Toggle it on and off to easily measure how much occlusion saves.
+	-- Toggle it on and off to measure how much occlusion saves.
 	local occluder = Instance.new("Part")
 	occluder:AddTag("CullThrottleOccluder")
 	occluder.Anchored = true

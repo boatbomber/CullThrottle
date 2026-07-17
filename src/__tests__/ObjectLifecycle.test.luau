@@ -34,7 +34,7 @@ describe("ObjectLifecycle", function()
 		cullThrottle = nil
 	end)
 
-	-- This block deliberately covers the facade's Destroy and the lifecycle
+	-- This block covers the facade's Destroy and the lifecycle
 	-- teardown it drives together, since consumers only ever observe them as
 	-- one operation.
 	describe("Destroy", function()
@@ -216,7 +216,7 @@ describe("ObjectLifecycle", function()
 			expect(objectData.voxelKeys[Vector3.new(-1, 0, 0)]).toBe(true)
 			expect(objectData.voxelKeys[Vector3.new(1, 0, 0)]).toBe(true)
 
-			-- And the object is actually inserted into one of those interior voxels.
+			-- And the object lands in one of those interior voxels.
 			local interiorVoxel = cullThrottle._grid._voxels[Vector3.new(1, 0, 0)]
 			expect(interiorVoxel).toBeDefined()
 			expect(table.find(interiorVoxel, objectData)).toBeDefined()
@@ -331,7 +331,7 @@ describe("ObjectLifecycle", function()
 
 			-- The offsets are independent random draws, so 32 of them landing on
 			-- one shared value (or all on zero) means the jitter silently no-ops.
-			-- That's effectively impossible from real draws, so we assert the
+			-- Real draws won't land there, so we assert the
 			-- spread without pinning any exact value.
 			local allSame = true
 			local anyNonzero = false
@@ -725,7 +725,7 @@ describe("ObjectLifecycle", function()
 
 			-- A leftover duplicate would survive RemoveObject's single swap-remove,
 			-- leaving a dangling entry that pins the removed instance in the list and
-			-- gets pointlessly skipped on every poll. There must be no trace left.
+			-- gets skipped on every poll. There must be no trace left.
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, part)).toBeNil()
 			expect(#cullThrottle._lifecycle._physicsObjects).toBe(0)
 
@@ -940,8 +940,8 @@ describe("ObjectLifecycle", function()
 				end
 			end)
 
-			-- Alternate the two add flavors so the cycling also churns the physics
-			-- registration, not just the tracked map.
+			-- Alternate the two add flavors so the cycling churns the physics
+			-- registration along with the tracked map.
 			for i = 1, 20 do
 				if i % 2 == 0 then
 					cullThrottle:AddPhysicsObject(part)

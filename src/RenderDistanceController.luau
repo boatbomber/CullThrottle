@@ -12,21 +12,18 @@
 local types = require(script.Parent.types)
 local Config = require(script.Parent.Config)
 
--- Each frame cost is normalized by its budget and scaled by its weight, and the
--- worst of the three drives the controller, so search pressure weighs heaviest
--- and the per-object update pace weighs lightest.
+-- Search pressure weighs heaviest and the per-object update pace lightest.
 local DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT = 1.3
 local DYNAMIC_RENDER_DISTANCE_INGEST_WEIGHT = 1.0
 local DYNAMIC_RENDER_DISTANCE_DELTA_WEIGHT = 0.8
 -- Grow only when the worst weighted load is below this fraction of budget.
 local DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM = 0.6
--- The step size is a fraction of the render distance range midpoint, adapted
--- each frame within these bounds. A fresh controller starts at the initial
--- step (the first move clamps it down to the max).
+-- The step is a fraction of the range midpoint, adapted within these bounds.
+-- A fresh controller's first move clamps the initial step down to the max.
 local DYNAMIC_RENDER_DISTANCE_INITIAL_STEP = 0.03
 local DYNAMIC_RENDER_DISTANCE_MIN_STEP = 0.0002
 local DYNAMIC_RENDER_DISTANCE_MAX_STEP = 0.025
--- Shrink the step when we reverse/settle, and grow it when the scene really changed.
+-- Shrink the step on a reversal or settle, and grow it on a sustained trend.
 local DYNAMIC_RENDER_DISTANCE_STEP_DAMPING = 0.35
 local DYNAMIC_RENDER_DISTANCE_STEP_GAIN = 1.2
 
@@ -36,10 +33,8 @@ RenderDistanceController.__index = RenderDistanceController
 type RenderDistanceControllerProto = {
 	_config: Config.Config,
 	_perfMetrics: types.PerfMetrics,
-	-- This is the controller's working state. Each adjustment moves the
-	-- distance by step (a fraction of the midpoint distance), and direction
-	-- holds the last move's sign (-1 shrink, 0 hold, 1 grow) so the controller
-	-- can damp reversals and accelerate streaks.
+	-- The step is a fraction of the midpoint distance, and direction holds the
+	-- last move's sign (-1 shrink, 0 hold, 1 grow).
 	_step: number,
 	_direction: number,
 }
@@ -82,7 +77,6 @@ end
 ]]
 function RenderDistanceController.adjust(self: RenderDistanceController)
 	local config = self._config
-	-- A zero-width range pins the distance, so there is nothing to adjust.
 	if config.minRenderDistance == config.maxRenderDistance then
 		return
 	end
@@ -90,20 +84,14 @@ function RenderDistanceController.adjust(self: RenderDistanceController)
 	local perfMetrics = self._perfMetrics
 
 	-- A zero budget means that pass is configured off rather than starved, so it
-	-- gets no vote here. Its duration would divide into an infinite load, and
-	-- its skip metric just records the fallback doing all the work, neither of
-	-- which says anything about the render distance.
+	-- gets no vote in the load or the skip signal.
 	local searchTimeBudget = config.searchTimeBudget
 	local ingestTimeBudget = config.ingestTimeBudget
 	local updateTimeBudget = config.updateTimeBudget
 
-	-- Skipped voxels mean a pass couldn't even cover the space it was asked
-	-- to, regardless of how the budget load reads.
 	local isSkipping = (ingestTimeBudget > 0 and perfMetrics._getAverage(perfMetrics._skippedIngest) ~= 0)
 		or (searchTimeBudget > 0 and perfMetrics._getAverage(perfMetrics._skippedSearch) ~= 0)
 
-	-- Normalize each constraint to where 1 means at budget, weighted by how costly
-	-- an overrun is, and let the worst one drive the decision.
 	local load = math.max(
 		if searchTimeBudget > 0
 			then (perfMetrics._searchDuration / searchTimeBudget) * DYNAMIC_RENDER_DISTANCE_SEARCH_WEIGHT
@@ -116,17 +104,15 @@ function RenderDistanceController.adjust(self: RenderDistanceController)
 			else 0
 	)
 
-	-- A direction of -1 shrinks, 0 holds (within the deadband), and 1 grows.
 	local direction = if isSkipping or load > 1 then -1 elseif load < DYNAMIC_RENDER_DISTANCE_GROW_HEADROOM then 1 else 0
 
-	-- Adapt the step rather than slamming on any signal.
 	local step = self._step
 	local lastDirection = self._direction
 	if direction == 0 or (lastDirection ~= 0 and direction ~= lastDirection) then
-		-- We settled in the deadband or reversed past the sustainable edge, so damp to settle.
+		-- Settled or reversed, so damp toward rest.
 		step *= DYNAMIC_RENDER_DISTANCE_STEP_DAMPING
 	else
-		-- The direction is consistent (or this is the first move from rest), so accelerate to catch up.
+		-- A consistent trend (or the first move from rest) accelerates to catch up.
 		step *= DYNAMIC_RENDER_DISTANCE_STEP_GAIN
 	end
 	step = math.clamp(step, DYNAMIC_RENDER_DISTANCE_MIN_STEP, DYNAMIC_RENDER_DISTANCE_MAX_STEP)

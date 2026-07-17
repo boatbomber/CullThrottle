@@ -3,11 +3,10 @@
 --[[
 	This is a batched yield-safe signal implementation, based on stravant's
 	original GoodSignal but heavily modified for strict typing and a better
-	API surface. Behavior is effectively identical to a normal RBXScriptSignal,
-	with the only difference being a couple extra stack frames at the bottom of
-	the stack trace when an error is thrown. Runner coroutines are cached, so
-	the ability to yield in signal handlers comes at minimal extra cost over a
-	naive signal implementation that either always or never spawns a thread.
+	API surface. Behavior matches a normal RBXScriptSignal, apart from a couple
+	extra stack frames at the bottom of the stack trace when an error is
+	thrown. Runner coroutines are cached, so yielding in signal handlers costs
+	little over a signal that either always or never spawns a thread.
 
 	A signal is parameterized by the argument pack that Fire sends and
 	connected handlers receive.
@@ -38,7 +37,6 @@ local function acquireRunnerThreadAndCallEventHandler<T...>(fn: (T...) -> (), ..
 	local acquiredRunnerThread = freeRunnerThread
 	freeRunnerThread = nil
 	fn(...)
-	-- The handler finished running, so this runner thread is free again.
 	freeRunnerThread = acquiredRunnerThread
 end
 
@@ -104,10 +102,8 @@ local function Disconnect<T...>(self: Connection<T...>)
 	self.Connected = false
 	self._signal._connectionCount -= 1
 
-	-- Unhook the node, but don't clear it. That way any fire calls that are
-	-- currently sitting on this node will be able to iterate forwards off of
-	-- it, but any subsequent fire calls will not hit it, and it will be GCed
-	-- when no more fire calls are sitting on it.
+	-- Unhook the node but don't clear it, so a fire call currently sitting on it
+	-- can still iterate forward while later fires skip it.
 	if self._signal._handlerListHead == self then
 		self._signal._handlerListHead = self._next
 	else
@@ -180,11 +176,9 @@ local function Fire<T...>(self: Signal<T...>, ...: T...)
 		if item.Connected then
 			local currentThread: thread
 			if freeRunnerThread then
-				-- An idle runner thread exists, so we reuse it.
 				currentThread = freeRunnerThread
 			else
-				-- We make a new thread and get it to its first yield, ready to
-				-- be handed work.
+				-- A fresh runner gets resumed to its first yield, ready for work.
 				currentThread = coroutine.create(runEventHandlerInFreeThread)
 				freeRunnerThread = currentThread
 				coroutine.resume(currentThread)

@@ -20,22 +20,16 @@ local CameraCache = require(script.Parent.Utilities.CameraCache)
 
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
 
--- Voxel proofs are packed into Vector3s, whose f32 components lose absolute
--- precision as the motion accumulators grow. Flushing re-anchors everything at
--- zero before f32 rounding (about 1.2e-7 of the compared magnitude) can eat
--- into the SLACK_SAFETY margin that keeps proofs from outliving their
--- verdicts. Reaching either limit takes a lot of sustained motion,
--- and the price is one cold frame.
+-- Packed voxel proofs live in f32 Vector3 components, so flushing re-anchors
+-- everything at zero before f32 rounding can eat into the SLACK_SAFETY margin
+-- (docs/MATH.md section 10). The price of reaching a limit is one cold frame.
 local ACCUM_TRANSLATION_FLUSH_LIMIT = 16384 -- This counts voxels of translation plus render distance change.
 local ACCUM_ROTATION_FLUSH_LIMIT = 64 -- This one is in radians.
 
 local CameraMotion = {}
 CameraMotion.__index = CameraMotion
 
--- The flush limits are precision-guard tunables whose values pair with the
--- SLACK_SAFETY shave (docs/MATH.md section 10), so they're exported for the
--- tests that drive flushes and pin that relationship, keeping the literals
--- out of the test bodies.
+-- Exported so the tests that drive flushes can pin these without copying the literals.
 CameraMotion.ACCUM_TRANSLATION_FLUSH_LIMIT = ACCUM_TRANSLATION_FLUSH_LIMIT
 CameraMotion.ACCUM_ROTATION_FLUSH_LIMIT = ACCUM_ROTATION_FLUSH_LIMIT
 
@@ -43,27 +37,18 @@ type CameraMotionProto = {
 	_config: Config.Config,
 	_visibilityCache: VisibilityCache.VisibilityCache,
 
-	-- These are the camera-motion accumulators, in voxel units, monotone
-	-- non-decreasing. Every cached visibility verdict stores expiries in these
-	-- metrics, and a verdict is trusted only while the accumulated motion since
-	-- its proof stays under the clearance the proof established. _accumF tracks
-	-- render distance changes separately so far-plane breathing only invalidates
-	-- far-bound bucket verdicts. Voxel proofs charge it in full alongside
-	-- translation.
+	-- The monotonic accumulators, in voxel units (radians for _accumR). _accumF
+	-- tracks render distance changes separately so far-plane breathing only
+	-- invalidates far-bound bucket verdicts.
 	_accumT: number,
 	_accumR: number,
 	_accumF: number,
-	-- This is how much translation the last processed frame added to _accumT,
-	-- in voxels. The occlusion layer reads it as the motion floor a fresh
-	-- proof's allowance must clear to survive to the next frame, so stamps
-	-- that would expire before they're ever trusted get skipped. A flush
+	-- Translation the last processed frame added to _accumT, in voxels. The
+	-- occlusion layer reads it as the motion floor for its stamp gate. A flush
 	-- resets it to zero, since a flush has no motion bound to report.
 	_lastTranslationDelta: number,
-	-- This counts every visibility cache flush. The occlusion layer records
-	-- the count when it builds umbrae and refuses to reuse them once it
-	-- moves, because a flush re-anchors the translation odometer and can mean
-	-- the camera itself was replaced, so no drift measured across one is
-	-- trustworthy.
+	-- Counts every visibility cache flush. The occlusion layer refuses to reuse
+	-- umbrae across a flush, since no drift measured across one is trustworthy.
 	_flushCount: number,
 	_lastCameraCFrame: CFrame,
 	_lastRenderDistanceVoxels: number,
@@ -138,9 +123,8 @@ function CameraMotion.accumulate(self: CameraMotion)
 	local lastCameraCFrame = self._lastCameraCFrame
 	local translationDelta = 0
 	if cameraCFrame ~= lastCameraCFrame then
-		-- We take the full axis-angle of the orientation delta, so roll is covered
-		-- too (roll swings the side plane normals even though the look vector is
-		-- unchanged).
+		-- The full axis-angle covers roll, which swings the side plane normals
+		-- even though the look vector is unchanged.
 		local _axis, rotation = lastCameraCFrame.Rotation:ToObjectSpace(cameraCFrame.Rotation):ToAxisAngle()
 		translationDelta = vectorMagnitude(cameraCFrame.Position - lastCameraCFrame.Position) / voxelSize
 		self._accumT += translationDelta
@@ -148,11 +132,9 @@ function CameraMotion.accumulate(self: CameraMotion)
 		self._lastCameraCFrame = cameraCFrame
 	end
 
-	-- A projection change rotates each side plane about the camera by the
-	-- change in that axis's half-angle and leaves the far plane alone, so it
-	-- sweeps the planes no farther than a camera rotation of the larger
-	-- half-angle delta would. That lets it charge the rotation accumulator
-	-- instead of flushing the caches.
+	-- A projection change sweeps the side planes no farther than a rotation of
+	-- the larger half-angle delta would, so it charges the rotation accumulator
+	-- instead of flushing (docs/MATH.md covers the bound).
 	local halfVerticalFOV = CameraCache.HalfVerticalFOV
 	local halfHorizontalFOV = CameraCache.HalfHorizontalFOV
 	if halfVerticalFOV ~= self._lastHalfVerticalFOV or halfHorizontalFOV ~= self._lastHalfHorizontalFOV then
@@ -170,15 +152,12 @@ function CameraMotion.accumulate(self: CameraMotion)
 		self._lastRenderDistanceVoxels = renderDistanceVoxels
 	end
 
-	-- Re-anchor before the accumulator magnitudes can push the f32 rounding of
-	-- the packed voxel proofs into the SLACK_SAFETY margin.
 	if self._accumT + self._accumF > ACCUM_TRANSLATION_FLUSH_LIMIT or self._accumR > ACCUM_ROTATION_FLUSH_LIMIT then
 		self:flushVisibilityCache()
 	end
 
-	-- The delta is recorded after any limit flush above, because the flush
-	-- re-anchors the odometer but the camera's real motion rate this frame is
-	-- still what the occlusion stamp gate should see.
+	-- Recorded after any limit flush, because the camera's real motion rate this
+	-- frame is still what the occlusion stamp gate should see.
 	self._lastTranslationDelta = translationDelta
 end
 

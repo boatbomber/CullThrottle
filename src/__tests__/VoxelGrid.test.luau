@@ -531,7 +531,7 @@ describe("VoxelGrid", function()
 			cullThrottle._grid:insertToVoxel(Vector3.new(41, 1, 1), dataB)
 
 			-- The emptied bucket sat on the bounds surface, so the recompute must
-			-- actually be armed for the scan below to exercise it.
+			-- be armed for the scan below to exercise it.
 			cullThrottle._grid:removeFromVoxel(Vector3.new(41, 1, 1), dataB)
 			expect(cullThrottle._grid._coarseBoundsDirty).toBe(true)
 
@@ -812,7 +812,7 @@ describe("VoxelGrid", function()
 			local objectData = cullThrottle._lifecycle._objects[part]
 
 			-- The move sits in the queue's incoming batch when the object is
-			-- removed, and removal deliberately leaves batch entries behind for
+			-- removed, and removal leaves batch entries behind for
 			-- the apply pass to discard.
 			objectData.cframe = CFrame.new(450, 50, 50)
 			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)

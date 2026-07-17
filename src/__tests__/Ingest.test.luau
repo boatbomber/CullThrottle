@@ -337,7 +337,7 @@ describe("Ingest", function()
 			-- A radius far above the distance pushes the screen size past 1. The
 			-- fair band must clamp it so the screen-size term can't go negative
 			-- and drop a recently refreshed object below the p0 threshold, where
-			-- it would steal the p0 overrun budget from objects that are actually overdue.
+			-- it would steal the p0 overrun budget from objects that are overdue.
 			-- Distance 40 keeps it past the nearby band, and an elapsed of 0.04
 			-- keeps it in the fair band.
 			local screenFilling = prepareScoredObject(now, 40, 100, 0.04)
@@ -1172,7 +1172,7 @@ describe("Ingest", function()
 			-- When the precise pass spends its budget exactly on the last voxel,
 			-- the handoff calls the fast pass with a start index one past the
 			-- end. It must not error, and the tally must record that nothing
-			-- actually fell through.
+			-- fell through.
 			local part = prepareScoredObject(now, 100, 2, 0.04)
 
 			local key = Vector3.new(1e6, 1e6, 1e6)

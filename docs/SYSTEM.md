@@ -2,7 +2,7 @@
 
 This document explains the logic of CullThrottle: what it does each frame, the order it does it in, and why each piece is built the way it is. The [README](../README.md) covers the API, supported object types, and best practices. [MATH.md](./MATH.md) covers the formulas and proofs behind the mechanisms described here.
 
-The goal of this document is that CullThrottle goes from black magic to entirely obvious by the end of it.
+By the end, none of it should look like magic.
 
 ## Part I: The problem
 
@@ -10,7 +10,7 @@ The goal of this document is that CullThrottle goes from black magic to entirely
 
 Suppose your game has fifty thousand objects that each want a small per-frame effect: spinning, bobbing, flickering, pulsing. A frame at 60 FPS gives you about 16 ms for everything the game does, and a loop that merely touches 50,000 objects, before doing any real work on them, already eats a meaningful slice of that. Updating them all every frame is out of the question.
 
-But almost none of those objects are on screen. The player sees a few hundred at a time, and of those, the big nearby ones matter far more than the distant specks. The work you actually need to do each frame is small. The hard part is figuring out which work that is, and doing that fast enough that the figuring saves more than it costs.
+But almost none of those objects are on screen. The player sees a few hundred at a time, and of those, the big nearby ones matter far more than the distant specks. The work you need to do each frame is small. The hard part is figuring out which work that is, fast enough that the figuring saves more than it costs.
 
 That is CullThrottle's job. Given a set of objects, it schedules per-frame updates that prioritize higher-importance objects within the fixed time budget:
 
@@ -22,19 +22,19 @@ end
 
 The name CullThrottle describes the two parts of the system. It culls, so objects outside the view don't waste compute. And it throttles, so compute is spent on the most important visible objects first, each one earning its own refresh rate based on how much it matters right now. There are also `ObjectEnteredView` and `ObjectExitedView` signals for effects that only care about appearing and disappearing.
 
-Three terms recur constantly, so here is what we mean by them. Visible means inside the camera's view frustum, within the render distance, and not hidden behind a tagged occluder. Visibility is decided per voxel (a cube of world space, defined in section 4) rather than per object, so it is deliberately a little conservative, and section 9 covers where the per-object refinement happens. Refresh rate is how often a particular object comes back through the update stream. You configure a range (15-60 Hz by default) and CullThrottle moves each object within it. A budget gives each phase a time allowance, checks progress mid-work, and falls back to a defined behavior if time runs out.
+Three terms recur, so here is what they mean. Visible means inside the camera's view frustum, within the render distance, and not hidden behind a tagged occluder. Visibility is decided per voxel (a cube of world space, defined in section 4) rather than per object, so it errs a little conservative, and section 9 covers the per-object refinement. Refresh rate is how often a particular object comes back through the update stream. You configure a range (15-60 Hz by default) and CullThrottle moves each object within it. A budget gives each phase a time allowance, checks progress mid-work, and falls back to a defined behavior if time runs out.
 
 ### 2. Two ideas that shape everything
 
 Almost every design choice in CullThrottle traces back to one of these two principles.
 
-The first idea is that every phase runs under a fixed time budget with a graceful fallback. The frame never waits for a perfect answer. Each phase front-loads its most valuable work then falls back to a reasonable approximation when time runs out, reusing stale results or deferring what's left. Deferred work gains urgency the longer it waits, so the system self-balances and self-corrects over the next few frames. Section 15 collects all of these fallbacks in one place.
+The first idea is that every phase runs under a fixed time budget with a graceful fallback. The frame never waits for a perfect answer. Each phase front-loads its most valuable work then falls back to a reasonable approximation when time runs out, reusing stale results or deferring what's left. Deferred work gains urgency the longer it waits, so the system corrects itself over the next few frames. Section 15 collects all of these fallbacks in one place.
 
-The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up properly.
+The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up.
 
 ### 3. One frame at a glance
 
-CullThrottle does its work once per frame, normally in `RunService.PreRender`, though in the on-demand mode (covered in section 11) the frame's first query runs it instead. Here is the whole pipeline as a map. We'll go over this again at the end, after you've learned about each step, so you'll have a full understanding of the work and how it all fits together.
+CullThrottle does its work once per frame, normally in `RunService.PreRender`, though in the on-demand mode (covered in section 11) the frame's first query runs it instead. The diagram below maps the whole pipeline, and section 14 revisits it with full context.
 
 ```mermaid
 flowchart TD
@@ -66,7 +66,7 @@ flowchart TD
 
 Testing each object against the camera individually is exactly the 50,000-iteration loop we said we can't afford. So CullThrottle doesn't decide visibility per object at all. It divides the world into a uniform grid of cubic voxels, each 100 studs on a side by default, and decides visibility per voxel. Objects are assigned to the voxels they occupy, and when a voxel is visible, its objects become candidates for updating. The cost of visibility now scales with how much occupied space the camera can see rather than with how many objects exist. A thousand objects packed into one room cost only one voxel verdict.
 
-Which voxels does an object occupy? Most objects are small relative to a 100-stud voxel, so they live in exactly one (the voxel holding their center) and moving across a boundary is a cheap single reassignment. The single voxel is a slight simplification, since a small object can poke past it into a neighbor, but the overhang is bounded at a quarter of the voxel size (that bound is exactly the threshold below which an object counts as small), and a sliver that thin only matters for an object hugging a voxel boundary at the very edge of the view.
+Which voxels does an object occupy? Most objects are small relative to a 100-stud voxel, so they live in exactly one (the voxel holding their center) and moving across a boundary is a cheap single reassignment. The single voxel is a slight simplification, since a small object can poke past it into a neighbor, but the overhang is bounded at a quarter of the voxel size (that bound is exactly the threshold below which an object counts as small), and a sliver that thin only matters for an object hugging a voxel boundary at the edge of the view.
 
 An object whose bounding radius passes that threshold instead occupies every voxel it overlaps. The subtlety is that its bounding box is oriented. For a long part rotated 45 degrees, the world-aligned box around it bulges far past the real shape, and filling that box would claim corner voxels the object doesn't touch. So the world-aligned box only nominates candidate voxels, and a separating-axis test eliminates candidates that don't touch the object (detailed in [MATH.md](./MATH.md)). The test checks the box's own face axes and omits the edge-to-edge cross axes a full check would require, so it may retain a thin sliver of corner voxels the box doesn't actually touch. That error direction is deliberate, since an extra voxel costs a little bookkeeping while a wrongly excluded one could hide an object from the search.
 
@@ -92,19 +92,19 @@ lookup, and the outer bounds keep a long render distance
 from dragging the scan past where anything actually is.
 ```
 
-Let's keep our vocabulary consistent for these concepts: a voxel always means the small grid cube that holds objects, a bucket always means a 4x4x4 group of voxels, and a box is a geometric shape being handed to a test. Section 7 adds the last spatial term, the search volume, for a box of space the search is still working on.
+To keep the vocabulary straight, a voxel always means the small grid cube that holds objects, a bucket always means a 4x4x4 group of voxels, and a box is a geometric shape being handed to a test. Section 7 adds the last spatial term, the search volume, for a box of space the search is still working on.
 
-How the grid stays correct as objects move, resize, and despawn is bookkeeping, and it's covered with the rest of the lifecycle machinery in section 13. For now, let's assume every object is in the right voxels.
+How the grid stays correct as objects move, resize, and despawn is bookkeeping, and it's covered with the rest of the lifecycle machinery in section 13. For now, assume every object is in the right voxels.
 
 ### 5. The frustum test, and what it really returns
 
 Now that we have voxels and buckets, we need a way to ask whether a given box of space is on screen.
 
-The camera's view is a frustum, a pyramid spreading out from the camera. CullThrottle describes it with five planes: left, right, top, bottom, and far, where the far plane sits at the render distance. There is no near plane because the four side planes all pass through the camera position, so everything behind the camera already fails at least one side test. A near plane would be a sixth test that rejects nothing new. Testing if something intersects with this frustum tells us whether it is in view.
+The camera's view is a frustum, a pyramid spreading out from the camera. CullThrottle describes it with five planes: left, right, top, bottom, and far, where the far plane sits at the render distance. There is no near plane because the four side planes all pass through the camera position, so everything behind the camera already fails at least one side test. A near plane would be a sixth test that rejects nothing new.
 
 The frustum planes are built once per frame directly in voxel coordinates (positions divided by the voxel size, while normals are unchanged by uniform scaling), so every test works on voxel-space boxes with no unit conversion. Per box, a cheap bounding-sphere comparison settles the clearly-inside and clearly-outside cases, and only when the sphere straddles a plane does the exact box projection get computed. [MATH.md](./MATH.md) covers these in more detail.
 
-Our visibility test doesn't return a bare "inside" or "outside" result. Alongside every verdict, it returns the clearance that proves it, which we'll call "slack". An outside verdict comes with how far beyond the rejecting plane the box sits. An inside verdict comes with how far inside the nearest plane the box sits. And a box straddling a plane gets its exit clearance, meaning how far the planes would have to sweep before the box could fall entirely outside.
+Every verdict comes back with the clearance that proves it, which we call "slack". An outside verdict comes with how far beyond the rejecting plane the box sits. An inside verdict comes with how far inside the nearest plane the box sits. And a box straddling a plane gets its exit clearance, meaning how far the planes would have to sweep before the box could fall entirely outside.
 
 ```txt
                 far plane
@@ -122,11 +122,11 @@ The box is inside all five planes, with this much room to
 spare before the nearest one.
 ```
 
-A verdict with slack is a verdict with a shelf life: it stays true until the camera has moved enough to use up the slack. Let's turn that observation into a cache mechanic.
+A verdict with slack has a shelf life: it stays true until the camera has moved enough to use up the slack. Section 6 turns that into a cache mechanic.
 
 ### 6. Remembering what we proved: motion proofs
 
-The camera moved a little since the last frame, which means almost every voxel's verdict is still true. Which ones can we trust without re-testing? This is the centerpiece of the whole system, so let's build it up step by step.
+The camera moved a little since the last frame, which means almost every voxel's verdict is still true. Which ones can we trust without re-testing? This is the centerpiece of the system.
 
 Slack is a motion allowance. A box confirmed inside the frustum with 3 voxels of clearance is guaranteed to remain inside for any camera motion that shifts the frustum planes fewer than 3 voxels relative to that box. It doesn't matter whether the camera slid, turned, or zoomed, as long as the total plane sweep can be bounded. So a verdict plus its slack reads as "valid until the camera has moved more than this much". The same holds for outside verdicts and their rejection margins.
 
@@ -134,11 +134,11 @@ CullThrottle keeps three running totals of camera motion since the cache was las
 
 Rotation can't be charged at a flat rate because the number of planes it sweeps scales with distance. One degree of camera turn barely moves the planes relative to a nearby voxel, but sweeps them a long way past a voxel 2,000 studs out just like the outside of a wheel moves faster than the middle. So each proof charges rotation based on its own arm, the voxel's distance from the camera. But translation can carry the camera away from the voxel while the proof is still valid, which would lengthen the arm and undercut the cost estimate. To prevent this, the stored arm is padded by the allowance itself, so the charge remains an overestimate in every reachable case. [MATH.md](./MATH.md) has the soundness argument.
 
-Checking a proof's validity comes down to a single comparison. Each proof is stored as an expiry, the odometer reading beyond which it can no longer be trusted. Checking a proof means taking the current translation total, adding the rotation total multiplied by the proof's arm, and comparing against the expiry. That multiply, add, and compare is the entire cost of reusing previous still-valid work, which is what makes the cache so much cheaper than even the fastest intersection test.
+Checking a proof's validity comes down to a single comparison. Each proof is stored as an expiry, the odometer reading beyond which it can no longer be trusted. Checking a proof means taking the current translation total, adding the rotation total multiplied by the proof's arm, and comparing against the expiry. That multiply, add, and compare is the entire cost of reusing still-valid work, far cheaper than even the fastest intersection test.
 
 The safest error direction is always to "expire early". Each voxel's proof packs three components into a single Vector3: a visible expiry, a culled expiry, and the arm. A proof only ever carries one verdict at a time (either visible or culled), so the other expiry slot holds a sentinel saying it proves nothing in that direction. `Vector3` components are 32-bit floats, and rounding could nudge an expiry either direction, so every stored clearance is shaved by a small safety margin (0.01 voxels) before storing. The clearance is also capped (8 voxels) to limit the arm's padding and how stale the proof can grow.
 
-A proof can expire sooner than the math strictly requires, but never later. A wrong "expired" verdict costs one redundant test, while a wrong "still valid" verdit would cause a real visibility bug. And when no motion bound can relate the old planes to the new ones at all, the cache drops everything and re-anchors the odometers at zero. A cache reset happens in three cases: the camera object is replaced, the voxel size changes (since every cached quantity is stored in voxel units), or the odometers grow large enough that f32 precision threatens the safety margin (roughly 16,000 combined voxels of translation and render distance change, or 64 radians of rotation). Each reset costs one cold frame, which the budgets absorb by design.
+A proof can expire sooner than the math strictly requires, but never later. A wrong "expired" verdict costs one redundant test, while a wrong "still valid" verdict would cause a real visibility bug. And when no motion bound can relate the old planes to the new ones at all, the cache drops everything and re-anchors the odometers at zero. A cache reset happens in three cases: the camera object is replaced, the voxel size changes (since every cached quantity is stored in voxel units), or the odometers grow large enough that f32 precision threatens the safety margin (roughly 16,000 combined voxels of translation and render distance change, or 64 radians of rotation). Each reset costs one cold frame, which the budgets absorb by design.
 
 Proofs are cached at two granularities. Each voxel gets the packed proof described above. All three of its slots are spoken for, leaving no room to split clearances by plane, so a render distance change charges voxel proofs at full weight, the same as translation. Each bucket can also cache a verdict for its whole box, but only the two durable states: fully outside or fully inside. Bucket verdicts live in plain table fields rather than a packed `Vector3`, so they skip the cap (there's no packing precision to guard) and they keep side-plane and far-plane clearances separate. Because a render distance change moves only the far-plane (section 12 explains why the render distance is always changing), it spends only far-plane clearance. A bucket straddling the frustum boundary has no durable verdict because the smallest camera motion can flip individual voxels inside it, so straddling buckets are re-searched every frame until they clear the boundary.
 
@@ -169,7 +169,7 @@ longest axis and partitions in place:
 
 The third layer is single voxels, where a volume clipped down to one voxel trusts a still-valid proof of either verdict, or frustum-tests the voxel and stamps a fresh proof.
 
-Two more measures handle cases where the budget runs out before the search completes. The first is the budget fallback. The clock is sampled every few volumes rather than after each one, since reading the clock itself has a cost. When the budget expires with volumes still on the stack, each remaining voxel is re-marked visible if its last verdict was visible, without re-validating it. Assuming it's still visible is the best option because an object flickering invisible for a frame is a far worse outcome than spending an update on something that just slipped out of view. The number of voxels handled by this fallback is recorded, and section 12 explains what's watching that number.
+Two more measures handle cases where the budget runs out before the search completes. The first is the budget fallback. The clock is sampled every few volumes rather than after each one, since reading the clock itself has a cost. When the budget expires with volumes still on the stack, each remaining voxel is re-marked visible if its last verdict was visible, without re-validating it. Assuming still visible is the right bias, since an object flickering invisible for a frame is worse than spending an update on something that slipped out of view. The number of voxels handled by this fallback is recorded, and section 12 explains what's watching that number.
 
 The second safety measure is a fairness rotation. The stack is last-in-first-out, so the top volume gets the front of the budget. A counter rotates which root volume is processed first each frame and alternates the push order of child volumes. When the budget consistently falls short, this ensures every straddling volume eventually gets a fresh search in turn, rather than one corner of the view always consuming the budget while another runs indefinitely on stale proofs.
 
@@ -233,7 +233,7 @@ Everything lands in a staged batch as a cheap pair of array appends, the object 
 
 ### 10. The update loop: what the consumer sees
 
-We got our voxels, we got the objects from the voxels, and the update queue is staged, so now it has to fit in your frame.
+The update queue is staged, so now it has to fit in your frame.
 
 `IterateObjectsToUpdate` orders the staged batch on the first iteration of the frame rather than during ingest, so frames where nobody iterates never pay for the sort. The ordering is banded rather than exact. Each object arrives with one of 219 bands that mirror the scoring bands, assigned at scoring time by the branch that scored it, with the p0 and nearby region getting 18 equal slices, the fair region one band per whole point of score (about one percent of the screen-size weight), the fast-pass region one band per voxel tier (so it loses no ordering at all), and the over-refresh region 10 coarse slices at the very back. A stable counting sort lays the batch out band by band, objects that share a band keep their staged order (which is closest-voxel-first), and the iterator walks the layout front to back. Two objects can only come out in the wrong relative order when their scores land in the same band, so any inversion is bounded by one band's width. Iteration stops when the update budget (0.4 ms by default) runs out. The iterator doesn't read the clock for every object it yields. It plans each budget check to cover about half the remaining budget at the average per-object pace measured so far, capped at eight objects, so a cheap consumer skips most of the clock reads while an expensive one collapses back to per-object checks as the budget nears.
 
@@ -275,11 +275,11 @@ The answer is to be event-driven everywhere events exist. When an object is adde
 
 The exception is physics, since parts moved by the physics engine don't fire property-changed events. That's why they're registered separately (`AddPhysicsObject`) and CullThrottle polls them. The poll is round-robin under a small fixed budget (0.05 ms per frame), resuming each frame where the last one stopped, so a large physics population refreshes over several frames at a bounded per-frame cost. Only a part that actually moved pays for anything beyond the read.
 
-When an object's geometry does change, its new voxel set isn't applied on the spot. The desired set is computed, diffed against the current one (just the enters and leaves survive), and the object joins a queue ordered by distance to the camera. The maintenance step at the top of each frame (step 2 in the pipeline) drains that queue closest-first under its own 0.05 ms budget, and whatever doesn't fit under budget stays in the queue for next frame. By now this should look familiar, since it's the same budget-plus-priority shape as everything else, applied to bookkeeping. Correctness where it's visible comes first, and a teleporting object on the far side of the map can be a frame late in the grid without anyone noticing.
+When an object's geometry does change, its new voxel set isn't applied on the spot. The desired set is computed, diffed against the current one (just the enters and leaves survive), and the object joins a queue ordered by distance to the camera. The maintenance step at the top of each frame (step 2 in the pipeline) drains that queue closest-first under its own 0.05 ms budget, and whatever doesn't fit under budget stays in the queue for next frame. This is the same budget-plus-priority shape as everything else, applied to bookkeeping. Correctness where it's visible comes first, and a teleporting object on the far side of the map can be a frame late in the grid without anyone noticing.
 
 ### 14. The full frame, precisely
 
-Let's look at the pipeline from section 3 again, now with our full context and understanding.
+Here is the section 3 pipeline again, with full context.
 
 1. Poll physics objects (0.05 ms). Physics-driven positions refresh before anything reads them, so the rest of the frame works on the freshest data available.
 2. Apply queued voxel updates (0.05 ms, closest-first). The grid must be current before the search trusts it.
@@ -298,7 +298,7 @@ The upkeep and ingest budgets are each anchored at their own clock reading when 
 
 ### 15. Why it never falls over: degradation paths
 
-The real test of trust in a budgeted system is what happens on a bad frame. Here is every budget and its fallback in one place.
+A budgeted system earns trust by what it does on a bad frame. Here is every budget and its fallback in one place.
 
 | Phase | Budget | When it runs out | How correctness catches up |
 | --- | --- | --- | --- |
@@ -310,7 +310,7 @@ The real test of trust in a budgeted system is what happens on a bad frame. Here
 
 A few events bypass the budgets entirely and force a cold start. A camera swap, a voxel size change, or the motion odometers reaching their precision limits all flush every cached proof. The next frame searches cold, leans harder on its budget fallback than usual, and the caches rebuild over the following frames. One cold frame is the designed cost of those events.
 
-Notice the two ideas from section 2 in every row. Each fallback degrades the precision of prioritization or the freshness of a verdict while keeping the core promise intact: every visible object keeps updating, at worst more coarsely ordered or a frame stale, and overdue objects always force their way through. And the fallbacks aren't load-bearing at equilibrium, because hitting them feeds the render distance controller alongside the phase costs. Chronic pressure shrinks the render distance until the work fits its budgets again. Transient spikes get absorbed by fallbacks, and sustained ones get resolved structurally.
+The two ideas from section 2 show up in every row. Each fallback degrades the precision of prioritization or the freshness of a verdict while keeping the core promise intact: every visible object keeps updating, at worst more coarsely ordered or a frame stale, and overdue objects always force their way through. Hitting the fallbacks feeds the render distance controller alongside the phase costs so that chronic pressure shrinks the render distance until the work fits its budgets again. Transient spikes get absorbed by fallbacks, and sustained ones get resolved structurally.
 
 ### 16. Where the math lives
 

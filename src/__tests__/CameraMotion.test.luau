@@ -237,7 +237,7 @@ describe("CameraMotion", function()
 		motion._lastCameraCFrame = CameraCache.CFrame * CFrame.new(0, 0, 100)
 		motion:accumulate()
 
-		-- The flush re-anchored the odometer, but the camera really did move a
+		-- The flush re-anchored the odometer, but the camera still moved a
 		-- voxel this frame, and that rate is what the occlusion stamp gate must
 		-- see. Recording the delta before the flush would zero it instead.
 		expect(motion._accumT).toBe(0)

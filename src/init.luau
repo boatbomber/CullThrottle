@@ -35,42 +35,31 @@ local VoxelGrid = require(script.VoxelGrid)
 
 local tableCreate = table.create
 
--- This is hoisted from Ingest. Queue bands at or under this are the p0
--- (must refresh this frame) region, and the update iterator keys its overrun
--- budget off the same boundary the scoring sliced.
+-- Queue bands at or under this are the p0 (must refresh this frame) region.
 local P0_BAND_COUNT = Ingest.P0_BAND_COUNT
--- Objects at p0 (must-refresh) may run the update budget over by this factor so
--- a frame full of them still mostly keeps up. The strictlyEnforceWorstRefreshRate
--- flag overrides this with an effectively unbounded budget instead.
+-- P0 objects may run the update budget over by this factor, unless
+-- strictlyEnforceWorstRefreshRate makes their budget effectively unbounded.
 local P0_UPDATE_BUDGET_OVERRUN = 1.15
--- The update drain checks its clock in planned batches capped at this many
--- objects (see IterateObjectsToUpdate), so a cheap consumer pays a fraction of
--- the os.clock calls while an expensive one still gets per-object checks near
--- the budget.
+-- The update drain's planned clock-check batches cap at this many objects (see
+-- IterateObjectsToUpdate).
 local DRAIN_CLOCK_CHECK_MAX_BATCH = 8
 -- The reusable buffers get rebuilt at most once per this many seconds.
 local RESIZE_TABLES_PERIOD = 5
--- The perf metrics track how many voxels the search and ingest passes skipped
--- in each of the last few processed frames, in ring buffers of this length.
--- The render distance controller shrinks while any frame in the window skipped,
--- so one bad frame keeps pressure on until it ages out of the lookback.
+-- The skipped-voxel ring buffers hold this many frames, so one bad frame keeps
+-- shrink pressure on the render distance controller until it ages out.
 local SKIPPED_FRAMES_LOOKBACK = 4
 
--- These are the per-frame voxel upkeep budgets, spent before the visibility
--- search. Each is 0.05 ms, so the combined voxel maintenance is capped at
--- ~0.1 ms per frame.
+-- Per-frame voxel upkeep budgets, spent before the search.
 local PHYSICS_POLL_TIME_BUDGET = 5e-5
 local VOXEL_MAINTENANCE_TIME_BUDGET = 5e-5
--- Changing the voxel size must reslot every object before the next frame rather
--- than amortizing it, so SetVoxelSize uses this effectively unbounded budget (a
--- whole 5 seconds, versus the sub-millisecond steady-state maintenance above).
+-- Changing the voxel size must reslot every object before the next frame, so
+-- SetVoxelSize uses this effectively unbounded budget of 5 whole seconds.
 local FULL_RESLOT_TIME_BUDGET = 5
 
 --[[
 	Averages a skipped-frame ring buffer over the full lookback window, so a frame
-	that recorded nothing still weighs in as a zero rather than dropping out of the
-	denominator. It captures only the module-level lookback constant, so it lives
-	here as one shared function instead of a fresh closure per instance.
+	that recorded nothing still weighs in as a zero rather than dropping out of
+	the denominator.
 ]]
 local function getSkippedFramesAverage(values: { number }): number
 	local sum = 0
@@ -124,10 +113,9 @@ end
 	commits the previous frame's update delta times into the average.
 ]]
 function CullThrottle._clearVisibleObjects(self: CullThrottle)
-	-- Committing here, at the start of the next processed frame, gives one
-	-- commit site that covers completed and abandoned iterations alike, since
-	-- a consumer that breaks out of the update loop early never reaches the
-	-- end of the queue.
+	-- Committing at the start of the next processed frame covers completed and
+	-- abandoned iterations alike, since a consumer can break out of the update
+	-- loop early.
 	local perfMetrics = self._perfMetrics
 	if perfMetrics._updatedObjectCount > 0 then
 		perfMetrics._averageObjectDeltaTime = perfMetrics._sumOfObjectDeltaTimes / perfMetrics._updatedObjectCount
@@ -161,19 +149,13 @@ function CullThrottle._findVisibleObjects(self: CullThrottle, now: number)
 	-- they must advance (or flush, on a projection change) before any are consulted.
 	self._motion:accumulate()
 
-	-- The umbrae are rebuilt from the camera's current position so the
-	-- search's occlusion tests this frame match the pose the accumulators
-	-- were just charged for, or reused within the erosion pad with this
-	-- frame's drift debited from every allowance they hand out.
 	self._occlusion:buildUmbrae()
 
 	local replayed = self._search:run(now)
 
-	-- The search appended visible voxels in subdivision order. We order them
-	-- closest-first so the ingest below spends its budget on the nearest
-	-- voxels. A replayed frame skips the sort, since its inputs (the pending
-	-- keys and the camera voxel, both pinned by the replay gate's bit-identical
-	-- accumulators) match the anchor pass's and the sorted order still stands.
+	-- The visible voxels get sorted closest-first so the ingest spends its
+	-- budget on the nearest ones. A replayed frame skips the sort, since the
+	-- anchor pass's sorted order still stands.
 	if not replayed then
 		debug.profilebegin("sortVisibleVoxels")
 		self._search:sortVisibleVoxelKeys()
@@ -198,9 +180,8 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 
 	debug.profilebegin("CullThrottle.processObjectVisibility")
 
-	-- Keep our voxels up to date before searching for visibility. Each pass
-	-- anchors its budget at its own fresh clock rather than at frame start,
-	-- so work done earlier in the frame can't eat the budget before entry.
+	-- Each upkeep pass anchors its budget at its own fresh clock rather than at
+	-- frame start, so work done earlier in the frame can't eat the budget.
 	self._lifecycle:pollPhysicsObjects(PHYSICS_POLL_TIME_BUDGET, os.clock())
 	self._grid:updateObjectVoxels(VOXEL_MAINTENANCE_TIME_BUDGET, os.clock())
 
@@ -208,16 +189,13 @@ function CullThrottle._processObjectVisibility(self: CullThrottle, start: number
 
 	self._signals:signalVisibilityChanges(start)
 
-	-- Adjust dynamic render distance to hit the budgets.
 	self._renderDistanceController:adjust()
 
 	-- Mark the frame done before flushing so a signal handler that re-enters
-	-- (e.g. calls GetVisibleObjects/IterateObjectsToUpdate) short-circuits
-	-- instead of recomputing visibility from inside the flush.
+	-- (say, by calling GetVisibleObjects) short-circuits instead of recomputing
+	-- visibility from inside the flush.
 	self._processedVisibilityThisFrame = true
 
-	-- All of our own iteration is finished, so it's now safe to fire the
-	-- visibility signals we buffered during the search/ingest pass.
 	self._signals:flushVisibilitySignals()
 
 	debug.profileend()
@@ -275,8 +253,8 @@ function CullThrottle.new(): CullThrottle
 		_searchDuration = 0,
 		_ingestDuration = 0,
 		-- Seeding the average at the best refresh period reads as full headroom,
-		-- so a fresh instance's render distance controller grows on its first
-		-- adjustment and keeps growing until real measurements take over.
+		-- so a fresh instance's render distance grows until real measurements
+		-- take over.
 		_averageObjectDeltaTime = self._config.bestRefreshPeriod,
 		_sumOfObjectDeltaTimes = 0,
 		_updatedObjectCount = 0,
@@ -285,8 +263,6 @@ function CullThrottle.new(): CullThrottle
 
 	local objects: { [Instance]: types.ObjectData } = {}
 
-	-- The subsystems are built in dependency order, so each constructor only
-	-- receives collaborators that already exist.
 	self._visibilityCache = VisibilityCache.new()
 	self._motion = CameraMotion.new(self._config, self._visibilityCache)
 	self._grid = VoxelGrid.new(self._config, self._visibilityCache, objects)
@@ -349,10 +325,9 @@ end
 function CullThrottle.GetVisibleObjects(self: CullThrottle): { Instance }
 	self:_processObjectVisibility(os.clock())
 
-	-- Removal never scrubs the staged batch (it just gets rebuilt next frame),
-	-- so an object removed partway through the frame can still be sitting in
-	-- it. The snapshot only includes objects that are still tracked, the same
-	-- defense the update iterator applies as it drains.
+	-- Removal never scrubs the staged batch, so the snapshot filters out
+	-- objects that are no longer tracked, the same defense the update iterator
+	-- applies as it drains.
 	local objects = self._lifecycle._objects
 	local ingest = self._ingest
 	local stagedObjects = ingest._stagedObjects
@@ -380,43 +355,33 @@ end
 function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instance?, number?, number?, CFrame?)
 	self:_processObjectVisibility(os.clock())
 
-	-- The ingest only staged this frame's objects, so the band layout cost
-	-- lands here and frames where nobody iterates never pay it. The layout
-	-- runs at most once per staged batch, guarded inside the ingest.
+	-- The band layout cost lands here, at most once per staged batch, so
+	-- frames where nobody iterates never pay it.
 	self._ingest:enqueueStagedObjects()
 
 	local updateStartClock = os.clock()
 	local queue = self._ingest._visibleObjectsQueue
-	-- The queue hands its drain layout over so the loop below walks plain
-	-- arrays, writing each new cursor position back as it goes (which is
-	-- drainView's contract), instead of paying method calls per object.
+	-- The queue hands its drain layout over so the loop walks plain arrays,
+	-- writing each new cursor position back as it goes per drainView's contract.
 	local items, bands, drainStartCursor, size, epoch = queue:drainView()
 	local perfMetrics = self._perfMetrics
 	local updateTimeBudget = self._config.updateTimeBudget
-	-- The p0s can go a little over budget.
-	-- If we're trying to enforce the worst refresh rate, then they can go hugely over budget.
 	local p0UpdateTimeBudget = if self._config.strictlyEnforceWorstRefreshRate
 		then 1
 		else updateTimeBudget * P0_UPDATE_BUDGET_OVERRUN
 
 	-- An os.clock call per drained object is measurable at queue scale, so the
-	-- budget check runs in planned batches instead. Each check sizes the next
-	-- batch to cover about half the remaining budget at the average per-object
-	-- pace so far, capped at a few objects. The plan starts at one object
-	-- while the pace is unknown, grows toward the cap for cheap consumers, and
-	-- collapses back to per-object checks as the budget nears, so the added
-	-- overrun beyond a per-object check stays around half of whatever budget
-	-- remained. Because the layout is band ordered, the p0 region is a strict
-	-- prefix, and the first object past that prefix forces a check so the drop
-	-- from the raised p0 allowance to the plain budget never rides on a stale
-	-- plan.
+	-- budget check runs in planned batches, each sized to cover about half the
+	-- remaining budget at the average per-object pace so far, capped. The p0
+	-- region is a strict prefix of the band-ordered layout, and the first
+	-- object past it forces a check so the drop to the plain budget never
+	-- rides on a stale plan.
 	local objectsUntilClockCheck = 0
 	local inP0Prefix = true
 
 	return function()
 		-- A cleared or refilled queue means this iterator's frame is over, so
-		-- it ends here, before any cursor write, instead of stomping the fresh
-		-- layout's cursor or reading its cleared arrays.
+		-- it ends here rather than touching the fresh layout.
 		if queue._fillEpoch ~= epoch then
 			return nil
 		end
@@ -435,19 +400,13 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			end
 
 			if leftP0Prefix or objectsUntilClockCheck <= 0 then
-				-- When the budget turns out to be spent, the object at the
-				-- cursor needs no special handling because the clear below
-				-- was about to drop it along with everything else.
 				local budget = if inP0Prefix then p0UpdateTimeBudget else updateTimeBudget
 				local elapsed = os.clock() - updateStartClock
 				if elapsed >= budget then
-					-- We're out of time and can't update the rest this frame.
-					-- That's okay, they'll be higher priority next time.
-
-					-- Just in case the user iterates multiple times in a single frame,
-					-- let's clear out the leftovers so they don't spill into the second
-					-- iter. The clear advances the fill epoch, which also ends this
-					-- closure and any sibling iterator on their next call.
+					-- Out of time, so the rest waits at higher priority next
+					-- frame. The clear keeps leftovers from spilling into a
+					-- second same-frame iteration, and its epoch bump ends this
+					-- closure and any sibling on their next call.
 					queue:clear()
 
 					return nil
@@ -467,12 +426,9 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			objectsUntilClockCheck -= 1
 
 			if objectData.lastVisibleClock == 0 then
-				-- The object was removed while still queued, since removal doesn't
-				-- scrub this queue. Removal always zeroes lastVisibleClock through
-				-- the signals' forget, nothing else can zero it between staging
-				-- and this drain, and a re-added object gets a fresh record, so a
-				-- zero here can only mean this record is stale. Skip it and keep
-				-- iterating.
+				-- Removal doesn't scrub this queue, but it always zeroes
+				-- lastVisibleClock, and nothing else can zero it between staging
+				-- and this drain, so a zero here means the record is stale.
 				continue
 			end
 
@@ -480,9 +436,8 @@ function CullThrottle.IterateObjectsToUpdate(self: CullThrottle): () -> (Instanc
 			objectData.lastUpdateClock = updateStartClock
 
 			if objectDeltaTime < 1 then
-				-- If dt is over a second, that's just an object we haven't seen in a while,
-				-- not indicative of the object's actual refresh rate.
-				-- (If we're running at 1Hz fr, then we have bigger problems lol.)
+				-- A dt over a second is an object we haven't seen in a while,
+				-- not a real refresh rate, so it stays out of the average.
 				perfMetrics._sumOfObjectDeltaTimes += objectDeltaTime
 				perfMetrics._updatedObjectCount += 1
 			end
@@ -543,9 +498,8 @@ end
 ]]
 function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	if not (voxelSize > 0 and voxelSize < math.huge) then
-		-- A zero voxel size divides by zero in the voxel coordinate math,
-		-- a negative one makes no sense for a grid, and infinity/NaN would make
-		-- every voxel key derived from it infinite/NaN.
+		-- The check is phrased so zero, negatives, infinity, and NaN all fail
+		-- into it, since each corrupts the voxel coordinate math.
 		error("SetVoxelSize expects a finite voxel size greater than zero")
 	end
 
@@ -555,7 +509,6 @@ function CullThrottle.SetVoxelSize(self: CullThrottle, voxelSize: number)
 	-- voxel size invalidates all of them.
 	self._motion:flushVisibilityCache()
 
-	-- We need to move all the objects around to their new voxels.
 	self._grid:clearAll()
 
 	for object, objectData in self._lifecycle._objects do
@@ -582,18 +535,14 @@ function CullThrottle.SetRenderDistanceRange(self: CullThrottle, renderDistanceR
 			and maxRenderDistance < math.huge
 		)
 	then
-		-- The render distance is a divisor in the priority math and seeds the
-		-- min/max bounds, so a zero or negative distance corrupts visibility state.
-		-- The bounds are phrased so NaN, which fails every comparison, errors too,
-		-- and so does an infinite distance, which would give an infinite midpoint
-		-- and live distance. NumberRange guarantees Min <= Max for real numbers, but
-		-- a NaN slips through its ordering check, so Max gets its own gate here.
+		-- The render distance is a divisor in the priority math, so zero,
+		-- negatives, infinity, and NaN all corrupt state. Max gets its own
+		-- gate because a NaN slips through NumberRange's ordering check.
 		error("SetRenderDistanceRange expects finite render distances greater than zero")
 	end
 
-	-- The live distance resets to the new range's midpoint baseline. The
-	-- controller floats from there with fresh momentum, so a streak built up
-	-- in the old range doesn't carry into the new one.
+	-- The controller resets so a streak built up in the old range doesn't
+	-- carry into the new one.
 	self._config:setRenderDistanceRange(minRenderDistance, maxRenderDistance)
 	self._renderDistanceController:reset()
 end
@@ -609,10 +558,8 @@ function CullThrottle.SetTimeBudgets(
 	updateTimeBudget: number
 )
 	if not (searchTimeBudget >= 0 and ingestTimeBudget >= 0 and updateTimeBudget >= 0) then
-		-- Budgets are per-frame time allowances in seconds, and a negative budget
-		-- silently starves the corresponding pass. Zero is allowed (it just skips
-		-- the work). The check is phrased so NaN, which fails every comparison,
-		-- errors too instead of defeating the budget checks downstream.
+		-- A negative budget silently starves its pass, while zero just skips
+		-- the work. The check is phrased so NaN fails into it too.
 		error("SetTimeBudgets expects non-negative time budgets in seconds")
 	end
 
@@ -632,12 +579,9 @@ function CullThrottle.SetRefreshRates(self: CullThrottle, refreshRates: NumberRa
 	local worstHz = refreshRates.Min
 	local bestHz = refreshRates.Max
 	if not (worstHz > 0 and worstHz < math.huge and bestHz > 0 and bestHz < math.huge) then
-		-- The checks are phrased so NaN, which fails every comparison, errors
-		-- too. NumberRange guarantees Min <= Max for real numbers, but a NaN
-		-- slips through its ordering check, so Max gets its own gate here. An
-		-- infinite rate is gated as well, since it inverts to a zero-second
-		-- period, which shoves every object out of the over-refresh region and
-		-- zeroes the refresh midpoint the render distance controller divides by.
+		-- The checks are phrased so NaN fails into them, and an infinite rate
+		-- is gated too, since it inverts to a zero-second period and zeroes the
+		-- refresh midpoint the render distance controller divides by.
 		error("SetRefreshRates expects finite refresh rates in Hz greater than zero")
 	end
 
@@ -655,9 +599,7 @@ end
 function CullThrottle.SetMaxOccluders(self: CullThrottle, maxOccluders: number)
 	if not (maxOccluders >= 0 and maxOccluders <= 32 and maxOccluders % 1 == 0) then
 		-- Each umbra claims one bit of a 32-bit mask, so the cap tops out at
-		-- 32, and a fractional or NaN count has no meaning as a table size.
-		-- The checks are phrased so NaN, which fails every comparison, errors
-		-- too.
+		-- 32. The checks are phrased so NaN fails into them too.
 		error("SetMaxOccluders expects an integer between 0 and 32")
 	end
 
@@ -715,10 +657,9 @@ function CullThrottle.GetTimeBudgets(self: CullThrottle): (number, number, numbe
 end
 
 --[[
-	Mirrors SetRefreshRates, returning rates in Hz. The config stores them as
-	seconds-between-refreshes periods, so we invert back to Hz here rather than
-	leaking the internal unit (this keeps the Hz-only contract symmetric). The worst
-	(least frequent) rate is the lower number, so it is the range's Min.
+	Mirrors SetRefreshRates, returning rates in Hz. The config stores periods,
+	so we invert back to Hz here rather than leaking the internal unit. The
+	worst (least frequent) rate is the range's Min.
 ]]
 function CullThrottle.GetRefreshRates(self: CullThrottle): NumberRange
 	local config = self._config
@@ -750,10 +691,8 @@ function CullThrottle.GetStrictlyEnforceWorstRefreshRate(self: CullThrottle): bo
 end
 
 --[[
-	This one is derived and read-only. Dynamic adjustment is active whenever the
-	render distance range spans more than a single value. Set the range via
-	SetRenderDistanceRange. A zero-width range (Min == Max) pins the distance and
-	disables the controller.
+	This one is derived and read-only. Dynamic adjustment is active whenever
+	the range set via SetRenderDistanceRange spans more than a single value.
 ]]
 function CullThrottle.GetDynamicRenderDistance(self: CullThrottle): boolean
 	local config = self._config

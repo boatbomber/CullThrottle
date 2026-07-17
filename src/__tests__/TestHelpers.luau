@@ -132,16 +132,7 @@ local function clearOcclusionProof(expiry: number, generation: number): Vector3
 	return Vector3.new(-1, generation, expiry)
 end
 
---[[
-	Pops the top volume off a search's flat stack, the way the search's run
-	loop reads one. Each volume spans eleven consecutive slots holding its box
-	bounds, its [lo, hi] slice of the seed buffer, its plane mask, its
-	inherited slack, and its umbra mask, and this returns them as named fields
-	so tests never hand-copy the slot layout.
-]]
 -- One volume spans this many consecutive slots on the search's flat stack.
--- popVolume below names each slot, and volumeCount divides by it, so the
--- stride lives here and nowhere else in the tests.
 local VOLUME_SLOT_COUNT = 11
 
 --[[
@@ -152,6 +143,12 @@ local function volumeCount(search: any): number
 	return search._volumesToCheckSize / VOLUME_SLOT_COUNT
 end
 
+--[[
+	Pops the top volume off a search's flat stack, the way the search's run
+	loop reads one. Each volume spans eleven consecutive slots holding its box
+	bounds, its [lo, hi] slice of the seed buffer, its plane mask, its
+	inherited slack, and its umbra mask, returned here as named fields.
+]]
 local function popVolume(search: any): { [string]: number }
 	local volumesToCheck = search._volumesToCheck
 	local n = search._volumesToCheckSize

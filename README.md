@@ -70,29 +70,29 @@ For a richer example, `demo/init.client.luau` drives an interactive scene of spi
 
 ## How it works
 
-Suppose your game has fifty thousand objects that each want a small per-frame effect. A frame at 60 FPS gives you about 16 milliseconds for everything the game does, and a loop that merely touches 50,000 objects eats a meaningful slice of that before doing any real work. Updating them all every frame is out of the question. But almost none of those objects are on screen at once, and of the ones that are, the big nearby ones matter far more than the distant specks. The work you actually need each frame is small. The hard part is figuring out which work that is, fast enough that the figuring saves more than it costs.
+Suppose your game has fifty thousand objects that each want a small per-frame effect. A frame at 60 FPS gives you about 16 milliseconds for everything the game does, and a bare loop over 50,000 objects eats a meaningful slice of that before doing any real work. Updating them all every frame is out of the question. But almost none of those objects are on screen at once, and of the ones that are, the big nearby ones matter far more than the distant specks. The work you need each frame is small, if you can figure out which work that is fast enough that the figuring saves more than it costs.
 
-The name describes the two halves of the answer. The cull half decides what's visible without asking each object. CullThrottle divides the world into large cubic voxels and tracks which objects occupy each one, and visibility is decided per voxel so a room packed with a thousand objects costs one verdict instead of a thousand. It culls voxels that are outside the camera's view frustum or hidden behind an occluder. On top of that, consecutive frames are nearly identical, so every verdict is cached together with how much camera movement it survives. On a typical frame, most of the world re-validates with a single comparison per cached answer instead of a fresh geometry test.
+The name describes the two halves of the answer. The cull half decides what's visible without asking each object. CullThrottle divides the world into large cubic voxels, tracks which objects occupy each one, and decides visibility per voxel so a room packed with a thousand objects costs one verdict instead of a thousand. It culls voxels that are outside the camera's view frustum or hidden behind an occluder. On top of that, consecutive frames are nearly identical, so it caches every verdict together with how much camera movement it survives. On a typical frame, most of the world re-validates with a single comparison per cached answer instead of a fresh geometry test.
 
-The throttle half decides what the visible objects deserve. Each one is scored, dominated by how large it looms on screen, with smaller corrections so neglected objects gain urgency and nearby ones get a nudge. The scores feed a priority queue, and your update loop drains it under a time budget. Anything that misses a frame comes back more urgent the next, and an object overdue past its worst allowed refresh rate jumps to the front of the line. Every visible object keeps updating, update frequency tracks importance, and under sustained pressure the whole system slows down smoothly instead of letting some objects freeze.
+The throttle half decides what the visible objects deserve. It scores each one, dominated by how large it looms on screen, with smaller corrections so neglected objects gain urgency and nearby ones get a nudge. The scores feed a priority queue, and your update loop drains it under a time budget. Anything that misses a frame comes back more urgent the next, and an object overdue past its worst allowed refresh rate jumps to the front of the line. Every visible object keeps updating, update frequency tracks importance, and under sustained pressure the whole system slows down smoothly instead of letting some objects freeze.
 
 Budgets tie all of it together. Every phase of the per-frame pipeline runs under a fixed time allowance with a defined fallback when it runs out, so a heavy frame degrades the precision of the answers rather than your frame rate. A small controller also floats the render distance between the bounds you configure, shrinking it when the budgets strain and growing it back when there's headroom, so the workload converges to whatever the current scene can afford.
 
 ### Going deeper
 
-That summary is enough to use the library, and the API reference below covers the rest of what you need day to day. If you want to actually understand the machinery, [docs/SYSTEM.md](./docs/SYSTEM.md) walks the entire per-frame pipeline mechanism by mechanism, building up the voxel grid, the frustum test, the motion-proof cache, the search, the priority scoring, and every degradation path, with the goal that CullThrottle goes from black magic to entirely obvious by the end. [docs/MATH.md](./docs/MATH.md) is its companion for the formulas and proofs behind those mechanisms, from the frustum plane construction to the soundness argument for the motion proofs to a ledger of every approximation and the direction it errs. Read SYSTEM.md first, since MATH.md leans on its vocabulary.
+That summary is enough to use the library, and the API reference below covers the rest of what you need day to day. If you want to understand the machinery, [docs/SYSTEM.md](./docs/SYSTEM.md) walks the entire per-frame pipeline mechanism by mechanism, building up the voxel grid, the frustum test, the motion-proof cache, the search, the priority scoring, and every degradation path. [docs/MATH.md](./docs/MATH.md) is its companion for the formulas and proofs behind those mechanisms, from the frustum plane construction to the soundness argument for the motion proofs to a ledger of every approximation and the direction it errs. Read SYSTEM.md first, since MATH.md leans on its vocabulary.
 
 ## Best practices
 
-1. Use `IterateObjectsToUpdate` for per-frame update logic. It's designed to be called every frame and returns objects in order of importance, so the most important objects are updated first and all visible objects are eventually reached.
+1. Use `IterateObjectsToUpdate` for per-frame update logic. It's designed to be called every frame and returns objects in order of importance, so you update the most important objects first and eventually reach every visible object.
 
-2. Prefer BaseParts. While CullThrottle can accept many instance types, it is designed for BaseParts. If you provide an entire model, the bounding box of the model is used for visibility checks and prioritization. If you're only really updating one part of that model, add that part as the object instead.
+2. Prefer BaseParts. While CullThrottle can accept many instance types, it is designed for BaseParts. If you provide an entire model, the bounding box of the model is used for visibility checks and prioritization. If you're only updating one part of that model, add that part as the object instead.
 
 3. Anchor your BaseParts. A part moved by Roblox's physics engine doesn't fire the CFrame changed event when it moves, so it has to be added with `AddPhysicsObject` so CullThrottle polls its position instead. Polling has a noticeable performance cost and can even produce incorrect visibility if the object moves too quickly.
 
-4. Use tags. CollectionService tags are a powerful way to group objects and let CullThrottle manage them. You can add and remove tags at runtime, and CullThrottle tracks the tagged objects automatically. A BasePart that is unanchored at the moment it's captured is added as a physics object, so anchor your objects before they get picked up if you don't want that (see the previous practice). That routing happens once at capture, so changing the Anchored property later doesn't move an object between static and physics tracking.
+4. Use tags. CollectionService tags group objects and let CullThrottle manage them for you. You can add and remove tags at runtime, and CullThrottle tracks the tagged objects as they come and go. A BasePart that is unanchored at the moment it's captured is added as a physics object, so anchor your objects before they get picked up if you don't want that (see the previous practice). That routing happens once at capture, so changing the Anchored property later doesn't move an object between static and physics tracking.
 
-5. Define occluders. Anything tagged `CullThrottleOccluder` can hide the space behind it from the visibility search, so objects behind buildings, terrain walls, and room shells stop costing update time. A handful of huge occluders beat dozens of small ones (only the most prominent few build umbrae each frame). CullThrottle won't verify opacity for you, so tagging a transparent part may hide something players can actually see. Occluders must be anchored box-shaped Parts sitting under Workspace. A tagged Part that doesn't qualify yet stays watched until it does, so anchoring a wall or parenting a stored template into Workspace registers it without retagging, while anything that isn't a Part at all is warned about and ignored.
+5. Define occluders. Anything tagged `CullThrottleOccluder` can hide the space behind it from the visibility search, so objects behind buildings, terrain walls, and room shells stop costing update time. A handful of huge occluders beat dozens of small ones (only the most prominent few build umbrae each frame). CullThrottle won't verify opacity for you, so tagging a transparent part may hide something players can see. Occluders must be anchored box-shaped Parts sitting under Workspace. A tagged Part that doesn't qualify yet stays watched until it does, so anchoring a wall or parenting a stored template into Workspace registers it without retagging. CullThrottle warns about and ignores anything that isn't a Part at all.
 
 ## Supported object types
 
@@ -158,7 +158,7 @@ CullThrottle:CaptureTag(tag: string)
 
 Adds all objects with the given CollectionService tag to CullThrottle's tracking, then listens to the tag's InstanceAdded and InstanceRemoved events so objects are added and removed automatically as the tag set changes.
 
-Unanchored BaseParts are added as physics objects, so be sure to anchor your objects before they get picked up if you don't want that behavior. This routing happens once, when the object is captured. Changing a part's Anchored property later does not move it between static and physics tracking, so re-toggle the tag (or remove and re-add the object) if its anchored state changes.
+Unanchored BaseParts are added as physics objects, so anchor your objects before they get picked up if you don't want that behavior. This routing happens once, when the object is captured. Changing a part's Anchored property later does not move it between static and physics tracking, so re-toggle the tag (or remove and re-add the object) if its anchored state changes.
 
 Tracking does not record how an object arrived. When an object loses the last captured tag it carries, it is removed from tracking even if it was also added directly with `AddObject`. Re-add such an object after the tag toggle if you want it to stay tracked.
 
@@ -190,7 +190,7 @@ RunService.Heartbeat:Connect(function()
 end)
 ```
 
-The iterator checks the clock as it goes and simply stops when the update time budget runs out. Whatever didn't get updated grows more urgent next frame, so all visible objects are eventually reached. Objects overdue past the worst refresh rate are allowed to run the budget a little over (or far over, with `SetStrictlyEnforceWorstRefreshRate` enabled) so the minimum rate holds up.
+The iterator checks the clock as it goes and stops when the update time budget runs out. Whatever didn't get updated grows more urgent next frame, so all visible objects are eventually reached. Objects overdue past the worst refresh rate are allowed to run the budget a little over (or far over, with `SetStrictlyEnforceWorstRefreshRate` enabled) so the minimum rate holds up.
 
 ```Luau
 CullThrottle:GetVisibleObjects(): { Instance }
@@ -198,7 +198,7 @@ CullThrottle:GetVisibleObjects(): { Instance }
 
 Returns all objects that CullThrottle believes to be visible this frame.
 
-CullThrottle does not guarantee that the returned set is exactly the visible set. Under normal conditions it errs on the side of caution, so it may return some objects that are not actually visible. In performance constrained scenarios it is forced to make approximations that may impact accuracy in either direction. If the search budget runs out, CullThrottle reuses last frame's visibility for the volumes it did not have time to re-check, which can momentarily keep returning an object that just left view, or omit one that just entered view, until a later frame catches up. If the ingest budget runs out, CullThrottle dumps the remaining visible objects into the result at a coarse, approximate priority rather than computing a precise one. The returned list contains no duplicates even when these fallbacks are hit.
+CullThrottle does not guarantee that the returned set is exactly the visible set. Under normal conditions it errs on the side of caution, so it may return some objects that are not actually visible. Under performance pressure it makes approximations that can err in either direction. If the search budget runs out, CullThrottle reuses last frame's visibility for the volumes it did not have time to re-check, which can momentarily keep returning an object that just left view, or omit one that just entered view, until a later frame catches up. If the ingest budget runs out, CullThrottle dumps the remaining visible objects into the result at a coarse, approximate priority rather than computing a precise one. The returned list contains no duplicates even when these fallbacks are hit.
 
 ### Signals
 
@@ -222,7 +222,7 @@ CullThrottle.ObjectEnteredView:Connect(function(object: Instance)
 end)
 ```
 
-Both signals are buffered during the frame and fired together at the end, after all of CullThrottle's own iteration is finished, so a handler can safely add or remove objects. Every entered event fires before any exited event. Exits are also softened by a short grace period, so an object flickering at the edge of view doesn't fire a storm of events. An object you remove from tracking is evicted from the visible set silently, with `ObjectRemoved` as the only announcement.
+CullThrottle buffers both signals during the frame and fires them together at the end, after all of its own iteration is finished, so a handler can safely add or remove objects. Every entered event fires before any exited event. A short grace period also softens exits, so an object flickering at the edge of view doesn't fire a storm of events. Removing an object from tracking evicts it from the visible set silently, with `ObjectRemoved` as the only announcement.
 
 A connection to either signal counts as standing demand for visibility, so the pipeline runs every frame even when `SetComputeVisibilityOnlyOnDemand` is enabled.
 
@@ -258,7 +258,7 @@ The search phase finds the voxels that are considered visible, including any occ
 
 The ingest phase scores the objects in the visible voxels into the update queue. If its budget runs out, the remaining objects are queued at a coarse priority rather than a precise one, which can reduce how well the update order matches importance.
 
-The update phase is the time spent by `IterateObjectsToUpdate`. If its budget runs out, the iterator simply stops returning objects. The most important objects come first, so they'll likely have been updated already, and whatever was left grows in priority for the next frame.
+The update phase is the time spent by `IterateObjectsToUpdate`. If its budget runs out, the iterator stops returning objects. The most important objects come first, so the iterator has usually handed them out already, and whatever was left grows in priority for the next frame.
 
 Dynamic render distance adjusts to keep the work fitting these budgets, so a lower budget settles at a shorter render distance and vice versa. Budgets must be non-negative, and a budget of zero turns its phase off entirely.
 
@@ -290,7 +290,7 @@ CullThrottle:SetStrictlyEnforceWorstRefreshRate(strictlyEnforceWorstRefreshRate:
 CullThrottle:GetStrictlyEnforceWorstRefreshRate(): boolean
 ```
 
-Off by default. When enabled, objects that are overdue past the worst refresh rate ignore the update time budget entirely, trading frame time for a guaranteed minimum refresh rate. This can lead to performance issues, so only use it for cases that truly demand a floor.
+Off by default. When enabled, objects that are overdue past the worst refresh rate ignore the update time budget entirely, trading frame time for a guaranteed minimum refresh rate. This can lead to performance issues, so only use it for cases that demand a floor.
 
 ### Inspecting state
 
@@ -323,4 +323,4 @@ Returns a read-only snapshot of the latest performance metrics, useful for graph
 
 ## Roadmap
 
-Two improvements are currently planned. The first is parallel computation of visible voxels. The second is a reduced memory footprint, since CullThrottle inherently spends memory to save CPU time and we want to minimize that tradeoff as much as possible.
+Two improvements are planned. The first is parallel computation of visible voxels. The second is a reduced memory footprint, since CullThrottle spends memory to save CPU time and we want to shrink that tradeoff.

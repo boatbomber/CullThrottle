@@ -1,9 +1,8 @@
 --!strict
 
 --[[
-    We use this singleton to cache the properties we're interested in.
-	This way, we can avoid reading from the DataModel every frame,
-	which is especially valuable for the properties that don't update often.
+	This singleton caches the camera properties the library reads every
+	frame, so nothing hits the DataModel for values that rarely change.
 ]]
 
 local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
@@ -11,13 +10,10 @@ local Gizmo = if _G.__DEV__ then require(script.Parent.Gizmo) else nil :: any
 local CameraCache = {
 	_connections = {} :: { [string]: RBXScriptConnection },
 	Object = workspace.CurrentCamera,
-	-- This gets bumped whenever the cache is pointed at a different camera
-	-- (replaced or vanished). Rigid motion and projection changes do not bump
-	-- it, because both have motion bounds. A FOV or viewport change rotates the
-	-- side planes about the camera by at most the half-angle deltas, which
-	-- CameraMotion charges to its rotation accumulator. Consumers holding state
-	-- derived from the frustum planes must discard that state when they observe
-	-- a new generation, because no bound relates planes across a camera swap.
+	-- Bumped whenever the cache points at a different camera. Rigid motion and
+	-- projection changes don't bump it, since both have motion bounds. State
+	-- derived from the frustum planes must be discarded on a new generation,
+	-- because no bound relates planes across a camera swap.
 	Generation = 0,
 	CFrame = CFrame.identity,
 	Position = Vector3.zero,
@@ -153,17 +149,15 @@ function CameraCache.getPlanesAndBounds(renderDistance: number, voxelSize: numbe
 
 	local upVec, rightVec = cameraCFrame.UpVector, cameraCFrame.RightVector
 
-	-- These normals point out of the frustum, matching the convention in
-	-- Frustum.luau's box tests where a positive plane distance means outside.
+	-- The normals point out of the frustum, matching Frustum.luau's convention
+	-- where a positive plane distance means outside.
 	local rightNormal = upVec:Cross(cameraPos - farPlaneBottomRight).Unit
 	local leftNormal = upVec:Cross(farPlaneBottomLeft - cameraPos).Unit
 	local topNormal = rightVec:Cross(farPlaneTopRight - cameraPos).Unit
 	local bottomNormal = rightVec:Cross(cameraPos - farPlaneBottomRight).Unit
 
-	-- Plane positions are divided by voxelSize so the whole plane set lives in
-	-- voxel coordinates, letting the search test voxel-space boxes against the
-	-- planes with no per-call unit conversion. Normals are unchanged by uniform
-	-- scaling.
+	-- Positions are divided by voxelSize so the plane set lives in voxel
+	-- coordinates. Normals are unchanged by uniform scaling.
 	local cameraPosVoxels = cameraPos / voxelSize
 	local frustumPlanes: { Vector3 } = {
 		cameraPosVoxels,
