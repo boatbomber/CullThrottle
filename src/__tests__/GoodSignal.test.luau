@@ -21,9 +21,6 @@ describe("GoodSignal", function()
 	describe("new", function()
 		it("starts with no connections", function()
 			expect(signal:HasConnections()).toBe(false)
-			-- The handler list sentinel only needs to read as empty, whatever
-			-- falsy value the implementation picks.
-			expect(signal._handlerListHead).toBeFalsy()
 		end)
 	end)
 
@@ -180,6 +177,23 @@ describe("GoodSignal", function()
 
 			expect(received).toBe("hello")
 		end)
+
+		it("does not run a handler disconnected before any fire", function()
+			local ran = false
+			local connection = signal:Once(function()
+				ran = true
+			end)
+
+			-- Disconnecting the one-shot before it ever fires must stick, both
+			-- in the handler staying silent and in the connection reporting
+			-- itself disconnected.
+			connection:Disconnect()
+			signal:Fire()
+
+			expect(ran).toBe(false)
+			expect(connection.Connected).toBe(false)
+			expect(signal:HasConnections()).toBe(false)
+		end)
 	end)
 
 	describe("Wait", function()
@@ -198,6 +212,38 @@ describe("GoodSignal", function()
 			expect(results.b).toBe(8)
 			-- Wait connects a temporary handler that disconnects itself on fire.
 			expect(signal:HasConnections()).toBe(false)
+		end)
+
+		it("reports a connection while a Wait is pending", function()
+			task.spawn(function()
+				signal:Wait()
+			end)
+
+			-- The wait parks a temporary connection on the signal, so a pending
+			-- waiter counts as demand for the facade's on-demand gate.
+			expect(signal:HasConnections()).toBe(true)
+
+			signal:Fire()
+			task.wait()
+
+			-- The temporary connection cleans itself up on the resume.
+			expect(signal:HasConnections()).toBe(false)
+		end)
+
+		it("resumes every pending waiter with the same fired arguments", function()
+			local results = {}
+			task.spawn(function()
+				results.first = { signal:Wait() }
+			end)
+			task.spawn(function()
+				results.second = { signal:Wait() }
+			end)
+
+			signal:Fire(9, "both")
+			task.wait()
+
+			expect(results.first).toEqual({ 9, "both" })
+			expect(results.second).toEqual({ 9, "both" })
 		end)
 	end)
 
@@ -251,6 +297,28 @@ describe("GoodSignal", function()
 			signal:Fire()
 
 			expect(lateRan).toBe(false)
+		end)
+
+		it("delivers the next fire to a handler connected during an earlier fire", function()
+			-- Missing the in-flight fire is only half the contract. The late
+			-- handler must still end up linked in, so a Connect that dropped
+			-- the node entirely gets caught by the second fire.
+			local lateCount = 0
+			local hooked = false
+			signal:Connect(function()
+				if not hooked then
+					hooked = true
+					signal:Connect(function()
+						lateCount += 1
+					end)
+				end
+			end)
+
+			signal:Fire()
+			expect(lateCount).toBe(0)
+
+			signal:Fire()
+			expect(lateCount).toBe(1)
 		end)
 
 		it("lets a handler disconnect a later handler before it runs", function()
@@ -317,12 +385,12 @@ describe("GoodSignal", function()
 	end)
 
 	describe("handlers that never return", function()
-		-- A handler that throws takes the cached runner coroutine down exactly
-		-- like one that parks forever, since both leave the runner acquired and
-		-- never release it, and task.spawn contains either outcome to that
-		-- thread. These tests stage the loss with a bare yield because a real
-		-- throw would land an error report in the test output, which the test
-		-- runner treats as a failed run.
+		-- These tests take the cached runner coroutine down with a bare yield
+		-- that nothing ever resumes. A throwing handler would strand the
+		-- runner the same way, since both leave it acquired and never release
+		-- it, but a real throw goes untested here because the engine's error
+		-- report in the test output would fail the run. The yield substitutes
+		-- for the throw rather than covering it.
 		it("keeps firing the remaining handlers when one takes the runner down mid-fire", function()
 			local survivorRan = false
 			signal:Connect(function()
@@ -380,7 +448,7 @@ describe("GoodSignal", function()
 			expect(resumed).toBe(true)
 		end)
 
-		it("keeps firing on a fresh runner thread after a handler yields", function()
+		it("still fires handlers while a previous handler is suspended", function()
 			local firstResumed = false
 			signal:Connect(function()
 				task.wait(0.05)

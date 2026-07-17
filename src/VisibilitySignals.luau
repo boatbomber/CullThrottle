@@ -44,6 +44,15 @@ local EXIT_SIGNAL_GRACE_PERIOD = 0.2
 -- seconds of deliberate smoothing.
 local EXIT_SWEEP_BUCKET_PERIOD = 1 / 30
 
+-- Every deadline is scheduled at most one grace period past a processed
+-- frame's clock, so after a long stretch without processed frames (on-demand
+-- mode idling, a minimized window), every bucket past this many indices from
+-- the sweep's resume point is empty. The sweep clamps its walk to this span
+-- and skips the rest, keeping the resume cost flat no matter how long the gap
+-- was. The extra index is margin for the grace period not dividing evenly
+-- into bucket periods.
+local MAX_LIVE_BUCKET_SPAN = math.ceil(EXIT_SIGNAL_GRACE_PERIOD / EXIT_SWEEP_BUCKET_PERIOD) + 1
+
 local VisibilitySignals = {}
 VisibilitySignals.__index = VisibilitySignals
 
@@ -190,7 +199,10 @@ function VisibilitySignals.forget(self: VisibilitySignals, objectData: types.Obj
 	if objectData.lastVisibleClock == 0 then
 		return
 	end
+	-- The count pairs with the clock (in view means a nonzero clock), not
+	-- with bucket residency, so the decrement rides the clock flip.
 	objectData.lastVisibleClock = 0
+	self._inViewCount -= 1
 
 	local bucketIndex = objectData.exitSweepBucketIndex
 	if bucketIndex == 0 then
@@ -198,6 +210,12 @@ function VisibilitySignals.forget(self: VisibilitySignals, objectData: types.Obj
 	end
 
 	local bucket = self._exitSweepBuckets[bucketIndex]
+	if not bucket then
+		-- Destroy empties the buckets while per-object stamps survive, so a
+		-- straggling Destroying connection routing through here after
+		-- teardown finds no bucket and has nothing left to unhook.
+		return
+	end
 	local bucketSize = self._exitSweepBucketSizes[bucketIndex]
 	local slot = objectData.exitSweepSlot
 	local swappedData = bucket[bucketSize]
@@ -206,7 +224,6 @@ function VisibilitySignals.forget(self: VisibilitySignals, objectData: types.Obj
 	swappedData.exitSweepSlot = slot
 	objectData.exitSweepBucketIndex = 0
 	objectData.exitSweepSlot = 0
-	self._inViewCount -= 1
 
 	if bucketSize == 1 then
 		self._exitSweepBuckets[bucketIndex] = nil
@@ -253,7 +270,16 @@ function VisibilitySignals.signalVisibilityChanges(self: VisibilitySignals, now:
 	local pendingExitedView = self._pendingExitedView
 	local pendingExitedViewSize = self._pendingExitedViewSize
 
-	for bucketIndex = nextSweepBucketIndex, currentBucketIndex do
+	-- Every live deadline sits within one grace period of the last processed
+	-- frame, so everything past this clamp is an empty index the walk can
+	-- skip. Without it, a sweep resuming after a long idle gap would crawl
+	-- one empty index per thirtieth of a second of wall-clock gap.
+	local sweepEnd = nextSweepBucketIndex + MAX_LIVE_BUCKET_SPAN
+	if sweepEnd > currentBucketIndex then
+		sweepEnd = currentBucketIndex
+	end
+
+	for bucketIndex = nextSweepBucketIndex, sweepEnd do
 		local bucket = buckets[bucketIndex]
 		if not bucket then
 			continue

@@ -4,10 +4,11 @@
 
 --[[
 	This module turns the frame's visible voxels into a prioritized update
-	queue. The visible voxels are sorted closest-first, then the precise pass
-	scores each object (screen size, refresh urgency, distance) until its time
-	budget runs out. Whatever remains is dumped by the fast pass with a coarse
-	priority derived from each voxel's search order.
+	queue. The visible voxels arrive from the search sorted closest-first,
+	then the precise pass scores each object (screen size, refresh urgency,
+	distance) until its time budget runs out. Whatever remains is dumped by
+	the fast pass with a coarse priority derived from each voxel's search
+	order.
 ]]
 
 local types = require(script.Parent.types)
@@ -20,12 +21,9 @@ local CameraCache = require(script.Parent.Utilities.CameraCache)
 
 local vectorDot = (vector.dot :: any) :: (Vector3 | vector, Vector3 | vector) -> number
 local vectorMagnitude = (vector.magnitude :: any) :: (Vector3 | vector) -> number
-local vectorAbs = (vector.abs :: any) :: (Vector3 | vector) -> Vector3
 local tableClear = table.clear
-
--- Dotting a componentwise absolute value against this sums its three lanes,
--- which is how the voxel sort gets a manhattan distance in two vector ops.
-local VECTOR_ONE = Vector3.one
+local tableCreate = table.create
+local tableMove = table.move
 
 -- Priority scores below this are p0 (must refresh this frame). The p0 region's
 -- bands slice [0, P0_THRESHOLD), and IterateObjectsToUpdate grants its overrun
@@ -111,7 +109,10 @@ type IngestProto = {
 	_stagedObjects: { types.ObjectData },
 	_stagedBands: { number },
 	_stagedSize: number,
-	_voxelDistanceCounts: { number },
+	-- This guards the queue layout to at most once per staged batch, so a
+	-- second same-frame iteration doesn't hand back every object the first
+	-- one already updated. Clearing the batch re-arms it.
+	_enqueuedStagedBatch: boolean,
 }
 
 export type Ingest = typeof(setmetatable({} :: IngestProto, Ingest))
@@ -143,75 +144,10 @@ function Ingest.new(
 		_stagedObjects = {},
 		_stagedBands = {},
 		_stagedSize = 0,
-		_voxelDistanceCounts = {},
+		_enqueuedStagedBatch = false,
 	}, Ingest)
 
 	return self
-end
-
---[[
-	Orders this frame's visible voxels closest-first by manhattan distance to the
-	camera (in voxel space). The ingest passes rely on that order. Nearer voxels
-	get precise ingestion, and once the budget runs out fastApproxIngestRemainingVoxels
-	uses the index as a coarse priority. The ordering is only a soft heuristic
-	(manhattan distance is itself an approximation).
-
-	Distances are small non-negative integers, so a counting sort orders them in
-	O(n + maxDistance) with no element shuffling, and cameraVoxelKey is computed
-	just once for the whole batch.
-]]
-function Ingest.sortVisibleVoxelKeys(self: Ingest)
-	local search = self._search
-	local count = search._visibleVoxelCount
-	local pendingVoxelKeys = search._pendingVoxelKeys
-	local visibleVoxelKeys = search._visibleVoxelKeys
-
-	if count == 0 then
-		return
-	elseif count == 1 then
-		visibleVoxelKeys[1] = pendingVoxelKeys[1]
-		return
-	end
-
-	local cameraVoxelKey = CameraCache.Position // self._config.voxelSize
-	local distances = search._pendingVoxelDistances
-	local counts = self._voxelDistanceCounts
-
-	-- Compute the manhattan distance for every pending voxel, plus the max (the bucket range).
-	local maxDistance = 0
-	for i = 1, count do
-		local distance = vectorDot(vectorAbs(pendingVoxelKeys[i] - cameraVoxelKey), VECTOR_ONE)
-		distances[i] = distance
-		if distance > maxDistance then
-			maxDistance = distance
-		end
-	end
-
-	-- Tally how many voxels land in each distance bucket.
-	for distance = 0, maxDistance do
-		counts[distance] = 0
-	end
-	for i = 1, count do
-		local distance = distances[i]
-		counts[distance] += 1
-	end
-
-	-- Turn the tallies into each bucket's starting output slot (prefix sum).
-	local slot = 1
-	for distance = 0, maxDistance do
-		local bucketCount = counts[distance]
-		counts[distance] = slot
-		slot += bucketCount
-	end
-
-	-- Scatter each voxel into its sorted slot.
-	-- Walking the source in order keeps voxels at equal distance in their original (stable) order.
-	for i = 1, count do
-		local distance = distances[i]
-		local outputIndex = counts[distance]
-		counts[distance] = outputIndex + 1
-		visibleVoxelKeys[outputIndex] = pendingVoxelKeys[i]
-	end
 end
 
 --[[
@@ -288,6 +224,14 @@ function Ingest.ingestVisibleVoxels(self: Ingest, now: number)
 			end
 
 			local radius = objectData.radius
+			if not (radius < math.huge) then
+				-- A non-finite radius (a NaN or degenerate bounding box
+				-- upstream) would ride the screen-size arithmetic into a NaN
+				-- band and corrupt the queue layout, so the object waits here
+				-- until its geometry recovers, the same way the grid holds its
+				-- voxels steady through non-finite geometry.
+				continue
+			end
 
 			-- Cull objects whose bounding sphere falls fully outside the view
 			-- frustum's side planes. The signed distance from the object's center to
@@ -324,10 +268,13 @@ function Ingest.ingestVisibleVoxels(self: Ingest, now: number)
 				band = OVER_BAND_OFFSET + (if overTier >= OVER_BAND_COUNT then OVER_BAND_COUNT - 1 else overTier)
 			elseif jitteredElapsed >= worstRefreshPeriod then
 				-- To maintain the worst refresh rate, make this p0 priority.
-				-- The p0 slices sort by screen size, and a score pushed far
-				-- negative by a huge object clamps into the front band.
+				-- The p0 slices sort by screen size. A score pushed far
+				-- negative by a huge object clamps into the front band, and a
+				-- zero screen size lands exactly one slice past the region, so
+				-- the back edge clamps into the last band to keep the p0
+				-- budget treatment this branch exists to grant.
 				local p0Band = (P0_THRESHOLD - screenSize) * P0_BAND_SCALE // 1 + 1
-				band = if p0Band < 1 then 1 else p0Band
+				band = if p0Band < 1 then 1 elseif p0Band > P0_BAND_COUNT then P0_BAND_COUNT else p0Band
 			elseif distance < NEARBY_DISTANCE_THRESHOLD then
 				-- Objects right by the camera should update basically every
 				-- frame. The score is the distance fraction, so most of these
@@ -456,31 +403,71 @@ function Ingest.fastApproxIngestRemainingVoxels(self: Ingest, now: number, start
 end
 
 --[[
-	Lays the staged batch out into the visible-objects queue in band order. The
-	facade calls this at most once per processed frame, on the first iteration,
-	so frames where nobody iterates never pay for the layout.
+	Lays the staged batch out into the visible-objects queue in band order, at
+	most once per staged batch (clearing the batch re-arms the guard). The
+	facade calls this on the first iteration of a frame, so frames where
+	nobody iterates never pay for the layout, and a repeat iteration the same
+	frame keeps draining the existing layout instead of restarting it.
 ]]
 function Ingest.enqueueStagedObjects(self: Ingest)
+	if self._enqueuedStagedBatch then
+		return
+	end
+	self._enqueuedStagedBatch = true
+
+	debug.profilebegin("enqueueStagedObjects")
 	self._visibleObjectsQueue:enqueueBatch(self._stagedObjects, self._stagedBands, self._stagedSize)
+	debug.profileend()
 end
 
 --[[
-	Empties the staged batch without touching the queue proper.
+	Empties the staged batch without touching the queue proper, re-arming the
+	once-per-batch layout guard.
 ]]
 function Ingest.clearStagedObjects(self: Ingest)
 	self._stagedSize = 0
+	self._enqueuedStagedBatch = false
 	tableClear(self._stagedObjects)
 	tableClear(self._stagedBands)
 end
 
 --[[
-	Clears the staged batch, the visible-objects queue, and the sort's scratch
-	counts so everything they referenced can be garbage collected.
+	Resets the frame's ingest output, both the staged batch and the queue
+	layout built from it, for the start of a fresh visibility pass.
 ]]
-function Ingest.destroy(self: Ingest)
-	tableClear(self._voxelDistanceCounts)
+function Ingest.clearFrame(self: Ingest)
 	self:clearStagedObjects()
 	self._visibleObjectsQueue:clear()
+end
+
+--[[
+	Rebuilds the cleared-without-shrinking staging arrays at their current
+	occupancy, and has the queue do the same for its layout, so a one-off
+	burst of visible objects doesn't leave permanently oversized arrays whose
+	per-frame clears walk their whole peak capacity. Contents are preserved,
+	since the staged batch backs GetVisibleObjects until the next frame
+	restages it.
+]]
+function Ingest.resizeBuffers(self: Ingest)
+	local stagedSize = self._stagedSize
+
+	local stagedObjects = tableCreate(stagedSize)
+	tableMove(self._stagedObjects, 1, stagedSize, 1, stagedObjects)
+	self._stagedObjects = stagedObjects
+
+	local stagedBands = tableCreate(stagedSize)
+	tableMove(self._stagedBands, 1, stagedSize, 1, stagedBands)
+	self._stagedBands = stagedBands
+
+	self._visibleObjectsQueue:resize()
+end
+
+--[[
+	Clears the staged batch and the visible-objects queue so everything they
+	referenced can be garbage collected.
+]]
+function Ingest.destroy(self: Ingest)
+	self:clearFrame()
 end
 
 return Ingest

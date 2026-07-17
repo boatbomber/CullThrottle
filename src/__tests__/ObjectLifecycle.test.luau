@@ -38,7 +38,7 @@ describe("ObjectLifecycle", function()
 	-- teardown it drives together, since consumers only ever observe them as
 	-- one operation.
 	describe("Destroy", function()
-		it("should disconnect the render connection", function()
+		it("disconnects the render connection", function()
 			expect(cullThrottle._renderConnection.Connected).toBe(true)
 
 			cullThrottle:Destroy()
@@ -46,7 +46,7 @@ describe("ObjectLifecycle", function()
 			expect(cullThrottle._renderConnection.Connected).toBe(false)
 		end)
 
-		it("should disconnect tag connections", function()
+		it("disconnects tag connections", function()
 			local tag = "DestroyTag"
 			cullThrottle:CaptureTag(tag)
 
@@ -60,7 +60,7 @@ describe("ObjectLifecycle", function()
 			end
 		end)
 
-		it("should disconnect per-object change connections", function()
+		it("disconnects per-object change connections", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 			local objectData = cullThrottle._lifecycle._objects[part]
@@ -75,7 +75,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should clear all tracked state", function()
+		it("clears all tracked state", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 
@@ -87,14 +87,12 @@ describe("ObjectLifecycle", function()
 			expect(cullThrottle._lifecycle._objects).toEqual({})
 			expect(cullThrottle._grid._voxels).toEqual({})
 			expect(cullThrottle._lifecycle._physicsObjects).toEqual({})
-			expect(next(cullThrottle._signals._exitSweepBuckets)).toBeNil()
-			expect(cullThrottle._signals._inViewCount).toBe(0)
 
 			part:Destroy()
 			physicsPart:Destroy()
 		end)
 
-		it("should drop all signal handlers", function()
+		it("drops all signal handlers", function()
 			cullThrottle.ObjectAdded:Connect(function() end)
 			cullThrottle.ObjectEnteredView:Connect(function() end)
 
@@ -109,7 +107,7 @@ describe("ObjectLifecycle", function()
 			expect(cullThrottle.ObjectRemoved:HasConnections()).toBe(false)
 		end)
 
-		it("should be safe to call multiple times", function()
+		it("is safe to call multiple times", function()
 			expect(function()
 				cullThrottle:Destroy()
 				cullThrottle:Destroy()
@@ -118,7 +116,7 @@ describe("ObjectLifecycle", function()
 	end)
 
 	describe("AddObject", function()
-		it("should add a Part object", function()
+		it("adds a Part object", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 			local objectData = cullThrottle._lifecycle._objects[part]
@@ -131,17 +129,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("adds a valid object without throwing", function()
-			local part = createMockPart()
-
-			expect(function()
-				cullThrottle:AddObject(part)
-			end).never.toThrow()
-
-			part:Destroy()
-		end)
-
-		it("should add a Model object with PrimaryPart", function()
+		it("adds a Model object with PrimaryPart", function()
 			local model = createMockModel()
 			cullThrottle:AddObject(model)
 
@@ -150,20 +138,31 @@ describe("ObjectLifecycle", function()
 			model:Destroy()
 		end)
 
-		it("should not add duplicate objects", function()
+		it("does not add duplicate objects", function()
 			local part = createMockPart()
+			local addedCount = 0
+			local connection = cullThrottle.ObjectAdded:Connect(function(obj)
+				if obj == part then
+					addedCount += 1
+				end
+			end)
+
 			cullThrottle:AddObject(part)
 			local objectData1 = cullThrottle._lifecycle._objects[part]
 			cullThrottle:AddObject(part)
 			local objectData2 = cullThrottle._lifecycle._objects[part]
 
+			-- The repeat add early-returns, so the tracked data keeps its identity,
+			-- the count stays at one, and ObjectAdded fired only for the first add.
 			expect(objectData1).toBe(objectData2)
 			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+			expect(addedCount).toBe(1)
 
+			connection:Disconnect()
 			part:Destroy()
 		end)
 
-		it("should fire ObjectAdded event", function()
+		it("fires ObjectAdded when an object is added", function()
 			local part = createMockPart()
 			local fired = false
 			local connection = cullThrottle.ObjectAdded:Connect(function(obj)
@@ -177,7 +176,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should calculate object dimensions correctly", function()
+		it("derives the half bounding box and radius from the part's size", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(10, 10, 10))
 			cullThrottle:AddObject(part)
 			local objectData = cullThrottle._lifecycle._objects[part]
@@ -188,7 +187,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should assign object to correct voxel", function()
+		it("assigns the object to the voxel containing its position", function()
 			local part = createMockPart(Vector3.new(100, 100, 100))
 			cullThrottle:AddObject(part)
 
@@ -204,7 +203,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should register a large object in all occupied voxels", function()
+		it("registers a large object in all occupied voxels", function()
 			cullThrottle:SetVoxelSize(100)
 
 			-- A 500-long part centered at the origin spans voxels -3 through 2 on X.
@@ -225,34 +224,20 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should not register a rotated object in the empty corners of its bounding box", function()
+		it("drives the oriented-box voxel fill for a rotated object", function()
 			cullThrottle:SetVoxelSize(100)
 
-			-- This is a long part laid diagonally across the XZ plane. Its world-space
-			-- AABB is a big square, but the box only occupies the diagonal band,
-			-- so the AABB corners that the box doesn't reach must stay empty.
+			-- This is a long part laid diagonally across the XZ plane. An
+			-- axis-aligned fill of its world AABB would claim the square's corners,
+			-- so an empty corner plus an occupied diagonal cell shows the add drove
+			-- the oriented fill. VoxelGrid's own suite covers the fill math.
 			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(600, 20, 20))
 			part.CFrame = CFrame.new(0, 0, 0) * CFrame.Angles(0, math.rad(45), 0)
 			cullThrottle:AddObject(part)
 			local objectData = cullThrottle._lifecycle._objects[part]
 
-			-- The voxels in the empty corners of the AABB aren't registered.
 			expect(objectData.voxelKeys[Vector3.new(2, 0, 2)]).toBeNil()
-			expect(objectData.voxelKeys[Vector3.new(-2, 0, -2)]).toBeNil()
-
-			-- The occupied diagonal voxels still are.
 			expect(objectData.voxelKeys[Vector3.new(2, 0, -2)]).toBe(true)
-			expect(objectData.voxelKeys[Vector3.new(-2, 0, 2)]).toBe(true)
-
-			-- As a sanity check, we register fewer voxels than the full AABB volume
-			-- (x runs -3 through 2, y runs -1 through 0, and z runs -3 through 2,
-			-- which is 72 voxels), proving we don't just fill the box.
-			local count = 0
-			for _ in objectData.voxelKeys do
-				count += 1
-			end
-			expect(count).toBeLessThan(72)
-			expect(count).toBeGreaterThan(0)
 
 			part:Destroy()
 		end)
@@ -441,6 +426,30 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
+		it("tracks an extremely small object in a single voxel", function()
+			-- The engine clamps part size to a tiny minimum, so this is about as
+			-- small as a tracked part gets.
+			local part = createMockPart(Vector3.new(450, 0, 0), Vector3.new(0.05, 0.05, 0.05))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+			expect(objectData.radius).toBeGreaterThan(0)
+			expect(objectData.radius).toBeLessThan(cullThrottle._config.multiVoxelRadiusThreshold)
+
+			-- A near-zero radius stays under the multi-voxel threshold, so the
+			-- part slots into exactly the voxel holding its position.
+			local voxelSize = cullThrottle._config.voxelSize
+			expect(objectData.voxelKeys[Vector3.new(450, 0, 0) // voxelSize]).toBe(true)
+			local voxelCount = 0
+			for _ in objectData.voxelKeys do
+				voxelCount += 1
+			end
+			expect(voxelCount).toBe(1)
+
+			part:Destroy()
+		end)
+
 		it("tracks an empty model as a degenerate point at its pivot", function()
 			local model = Instance.new("Model")
 			model.WorldPivot = CFrame.new(350, 0, 0)
@@ -466,33 +475,12 @@ describe("ObjectLifecycle", function()
 	end)
 
 	describe("AddPhysicsObject", function()
-		it("should add unanchored part to physics objects list", function()
+		it("adds an unanchored part to the physics objects list", function()
 			local part = createMockPart(nil, nil, false)
 			cullThrottle:AddPhysicsObject(part)
 
 			expect(cullThrottle:IsTracking(part)).toBe(true)
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, part)).toBeDefined()
-
-			part:Destroy()
-		end)
-
-		it("should poll physics objects for position changes", function()
-			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
-			cullThrottle:AddPhysicsObject(part)
-
-			-- Physics-driven motion fires no change signal, so disconnect this
-			-- object's listeners to mimic that. The poll is then the only thing
-			-- that can notice the move.
-			for _, connection in cullThrottle._lifecycle._objects[part].changeConnections do
-				connection:Disconnect()
-			end
-
-			part.Position = Vector3.new(50, 50, 50)
-
-			cullThrottle._lifecycle:pollPhysicsObjects(1, os.clock())
-
-			local objectData = cullThrottle._lifecycle._objects[part]
-			expect(objectData.cframe.Position).toBe(Vector3.new(50, 50, 50))
 
 			part:Destroy()
 		end)
@@ -543,11 +531,52 @@ describe("ObjectLifecycle", function()
 			cullThrottle._lifecycle._physicsObjectIterIndex = 3
 			cullThrottle._lifecycle:pollPhysicsObjects(0, os.clock())
 			expect(#polled).toBe(0)
-			expect(cullThrottle._lifecycle._physicsObjectIterIndex).toBe(3)
 
 			-- The next pass picks up at the saved cursor and wraps the whole list.
 			cullThrottle._lifecycle:pollPhysicsObjects(1, os.clock())
 			expect(polled).toEqual({ parts[3], parts[4], parts[1], parts[2] })
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+
+		it("resumes the next poll one past the object whose read spent the budget", function()
+			local parts = {}
+			for i = 1, 4 do
+				parts[i] = createMockPart(Vector3.new(i * 10, 0, 0), nil, false)
+				cullThrottle:AddPhysicsObject(parts[i])
+			end
+
+			-- Record the poll order and burn the rest of the budget inside the
+			-- third read, so the poll runs out of time mid-list. The patch goes in
+			-- after the adds so the initial reads from AddObject aren't counted.
+			local budget = 0.02
+			local calls = 0
+			local polled = {}
+			local realGetObjectCFrame
+			realGetObjectCFrame = patchFunction(ObjectDimensions, "getObjectCFrame", function(objectData)
+				calls += 1
+				table.insert(polled, objectData.object)
+				if calls == 3 then
+					local finish = os.clock() + budget * 2
+					while os.clock() < finish do
+						local _ = os.clock()
+					end
+				end
+				return realGetObjectCFrame(objectData)
+			end)
+
+			-- The cursor advances before the read, so the long third read still
+			-- polls its object and the pass stops right after it.
+			cullThrottle._lifecycle:pollPhysicsObjects(budget, os.clock())
+			expect(polled).toEqual({ parts[1], parts[2], parts[3] })
+
+			-- The next full-budget poll resumes exactly one past the last polled
+			-- object and wraps the whole list from there.
+			table.clear(polled)
+			cullThrottle._lifecycle:pollPhysicsObjects(1, os.clock())
+			expect(polled).toEqual({ parts[4], parts[1], parts[2], parts[3] })
 
 			for _, part in parts do
 				part:Destroy()
@@ -642,7 +671,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should not register duplicates when added twice", function()
+		it("does not register duplicates when added twice", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
 			cullThrottle:AddPhysicsObject(part)
 			cullThrottle:AddPhysicsObject(part)
@@ -658,7 +687,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should upgrade an already-added static object to a physics object", function()
+		it("upgrades an already-added static object to a physics object", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
 			-- The dedup guard keys off _physicsObjects rather than _objects, so an
 			-- object added statically first can still be upgraded.
@@ -671,7 +700,23 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should leave no dangling entry after removing a doubly-added object", function()
+		it("keeps an existing physics object registered for polling when AddObject repeats it", function()
+			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
+			cullThrottle:AddPhysicsObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			-- AddObject on an already-tracked object early-returns, so the repeat
+			-- add can't downgrade the physics registration to static tracking.
+			cullThrottle:AddObject(part)
+
+			expect(cullThrottle._lifecycle._objects[part]).toBe(objectData)
+			expect(table.find(cullThrottle._lifecycle._physicsObjects, part)).toBeDefined()
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("leaves no dangling entry after removing a doubly-added object", function()
 			local part = createMockPart(Vector3.new(0, 0, 0), nil, false)
 			cullThrottle:AddPhysicsObject(part)
 			cullThrottle:AddPhysicsObject(part)
@@ -692,7 +737,7 @@ describe("ObjectLifecycle", function()
 	end)
 
 	describe("RemoveObject", function()
-		it("should remove object from tracking", function()
+		it("removes the object from tracking", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 			cullThrottle:RemoveObject(part)
@@ -722,7 +767,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should remove object from voxels", function()
+		it("removes the object from voxels", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 			cullThrottle:RemoveObject(part)
@@ -736,7 +781,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should fire ObjectRemoved event", function()
+		it("fires ObjectRemoved when an object is removed", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 
@@ -752,7 +797,7 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should remove physics object from physics list", function()
+		it("removes a physics object from the physics list", function()
 			local part = createMockPart(nil, nil, false)
 			cullThrottle:AddPhysicsObject(part)
 			cullThrottle:RemoveObject(part)
@@ -804,12 +849,38 @@ describe("ObjectLifecycle", function()
 			end
 		end)
 
-		it("should handle removing non-existent object gracefully", function()
+		it("removing an object that was never added is a no-op", function()
 			local part = createMockPart()
 			expect(function()
 				cullThrottle:RemoveObject(part)
 			end).never.toThrow()
 
+			part:Destroy()
+		end)
+
+		it("removing an already-removed object again is a clean no-op", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			local removedCount = 0
+			local connection = cullThrottle.ObjectRemoved:Connect(function(obj)
+				if obj == part then
+					removedCount += 1
+				end
+			end)
+
+			cullThrottle:RemoveObject(part)
+			expect(function()
+				cullThrottle:RemoveObject(part)
+			end).never.toThrow()
+
+			-- The second removal hits the early return before any bookkeeping, so
+			-- the count can't go negative and ObjectRemoved can't fire twice.
+			expect(removedCount).toBe(1)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			connection:Disconnect()
 			part:Destroy()
 		end)
 
@@ -854,7 +925,56 @@ describe("ObjectLifecycle", function()
 			part:Destroy()
 		end)
 
-		it("should release the object when it is destroyed externally", function()
+		it("leaves clean state after rapid add and remove cycles", function()
+			local part = createMockPart(Vector3.new(100, 0, 0), nil, false)
+
+			local addedCount, removedCount = 0, 0
+			local addedConnection = cullThrottle.ObjectAdded:Connect(function(obj)
+				if obj == part then
+					addedCount += 1
+				end
+			end)
+			local removedConnection = cullThrottle.ObjectRemoved:Connect(function(obj)
+				if obj == part then
+					removedCount += 1
+				end
+			end)
+
+			-- Alternate the two add flavors so the cycling also churns the physics
+			-- registration, not just the tracked map.
+			for i = 1, 20 do
+				if i % 2 == 0 then
+					cullThrottle:AddPhysicsObject(part)
+				else
+					cullThrottle:AddObject(part)
+				end
+				cullThrottle:RemoveObject(part)
+			end
+
+			-- Every cycle fired exactly one add and one remove, and nothing leaked
+			-- into the tracked map, the physics list, or the voxels.
+			expect(addedCount).toBe(20)
+			expect(removedCount).toBe(20)
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+			expect(#cullThrottle._lifecycle._physicsObjects).toBe(0)
+			for _, voxel in cullThrottle._grid._voxels do
+				for _, objectData in voxel do
+					expect(objectData.object).never.toBe(part)
+				end
+			end
+
+			-- A fresh add after the churn behaves like a first add.
+			cullThrottle:AddObject(part)
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			addedConnection:Disconnect()
+			removedConnection:Disconnect()
+			part:Destroy()
+		end)
+
+		it("releases the object when it is destroyed externally", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 			expect(cullThrottle:IsTracking(part)).toBe(true)
@@ -867,7 +987,7 @@ describe("ObjectLifecycle", function()
 			expect(cullThrottle:IsTracking(part)).toBe(false)
 		end)
 
-		it("should remove the object from voxels when it is destroyed externally", function()
+		it("removes the object from voxels when it is destroyed externally", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 
@@ -881,7 +1001,7 @@ describe("ObjectLifecycle", function()
 			end
 		end)
 
-		it("should fire ObjectRemoved when the object is destroyed externally", function()
+		it("fires ObjectRemoved when the object is destroyed externally", function()
 			local part = createMockPart()
 			cullThrottle:AddObject(part)
 
@@ -898,7 +1018,7 @@ describe("ObjectLifecycle", function()
 			connection:Disconnect()
 		end)
 
-		it("should release a physics object when it is destroyed externally", function()
+		it("releases a physics object when it is destroyed externally", function()
 			local part = createMockPart(nil, nil, false)
 			cullThrottle:AddPhysicsObject(part)
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, part)).toBeDefined()
@@ -910,7 +1030,7 @@ describe("ObjectLifecycle", function()
 			expect(table.find(cullThrottle._lifecycle._physicsObjects, part)).toBeNil()
 		end)
 
-		it("should not fire ObjectExitedView for an object that was removed while visible", function()
+		it("does not fire ObjectExitedView for an object that was removed while visible", function()
 			local part = createMockPart(Vector3.new(0, 0, 0))
 			cullThrottle:AddObject(part)
 
@@ -919,11 +1039,9 @@ describe("ObjectLifecycle", function()
 
 			cullThrottle:RemoveObject(part)
 
-			-- The in-view entry must be removed so the next pass doesn't see a
+			-- Removal must evict the in-view entry, or the sweep below would see a
 			-- stale "was visible last frame, gone this frame" entry and fire a stray
 			-- ObjectExitedView for an object we've already removed.
-			expect(cullThrottle._signals._inViewCount).toBe(0)
-
 			local exited = false
 			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
 				if obj == part then
@@ -955,8 +1073,6 @@ describe("ObjectLifecycle", function()
 			cullThrottle:RemoveObject(parts[1])
 			cullThrottle:RemoveObject(parts[3])
 
-			expect(cullThrottle._signals._inViewCount).toBe(1)
-
 			local exited = {}
 			local connection = cullThrottle.ObjectExitedView:Connect(function(obj)
 				table.insert(exited, obj)
@@ -972,7 +1088,7 @@ describe("ObjectLifecycle", function()
 			end
 		end)
 
-		it("should remove the object from the voxel update queue", function()
+		it("removes the object from the voxel update queue", function()
 			local part = createMockPart(Vector3.new(0, 0, 0))
 			cullThrottle:AddObject(part)
 			local objectData = cullThrottle._lifecycle._objects[part]

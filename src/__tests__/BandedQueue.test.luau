@@ -160,7 +160,7 @@ describe("BandedQueue", function()
 			expect(order).toEqual({ "laidFirst", "laidSecond" })
 		end)
 
-		it("orders every fill correctly across consecutive cycles", function()
+		it("returns the per-band tallies to zero between fills", function()
 			-- A fill leaves its per-band tallies zeroed for the next one, so a
 			-- second full cycle through clear and refill must come out just as
 			-- ordered as the first.
@@ -174,6 +174,25 @@ describe("BandedQueue", function()
 			stage("secondCycleEarly", 35)
 			fill()
 			expect((drainAll())).toEqual({ "secondCycleEarly", "secondCycleLate" })
+		end)
+
+		it("appends a fill behind a partially drained layout", function()
+			-- The owner's contract is to clear between frames, so a fill landing
+			-- on a partially drained layout is outside it. This documents the
+			-- owner-side corner as it stands. The batch appends behind the
+			-- existing layout, band order notwithstanding, and the drain's
+			-- progress stands.
+			stage("first", 15)
+			stage("second", 25)
+			fill()
+			expect((queue:dequeue())).toBe("first")
+
+			stage("appended", 5)
+			fill()
+
+			expect(queue:len()).toBe(2)
+			local order = drainAll()
+			expect(order).toEqual({ "second", "appended" })
 		end)
 
 		it("drains every staged item exactly once in non-decreasing band order", function()
@@ -277,6 +296,75 @@ describe("BandedQueue", function()
 			local _items, _bands, cursor, size = queue:drainView()
 			expect(cursor).toBe(1)
 			expect(size).toBe(2)
+		end)
+
+		it("moves the fill epoch on clear and on resize", function()
+			stage("a", 5)
+			fill()
+
+			-- Both operations invalidate any captured layout, so both must move
+			-- the epoch a captured view would compare against.
+			local _items, _bands, _cursor, _size, epochAtFill = queue:drainView()
+			queue:clear()
+			local _items2, _bands2, _cursor2, _size2, epochAfterClear = queue:drainView()
+			expect(epochAfterClear).never.toBe(epochAtFill)
+
+			queue:resize()
+			local _items3, _bands3, _cursor3, _size3, epochAfterResize = queue:drainView()
+			expect(epochAfterResize).never.toBe(epochAfterClear)
+		end)
+
+		it("flags a cleared layout to a stale drain through the epoch", function()
+			stage("a", 5)
+			stage("b", 15)
+			fill()
+
+			-- An iterator captures the layout the way the facade's update loop
+			-- does, walks one item, and goes dormant holding its epoch.
+			local items, _bands, cursor, size, epoch = queue:drainView()
+			cursor += 1
+			queue._cursor = cursor
+			expect(items[cursor]).toBe("a")
+			expect(cursor < size).toBe(true)
+
+			-- The frame ends and the owner clears and refills. The captured
+			-- view now describes a queue that no longer exists, and the epoch
+			-- is the tell the consumer checks before touching the arrays again.
+			queue:clear()
+			stage("c", 25)
+			fill()
+
+			local _items2, _bands2, _cursor2, _size2, freshEpoch = queue:drainView()
+			expect(freshEpoch == epoch).toBe(false)
+			-- The stale drain ends at the mismatch without writing its cursor
+			-- back, so the fresh layout drains in full.
+			expect((drainAll())).toEqual({ "c" })
+		end)
+	end)
+
+	describe("resize", function()
+		it("keeps a partially drained layout and its cursor across a resize", function()
+			stage("a", 5)
+			stage("b", 15)
+			stage("c", 25)
+			fill()
+			expect((queue:dequeue())).toBe("a")
+
+			local itemsBefore, _bandsBefore, _cursorBefore, _sizeBefore, epochBefore = queue:drainView()
+			queue:resize()
+			local itemsAfter, _bandsAfter, cursorAfter, sizeAfter, epochAfter = queue:drainView()
+
+			-- The layout moved into fresh arrays, so the epoch flags every
+			-- captured view as stale.
+			expect(itemsAfter == itemsBefore).toBe(false)
+			expect(epochAfter == epochBefore).toBe(false)
+			-- The rebuild preserves the contents and the drain's progress.
+			expect(cursorAfter).toBe(1)
+			expect(sizeAfter).toBe(3)
+			expect(queue:len()).toBe(2)
+			expect((queue:dequeue())).toBe("b")
+			expect((queue:dequeue())).toBe("c")
+			expect(queue:isEmpty()).toBe(true)
 		end)
 	end)
 

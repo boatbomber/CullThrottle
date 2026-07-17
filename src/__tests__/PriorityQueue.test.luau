@@ -18,7 +18,7 @@ describe("PriorityQueue", function()
 	end)
 
 	describe("new", function()
-		it("should create an empty priority queue", function()
+		it("creates an empty queue", function()
 			expect(queue).toBeDefined()
 			expect(queue:len()).toBe(0)
 			expect(queue:isEmpty()).toBe(true)
@@ -26,14 +26,14 @@ describe("PriorityQueue", function()
 	end)
 
 	describe("enqueue", function()
-		it("should add a single item with priority", function()
+		it("adds a single item with a priority", function()
 			queue:enqueue("item1", 5)
 			expect(queue:len()).toBe(1)
 			expect(queue:isEmpty()).toBe(false)
 			expect(queue:contains("item1")).toBe(true)
 		end)
 
-		it("should maintain min-heap property (lowest priority first)", function()
+		it("puts the lowest priority item at the front", function()
 			queue:enqueue("high", 10)
 			queue:enqueue("low", 1)
 			queue:enqueue("medium", 5)
@@ -43,7 +43,7 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(1)
 		end)
 
-		it("should prevent duplicate items", function()
+		it("ignores a re-enqueue of an item already present", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item1", 3)
 
@@ -53,14 +53,14 @@ describe("PriorityQueue", function()
 			expect(item).toBe("item1")
 		end)
 
-		it("should return self for chaining", function()
+		it("returns self for chaining", function()
 			local result = queue:enqueue("item1", 5)
 			expect(result).toBe(queue)
 		end)
 	end)
 
 	describe("dequeue", function()
-		it("should remove and return the item with lowest priority", function()
+		it("removes and returns the lowest priority item", function()
 			queue:enqueue("high", 10)
 			queue:enqueue("low", 1)
 			queue:enqueue("medium", 5)
@@ -72,7 +72,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("low")).toBe(false)
 		end)
 
-		it("should maintain heap property after dequeue", function()
+		it("dequeues in ascending priority order", function()
 			queue:enqueue("item3", 3)
 			queue:enqueue("item1", 1)
 			queue:enqueue("item7", 7)
@@ -94,13 +94,13 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(2)
 		end)
 
-		it("should error when dequeuing from empty queue", function()
+		it("errors when dequeuing from an empty queue", function()
 			expect(function()
 				queue:dequeue()
 			end).toThrow("Heap is empty")
 		end)
 
-		it("should handle single item dequeue", function()
+		it("dequeues the only item and leaves the queue empty", function()
 			queue:enqueue("only", 5)
 			local item, priority = queue:dequeue()
 
@@ -109,7 +109,7 @@ describe("PriorityQueue", function()
 			expect(queue:isEmpty()).toBe(true)
 		end)
 
-		it("rebuilds correctly after being drained to empty", function()
+		it("accepts fresh items after being drained to empty", function()
 			queue:enqueue("only", 5)
 			queue:dequeue()
 			expect(queue:isEmpty()).toBe(true)
@@ -125,7 +125,7 @@ describe("PriorityQueue", function()
 	end)
 
 	describe("peek", function()
-		it("should return the item with lowest priority without removing it", function()
+		it("returns the lowest priority item without removing it", function()
 			queue:enqueue("high", 10)
 			queue:enqueue("low", 1)
 			queue:enqueue("medium", 5)
@@ -137,7 +137,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("low")).toBe(true)
 		end)
 
-		it("should return nil for empty queue", function()
+		it("returns nils for an empty queue", function()
 			local item, priority = queue:peek()
 			expect(item).toBeNil()
 			expect(priority).toBeNil()
@@ -145,7 +145,7 @@ describe("PriorityQueue", function()
 	end)
 
 	describe("peekPriority", function()
-		it("should return only the priority of the top item", function()
+		it("returns only the priority of the front item", function()
 			queue:enqueue("item1", 3)
 			queue:enqueue("item2", 1)
 
@@ -153,14 +153,14 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(1)
 		end)
 
-		it("should return nil for empty queue", function()
+		it("returns nil for an empty queue", function()
 			local priority = queue:peekPriority()
 			expect(priority).toBeNil()
 		end)
 	end)
 
 	describe("remove", function()
-		it("should remove a specific item from the queue", function()
+		it("removes a specific item", function()
 			queue:enqueue("item5", 5)
 			queue:enqueue("item3", 3)
 			queue:enqueue("item7", 7)
@@ -171,7 +171,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("item3")).toBe(false)
 		end)
 
-		it("should maintain heap property after removal", function()
+		it("drains in priority order after a removal", function()
 			queue:enqueue("item1", 1)
 			queue:enqueue("item3", 3)
 			queue:enqueue("item2", 2)
@@ -189,7 +189,7 @@ describe("PriorityQueue", function()
 			expect(item3).toBe("item3")
 		end)
 
-		it("should return false when removing non-existent item", function()
+		it("returns false when removing an item that is not present", function()
 			queue:enqueue("item1", 5)
 
 			local success = queue:remove("nonexistent")
@@ -212,7 +212,7 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(5)
 		end)
 
-		it("should handle removing the last item", function()
+		it("removes an item sitting in the final heap slot", function()
 			queue:enqueue("item1", 1)
 			queue:enqueue("item2", 2)
 			queue:enqueue("item3", 3)
@@ -233,7 +233,7 @@ describe("PriorityQueue", function()
 			expect(drained).toEqual({ "item1", "item2" })
 		end)
 
-		it("should handle removing the root item", function()
+		it("removes the root and promotes the next lowest", function()
 			queue:enqueue("item1", 1)
 			queue:enqueue("item2", 2)
 			queue:enqueue("item3", 3)
@@ -286,13 +286,13 @@ describe("PriorityQueue", function()
 			expect(drained).toEqual({ "p1", "p2", "p2.5", "p3", "p4", "p10", "p12", "p13", "p14" })
 		end)
 
-		it("should return false when removing from an empty queue", function()
+		it("returns false when removing from an empty queue", function()
 			expect(queue:remove("missing")).toBe(false)
 		end)
 	end)
 
 	describe("update", function()
-		it("should update the priority of an existing item", function()
+		it("updates the priority of an existing item", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 3)
 
@@ -304,7 +304,7 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(1)
 		end)
 
-		it("should return false when updating non-existent item", function()
+		it("returns false when updating an item that is not present", function()
 			queue:enqueue("item1", 5)
 
 			local success = queue:update("nonexistent", 1)
@@ -312,7 +312,7 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(1)
 		end)
 
-		it("should maintain heap property after update", function()
+		it("surfaces an item whose update makes it the new lowest", function()
 			queue:enqueue("item1", 2)
 			queue:enqueue("item2", 3)
 			queue:enqueue("item3", 4)
@@ -343,13 +343,13 @@ describe("PriorityQueue", function()
 			expect(drained).toEqual({ "b", "c", "a" })
 		end)
 
-		it("should return false when updating an empty queue", function()
+		it("returns false when updating an empty queue", function()
 			expect(queue:update("missing", 1)).toBe(false)
 		end)
 	end)
 
 	describe("batchEnqueue", function()
-		it("should enqueue multiple items at once", function()
+		it("enqueues multiple items at once", function()
 			local items = { "item1", "item2", "item3" }
 			local priorities = { 5, 2, 8 }
 
@@ -361,7 +361,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("item3")).toBe(true)
 		end)
 
-		it("should maintain heap property after batch enqueue", function()
+		it("surfaces the lowest priority of the batch", function()
 			local items = { "item1", "item2", "item3", "item4" }
 			local priorities = { 7, 2, 5, 1 }
 
@@ -372,7 +372,7 @@ describe("PriorityQueue", function()
 			expect(priority).toBe(1)
 		end)
 
-		it("should skip duplicate items in batch", function()
+		it("skips duplicate items in a batch", function()
 			queue:enqueue("existing", 5)
 
 			local items = { "item1", "existing", "item2" }
@@ -386,7 +386,7 @@ describe("PriorityQueue", function()
 			expect(item).toBe("item1")
 		end)
 
-		it("should skip nil items in batch", function()
+		it("skips nil items in a batch", function()
 			local items = { "item1", nil, "item2" }
 			local priorities = { 3, 1, 4 }
 
@@ -397,7 +397,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("item2")).toBe(true)
 		end)
 
-		it("heapifies a large unsorted batch correctly", function()
+		it("drains a large unsorted batch in priority order", function()
 			local items, priorities = {}, {}
 			for i = 1, 500 do
 				items[i] = "batch" .. i
@@ -433,18 +433,37 @@ describe("PriorityQueue", function()
 			end
 			expect(drained).toEqual({ "y", "seed2", "x", "seed1", "z" })
 		end)
+
+		it("keeps the heap valid for a batch of all-equal priorities", function()
+			-- All-equal priorities make every comparison in the bulk bottom-up
+			-- heapify a tie, so any strictness slip in its child scan shows up
+			-- here rather than in the per-item enqueue path.
+			local items, priorities = {}, {}
+			for i = 1, 64 do
+				items[i] = "equal" .. i
+				priorities[i] = 5
+			end
+
+			queue:batchEnqueue(items, priorities)
+			expect(queue:len()).toBe(64)
+
+			-- Draining must return every item exactly once, all at the staged
+			-- priority.
+			local seen = {}
+			local drainedCount = 0
+			while not queue:isEmpty() do
+				local item, priority = queue:dequeue()
+				expect(priority).toBe(5)
+				expect(seen[item]).toBeNil()
+				seen[item] = true
+				drainedCount += 1
+			end
+			expect(drainedCount).toBe(64)
+		end)
 	end)
 
 	describe("incoming batch operations", function()
-		it("should add items to incoming batch", function()
-			queue:addToIncomingBatch("item1", 5)
-			queue:addToIncomingBatch("item2", 3)
-
-			expect(queue._incomingBatch.size).toBe(2)
-			expect(queue:len()).toBe(0)
-		end)
-
-		it("should enqueue incoming batch", function()
+		it("enqueues the staged incoming batch", function()
 			queue:addToIncomingBatch("item1", 5)
 			queue:addToIncomingBatch("item2", 3)
 			queue:enqueueIncomingBatch()
@@ -464,10 +483,8 @@ describe("PriorityQueue", function()
 			-- intact snapshot is load-bearing for the facade, which answers
 			-- GetVisibleObjects by reading the batch's items array directly even
 			-- after the update iterator drains the queue proper (it never
-			-- re-enqueues within a frame). Re-enqueueing below just proves the
-			-- snapshot survived in full.
-			expect(queue._incomingBatch.size).toBe(2)
-
+			-- re-enqueues within a frame). Clearing the queue proper and
+			-- re-enqueueing below proves the snapshot survived in full.
 			queue:clear()
 			expect(queue:len()).toBe(0)
 
@@ -491,7 +508,7 @@ describe("PriorityQueue", function()
 			expect(priority == 5 or priority == 2).toBe(true)
 		end)
 
-		it("should clear incoming batch", function()
+		it("clears the incoming batch", function()
 			queue:addToIncomingBatch("item1", 5)
 			queue:addToIncomingBatch("item2", 3)
 			queue:clearIncomingBatch()
@@ -501,7 +518,7 @@ describe("PriorityQueue", function()
 			expect(#queue._incomingBatch.priorities).toBe(0)
 		end)
 
-		it("should reuse the incoming batch across clear cycles", function()
+		it("reuses the incoming batch across clear cycles", function()
 			-- clearIncomingBatch clears in place (keeping capacity) rather than
 			-- reassigning fresh tables, so a fresh batch after a clear must still
 			-- enqueue correctly off the contiguous 1..size keys.
@@ -523,17 +540,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("fresh")).toBe(true)
 		end)
 
-		it("should add multiple items to incoming batch at once", function()
-			local items = { "item1", "item2", "item3" }
-			local priorities = { 5, 2, 8 }
-
-			queue:addMultipleToIncomingBatch(items, priorities)
-
-			expect(queue._incomingBatch.size).toBe(3)
-			expect(queue:len()).toBe(0)
-		end)
-
-		it("should handle mixed batch operations", function()
+		it("stages single and bulk adds into one batch", function()
 			queue:addToIncomingBatch("item1", 5)
 
 			local items = { "item2", "item3" }
@@ -549,14 +556,14 @@ describe("PriorityQueue", function()
 			expect(item).toBe("item4")
 		end)
 
-		it("should handle empty incoming batch enqueue", function()
+		it("enqueues nothing from an empty incoming batch", function()
 			queue:enqueueIncomingBatch()
 			expect(queue:len()).toBe(0)
 		end)
 	end)
 
 	describe("utility methods", function()
-		it("should return all items", function()
+		it("returns every queued item", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 3)
 			queue:enqueue("item3", 7)
@@ -585,7 +592,7 @@ describe("PriorityQueue", function()
 			expect(remaining).never.toContain("b")
 		end)
 
-		it("should clear the queue", function()
+		it("clears the queue proper and leaves the staged batch", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 3)
 			queue:enqueue("item3", 7)
@@ -600,11 +607,13 @@ describe("PriorityQueue", function()
 			expect(queue:contains("item3")).toBe(false)
 
 			-- Clearing empties the queue proper only, so anything staged in the
-			-- incoming batch survives untouched.
-			expect(queue._incomingBatch.size).toBe(1)
+			-- incoming batch still enqueues afterwards.
+			queue:enqueueIncomingBatch()
+			expect(queue:len()).toBe(1)
+			expect(queue:contains("staged")).toBe(true)
 		end)
 
-		it("should correctly report length", function()
+		it("reports the length across enqueues and dequeues", function()
 			expect(queue:len()).toBe(0)
 
 			queue:enqueue("item1", 5)
@@ -617,7 +626,7 @@ describe("PriorityQueue", function()
 			expect(queue:len()).toBe(1)
 		end)
 
-		it("should correctly check if queue contains an item", function()
+		it("reports whether an item is present", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 3)
 
@@ -629,7 +638,7 @@ describe("PriorityQueue", function()
 			expect(queue:contains("item1")).toBe(false)
 		end)
 
-		it("should correctly check if queue is empty", function()
+		it("reports whether the queue is empty", function()
 			expect(queue:isEmpty()).toBe(true)
 
 			queue:enqueue("item1", 5)
@@ -640,25 +649,26 @@ describe("PriorityQueue", function()
 		end)
 	end)
 
-	describe("edge cases and stress tests", function()
-		it("should handle large numbers of items", function()
-			for i = 1, 1000 do
-				queue:enqueue("item" .. i, math.random() * 1000)
-			end
+	describe("item data types", function()
+		it("accepts tables, functions, numbers, and booleans as items", function()
+			local table1 = { key = "value" }
+			local function1 = function() end
 
-			expect(queue:len()).toBe(1000)
+			queue:enqueue(table1, 5)
+			queue:enqueue(function1, 3)
+			queue:enqueue(123, 7)
+			queue:enqueue(true, 1)
 
-			local lastPriority = -math.huge
-			for _ = 1, 1000 do
-				local _, priority = queue:dequeue()
-				expect(priority).toBeGreaterThanOrEqual(lastPriority)
-				lastPriority = priority
-			end
-
-			expect(queue:isEmpty()).toBe(true)
+			expect(queue:len()).toBe(4)
+			expect(queue:contains(table1)).toBe(true)
+			expect(queue:contains(function1)).toBe(true)
+			expect(queue:contains(123)).toBe(true)
+			expect(queue:contains(true)).toBe(true)
 		end)
+	end)
 
-		it("should handle negative priorities", function()
+	describe("priority ranges", function()
+		it("dequeues negative priorities in ascending order", function()
 			queue:enqueue("item5", -5)
 			queue:enqueue("item10", -10)
 			queue:enqueue("item0", 0)
@@ -695,7 +705,7 @@ describe("PriorityQueue", function()
 			expect(queue:isEmpty()).toBe(true)
 		end)
 
-		it("should handle decimal priorities", function()
+		it("surfaces the lowest decimal priority", function()
 			queue:enqueue("item1", 1.5)
 			queue:enqueue("item2", 1.2)
 			queue:enqueue("item3", 1.8)
@@ -705,23 +715,42 @@ describe("PriorityQueue", function()
 			expect(item).toBe("item2")
 		end)
 
-		it("should handle various data types as items", function()
-			local table1 = { key = "value" }
-			local function1 = function() end
+		it("keeps the queue valid with many equal priorities", function()
+			for i = 1, 50 do
+				queue:enqueue("equal" .. i, 5)
+			end
 
-			queue:enqueue(table1, 5)
-			queue:enqueue(function1, 3)
-			queue:enqueue(123, 7)
-			queue:enqueue(true, 1)
+			expect(queue:len()).toBe(50)
 
-			expect(queue:len()).toBe(4)
-			expect(queue:contains(table1)).toBe(true)
-			expect(queue:contains(function1)).toBe(true)
-			expect(queue:contains(123)).toBe(true)
-			expect(queue:contains(true)).toBe(true)
+			local count = 0
+			while not queue:isEmpty() do
+				local _, priority = queue:dequeue()
+				expect(priority).toBe(5)
+				count += 1
+			end
+			expect(count).toBe(50)
+		end)
+	end)
+
+	describe("stress and property tests", function()
+		it("drains a thousand random priorities in sorted order", function()
+			for i = 1, 1000 do
+				queue:enqueue("item" .. i, math.random() * 1000)
+			end
+
+			expect(queue:len()).toBe(1000)
+
+			local lastPriority = -math.huge
+			for _ = 1, 1000 do
+				local _, priority = queue:dequeue()
+				expect(priority).toBeGreaterThanOrEqual(lastPriority)
+				lastPriority = priority
+			end
+
+			expect(queue:isEmpty()).toBe(true)
 		end)
 
-		it("should maintain correct indices after complex operations", function()
+		it("keeps indices consistent across mixed remove, update, and dequeue", function()
 			queue:enqueue("item1", 5)
 			queue:enqueue("item2", 2)
 			queue:enqueue("item3", 8)
@@ -740,22 +769,6 @@ describe("PriorityQueue", function()
 			local item, priority = queue:peek()
 			expect(priority).toBe(3)
 			expect(item).toBe("item3")
-		end)
-
-		it("keeps the queue valid with many equal priorities", function()
-			for i = 1, 50 do
-				queue:enqueue("equal" .. i, 5)
-			end
-
-			expect(queue:len()).toBe(50)
-
-			local count = 0
-			while not queue:isEmpty() do
-				local _, priority = queue:dequeue()
-				expect(priority).toBe(5)
-				count += 1
-			end
-			expect(count).toBe(50)
 		end)
 
 		it("maintains the heap and index map across random insert/batch/remove/update/dequeue", function()

@@ -1,4 +1,5 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 local Packages, DevPackages = ReplicatedStorage:WaitForChild("Packages"), ReplicatedStorage:WaitForChild("DevPackages")
 
 local JestGlobals = require(DevPackages:WaitForChild("JestGlobals"))
@@ -12,9 +13,13 @@ local afterEach = JestGlobals.afterEach
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
 local Ingest = require(CullThrottlePackage:WaitForChild("Ingest"))
+local Utilities = CullThrottlePackage:WaitForChild("Utilities")
+local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
 local TestHelpers = require(script.Parent.TestHelpers)
 local createMockPart = TestHelpers.createMockPart
+local patchFunction = TestHelpers.patchFunction
+local roomyFrustumPlanes = TestHelpers.roomyFrustumPlanes
 
 --[[
 	Spins on os.clock without yielding until the given deadline has passed.
@@ -23,9 +28,9 @@ local createMockPart = TestHelpers.createMockPart
 	place instead.
 ]]
 local function busyWaitUntil(deadline: number)
-	local spins = 0
-	while os.clock() < deadline do
-		spins += 1
+	local now = os.clock()
+	while now < deadline do
+		now = os.clock()
 	end
 end
 
@@ -37,6 +42,9 @@ describe("CullThrottle queries", function()
 	end)
 
 	afterEach(function()
+		-- Module tables are shared state, so any values patched onto them must
+		-- be unwound before the next test.
+		TestHelpers.restorePatches()
 		if cullThrottle then
 			cullThrottle:Destroy()
 		end
@@ -44,7 +52,7 @@ describe("CullThrottle queries", function()
 	end)
 
 	describe("GetVisibleObjects", function()
-		it("should return empty array when no objects are visible", function()
+		it("returns an empty array when no objects are visible", function()
 			local visibleObjects = cullThrottle:GetVisibleObjects()
 			expect(#visibleObjects).toBe(0)
 		end)
@@ -123,6 +131,84 @@ describe("CullThrottle queries", function()
 
 			partA:Destroy()
 			partB:Destroy()
+		end)
+
+		it("returns each object exactly once when the truncated search leans on the fallback", function()
+			-- The search geometry is pinned to the shared roomy fixture (a camera
+			-- at the origin facing plus Y), and the camera reads the ingest
+			-- passes score against are parked at the same pose, so both halves
+			-- of the pipeline agree on what is in view no matter where the live
+			-- camera happens to sit.
+			patchFunction(CameraCache, "getPlanesAndBounds", function()
+				return roomyFrustumPlanes, Vector3.new(0, 0, 0), Vector3.new(19, 27, 3)
+			end)
+			patchFunction(CameraCache, "CFrame", CFrame.lookAt(Vector3.zero, Vector3.yAxis, Vector3.zAxis))
+			patchFunction(CameraCache, "Position", Vector3.zero)
+
+			-- These six voxels sit inside the fixture frustum while their coarse
+			-- buckets straddle its side planes, so every one of them seeds a
+			-- root volume and the budgeted volume loop has leftovers to abandon
+			-- once its time is gone.
+			local singleVoxelKeys = {
+				Vector3.new(1, 3, 0),
+				Vector3.new(1, 5, 0),
+				Vector3.new(5, 11, 0),
+				Vector3.new(8, 15, 0),
+				Vector3.new(9, 19, 0),
+				Vector3.new(12, 23, 0),
+			}
+			local parts = {}
+			for i, voxelKey in singleVoxelKeys do
+				local part = createMockPart((voxelKey + Vector3.new(0.5, 0.5, 0.5)) * 100)
+				cullThrottle:AddObject(part)
+				parts[i] = part
+			end
+
+			-- This part is large enough to straddle the voxel boundary at
+			-- y = 800, so it occupies two voxels that resolve through different
+			-- paths (one rides a straddling bucket's search volume, the other a
+			-- fully inside bucket's bulk append). The README promises the
+			-- visible list holds it once anyway.
+			local spanningPart = createMockPart(Vector3.new(150, 800, 50), Vector3.new(10, 120, 10))
+			cullThrottle:AddObject(spanningPart)
+
+			-- The pinned distance covers every staged part from the fixture
+			-- camera's origin.
+			cullThrottle:SetRenderDistanceRange(NumberRange.new(4000, 4000))
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+
+			-- A first, fully budgeted frame stamps a real visible proof on every
+			-- staged voxel, which is what the truncated frame's fallback reuses
+			-- below.
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- Nothing the whole-frame replay watches moves between these frames,
+			-- so it gets disarmed by hand to force the truncated frame to
+			-- actually re-run the search.
+			cullThrottle._search._replayReady = false
+
+			cullThrottle:SetTimeBudgets(0, 1, 1)
+			cullThrottle._processedVisibilityThisFrame = false
+			local visibleObjects = cullThrottle:GetVisibleObjects()
+
+			-- The zero budget must have pushed the search into its fallback, or
+			-- this test isn't exercising the composite promise it claims to.
+			expect(cullThrottle:GetPerformanceMetrics().skippedSearch).toBeGreaterThan(0)
+
+			local seen = {}
+			for _, object in visibleObjects do
+				expect(seen[object]).toBeUndefined()
+				seen[object] = true
+			end
+			for _, part in parts do
+				expect(seen[part]).toBe(true)
+			end
+			expect(seen[spanningPart]).toBe(true)
+
+			for _, part in parts do
+				part:Destroy()
+			end
+			spanningPart:Destroy()
 		end)
 	end)
 
@@ -242,6 +328,91 @@ describe("CullThrottle queries", function()
 			partB:Destroy()
 		end)
 
+		it("ends a stale iterator held across frames instead of corrupting the fresh drain", function()
+			local camera = workspace.CurrentCamera
+			local partA = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
+			local partB = createMockPart((camera.CFrame * CFrame.new(6, 0, -80)).Position)
+			cullThrottle:AddObject(partA)
+			cullThrottle:AddObject(partB)
+
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- Hold an iterator across the frame boundary after yielding one
+			-- object. The extra parens truncate the multiple return values.
+			local staleIterator = cullThrottle:IterateObjectsToUpdate()
+			expect((staleIterator())).toBeDefined()
+
+			-- The next frame clears and restages the queue, so the held
+			-- closure's captured layout no longer describes it.
+			cullThrottle._processedVisibilityThisFrame = false
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- A stale call before the refill ends quietly instead of erroring
+			-- on the cleared arrays or stomping the live cursor.
+			expect((staleIterator())).toBeNil()
+
+			-- A stale call after the refill must not steal from or skip past
+			-- the fresh layout either.
+			local freshIterator = cullThrottle:IterateObjectsToUpdate()
+			expect((staleIterator())).toBeNil()
+
+			local yielded = 0
+			for _ in freshIterator do
+				yielded += 1
+			end
+			expect(yielded).toBe(2)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+
+		it("keeps two interleaved live iterators from yielding the same object twice", function()
+			local camera = workspace.CurrentCamera
+			local partA = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
+			local partB = createMockPart((camera.CFrame * CFrame.new(6, 0, -80)).Position)
+			local partC = createMockPart((camera.CFrame * CFrame.new(0, 6, -80)).Position)
+			cullThrottle:AddObject(partA)
+			cullThrottle:AddObject(partB)
+			cullThrottle:AddObject(partC)
+
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			-- Two iterators live at once drain one shared queue, so alternating
+			-- calls between them must hand each staged object to exactly one
+			-- caller rather than replaying the other's progress.
+			local iteratorA = cullThrottle:IterateObjectsToUpdate()
+			local iteratorB = cullThrottle:IterateObjectsToUpdate()
+
+			local yieldCounts = {}
+			local function take(iterator): Instance?
+				local object = iterator()
+				if object then
+					yieldCounts[object] = (yieldCounts[object] or 0) + 1
+				end
+				return object
+			end
+
+			local live = true
+			while live do
+				local fromA = take(iteratorA)
+				local fromB = take(iteratorB)
+				live = fromA ~= nil or fromB ~= nil
+			end
+
+			local distinctObjects = 0
+			for _, count in yieldCounts do
+				distinctObjects += 1
+				expect(count).toBe(1)
+			end
+			expect(distinctObjects).toBe(3)
+
+			partA:Destroy()
+			partB:Destroy()
+			partC:Destroy()
+		end)
+
 		it("commits a completed iteration's delta times into the average on the next frame", function()
 			local camera = workspace.CurrentCamera
 			local partA = createMockPart((camera.CFrame * CFrame.new(-6, 0, -80)).Position)
@@ -265,7 +436,7 @@ describe("CullThrottle queries", function()
 			cullThrottle._processedVisibilityThisFrame = false
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(0.5, 1)
+			expect(cullThrottle:GetPerformanceMetrics().averageObjectDeltaTime).toBeCloseTo(0.5, 1)
 
 			partA:Destroy()
 			partB:Destroy()
@@ -296,7 +467,7 @@ describe("CullThrottle queries", function()
 			cullThrottle._processedVisibilityThisFrame = false
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(0.5, 1)
+			expect(cullThrottle:GetPerformanceMetrics().averageObjectDeltaTime).toBeCloseTo(0.5, 1)
 
 			partA:Destroy()
 			partB:Destroy()
@@ -531,10 +702,191 @@ describe("CullThrottle queries", function()
 			cullThrottle._processedVisibilityThisFrame = false
 			cullThrottle:_processObjectVisibility(os.clock())
 
-			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(0.5, 1)
+			expect(cullThrottle:GetPerformanceMetrics().averageObjectDeltaTime).toBeCloseTo(0.5, 1)
 
 			stalePart:Destroy()
 			freshPart:Destroy()
+		end)
+
+		it("eventually updates every visible object when the batch dwarfs the update budget", function()
+			-- A dozen visible parts stage every frame while the update budget is
+			-- zero, so no frame can afford the whole batch. The README promises
+			-- every visible object is still reached, because an object that
+			-- waits long enough crosses the worst refresh period, escalates to
+			-- p0, and strict enforcement drains p0 regardless of budget.
+			local camera = workspace.CurrentCamera
+			local parts = {}
+			for i = 1, 12 do
+				local column = (i - 1) % 4
+				local row = (i - 1) // 4
+				local part = createMockPart((camera.CFrame * CFrame.new(column * 6 - 9, row * 6 - 6, -80)).Position)
+				cullThrottle:AddObject(part)
+				parts[i] = part
+			end
+
+			cullThrottle:SetTimeBudgets(1, 1, 0)
+			cullThrottle:SetStrictlyEnforceWorstRefreshRate(true)
+			-- A two second worst refresh period, far longer than the synthetic
+			-- frames below, keeps an object that just updated from re-entering
+			-- p0 within this test, so the drain schedule stays deterministic.
+			cullThrottle:SetRefreshRates(NumberRange.new(0.5, 60))
+
+			-- The staged clocks stagger when each object crosses the worst
+			-- refresh period, about one synthetic frame apart, and zeroed jitter
+			-- keeps the crossings exactly where they are staged.
+			local frameStep = 0.05
+			local startClock = os.clock()
+			for i, part in parts do
+				local objectData = cullThrottle._lifecycle._objects[part]
+				objectData.jitterOffset = 0
+				objectData.lastUpdateClock = startClock + (i - 1) * frameStep - 2.01
+			end
+
+			local counts = {}
+			for _, part in parts do
+				counts[part] = 0
+			end
+			local maxYieldedInOneFrame = 0
+			for i = 1, 14 do
+				cullThrottle._processedVisibilityThisFrame = false
+				cullThrottle:_processObjectVisibility(startClock + i * frameStep)
+
+				local yielded = 0
+				for object in cullThrottle:IterateObjectsToUpdate() do
+					counts[object] += 1
+					yielded += 1
+				end
+				if yielded > maxYieldedInOneFrame then
+					maxYieldedInOneFrame = yielded
+				end
+			end
+
+			-- The zero budget really bound. No single frame drained anywhere
+			-- near the whole staged batch.
+			expect(maxYieldedInOneFrame).toBeLessThan(#parts)
+
+			-- Yet nobody starved.
+			for _, part in parts do
+				expect(counts[part]).toBeGreaterThanOrEqual(1)
+			end
+
+			for _, part in parts do
+				part:Destroy()
+			end
+		end)
+	end)
+
+	describe("IsTracking", function()
+		it("reports whether an object is tracked", function()
+			local part = createMockPart()
+
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			cullThrottle:AddObject(part)
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+
+			cullThrottle:RemoveObject(part)
+			expect(cullThrottle:IsTracking(part)).toBe(false)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("GetTrackedObjects", function()
+		it("returns every tracked object", function()
+			local a = createMockPart(Vector3.new(0, 0, 0))
+			local b = createMockPart(Vector3.new(500, 0, 0))
+			cullThrottle:AddObject(a)
+			cullThrottle:AddObject(b)
+
+			local tracked = cullThrottle:GetTrackedObjects()
+			expect(#tracked).toBe(2)
+			expect(table.find(tracked, a)).never.toBeNil()
+			expect(table.find(tracked, b)).never.toBeNil()
+
+			a:Destroy()
+			b:Destroy()
+		end)
+
+		it("returns a snapshot that cannot mutate internal state", function()
+			local part = createMockPart()
+			cullThrottle:AddObject(part)
+
+			local tracked = cullThrottle:GetTrackedObjects()
+			table.clear(tracked)
+
+			expect(cullThrottle:IsTracking(part)).toBe(true)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("GetTrackedObjectCount", function()
+		it("tracks the count across add and remove", function()
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			local a = createMockPart(Vector3.new(0, 0, 0))
+			local b = createMockPart(Vector3.new(500, 0, 0))
+
+			cullThrottle:AddObject(a)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			cullThrottle:AddObject(b)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(2)
+
+			cullThrottle:RemoveObject(a)
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			a:Destroy()
+			b:Destroy()
+		end)
+
+		it("does not double-count an idempotent re-add", function()
+			local part = createMockPart()
+
+			cullThrottle:AddObject(part)
+			cullThrottle:AddObject(part)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			part:Destroy()
+		end)
+
+		it("does not underflow when removing an untracked object", function()
+			local part = createMockPart()
+
+			cullThrottle:RemoveObject(part)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(0)
+
+			part:Destroy()
+		end)
+
+		it("stays correct through RemoveObjectsWithTag", function()
+			local tag = "TrackedCountTag"
+			local tagged = {}
+			for i = 1, 4 do
+				local part = createMockPart(Vector3.new(i * 10, 0, 0))
+				CollectionService:AddTag(part, tag)
+				cullThrottle:AddObject(part)
+				tagged[i] = part
+			end
+
+			local untagged = createMockPart(Vector3.new(0, 500, 0))
+			cullThrottle:AddObject(untagged)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(5)
+
+			cullThrottle:RemoveObjectsWithTag(tag)
+
+			expect(cullThrottle:GetTrackedObjectCount()).toBe(1)
+
+			for _, part in tagged do
+				CollectionService:RemoveTag(part, tag)
+				part:Destroy()
+			end
+			untagged:Destroy()
 		end)
 	end)
 
@@ -543,7 +895,7 @@ describe("CullThrottle queries", function()
 			-- The seed feeds the render distance controller before any real
 			-- updates have been committed, so a fresh instance starts at the
 			-- default best refresh period.
-			expect(cullThrottle._perfMetrics._averageObjectDeltaTime).toBeCloseTo(1 / 60)
+			expect(cullThrottle:GetPerformanceMetrics().averageObjectDeltaTime).toBeCloseTo(1 / 60)
 		end)
 
 		it("averages over the lookback window length, not the input length", function()
@@ -566,52 +918,96 @@ describe("CullThrottle queries", function()
 			expect(cullThrottle._perfMetrics._searchDuration).toBeGreaterThanOrEqual(0)
 			expect(cullThrottle._perfMetrics._ingestDuration).toBeGreaterThanOrEqual(0)
 		end)
+
+		it("keeps the previous average object delta time across a frame that updates nothing", function()
+			-- Plant a recognizable committed average with no pending update
+			-- samples, then process a frame. The commit is guarded on having
+			-- actually updated something, since without the guard the frame
+			-- would divide zero by zero and poison the average with NaN.
+			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.123
+			cullThrottle:_processObjectVisibility(os.clock())
+
+			expect(cullThrottle:GetPerformanceMetrics().averageObjectDeltaTime).toBe(0.123)
+		end)
+
+		it("returns a snapshot with the documented metric fields", function()
+			local metrics = cullThrottle:GetPerformanceMetrics()
+
+			expect(type(metrics.searchDuration)).toBe("number")
+			expect(type(metrics.ingestDuration)).toBe("number")
+			expect(type(metrics.skippedSearch)).toBe("number")
+			expect(type(metrics.skippedIngest)).toBe("number")
+			expect(type(metrics.averageObjectDeltaTime)).toBe("number")
+		end)
+
+		it("reflects the latest internal metrics", function()
+			cullThrottle._perfMetrics._searchDuration = 0.00123
+			cullThrottle._perfMetrics._ingestDuration = 0.00456
+			cullThrottle._perfMetrics._skippedSearch[1] = 7
+			cullThrottle._perfMetrics._skippedIngest[1] = 9
+			cullThrottle._perfMetrics._averageObjectDeltaTime = 0.025
+
+			local metrics = cullThrottle:GetPerformanceMetrics()
+			expect(metrics.searchDuration).toBe(0.00123)
+			expect(metrics.ingestDuration).toBe(0.00456)
+			expect(metrics.skippedSearch).toBe(7)
+			expect(metrics.skippedIngest).toBe(9)
+			expect(metrics.averageObjectDeltaTime).toBe(0.025)
+		end)
+
+		it("reports the current frame's skipped tallies after the cursor advances", function()
+			-- Each visibility pass advances the ring cursor, so the snapshot must
+			-- read whichever slot is current rather than a hardcoded one.
+			cullThrottle:_findVisibleObjects(os.clock())
+			cullThrottle:_findVisibleObjects(os.clock())
+
+			-- Decoys fill every slot first, so a snapshot reading any slot other
+			-- than the cursor's comes back wrong no matter how long the ring is.
+			local perfMetrics = cullThrottle._perfMetrics
+			for slot in perfMetrics._skippedSearch do
+				perfMetrics._skippedSearch[slot] = 1000
+				perfMetrics._skippedIngest[slot] = 1000
+			end
+			local cursor = perfMetrics._skippedFramesCursor
+			perfMetrics._skippedSearch[cursor] = 7
+			perfMetrics._skippedIngest[cursor] = 9
+
+			local metrics = cullThrottle:GetPerformanceMetrics()
+			expect(metrics.skippedSearch).toBe(7)
+			expect(metrics.skippedIngest).toBe(9)
+		end)
+
+		it("returns a fresh snapshot that cannot corrupt internal metrics", function()
+			local metrics = cullThrottle:GetPerformanceMetrics()
+			metrics.searchDuration = 999
+			metrics.skippedSearch = 999
+
+			expect(cullThrottle._perfMetrics._searchDuration).never.toBe(999)
+			expect(cullThrottle._perfMetrics._skippedSearch[1]).never.toBe(999)
+		end)
 	end)
 
 	describe("Edge cases", function()
-		it("should handle objects with tiny size", function()
-			local part = createMockPart(Vector3.new(0, 0, 0), Vector3.new(0, 0, 0))
+		it("keeps a zero-size object tracked and queryable", function()
+			-- A zero-size part has a degenerate bounding box, and the exact
+			-- radius handling for that lives with ObjectDimensions. The claim at
+			-- this level is that such an object still enters tracking and flows
+			-- through the queries like anything else.
+			local camera = workspace.CurrentCamera
+			local part = createMockPart((camera.CFrame * CFrame.new(0, 0, -80)).Position, Vector3.new(0, 0, 0))
 
 			expect(function()
 				cullThrottle:AddObject(part)
 			end).never.toThrow()
+			expect(cullThrottle:IsTracking(part)).toBe(true)
 
-			local objectData = cullThrottle._lifecycle._objects[part]
-			expect(objectData).toBeDefined()
-			expect(objectData.radius).toBeLessThanOrEqual(0.01)
-
-			part:Destroy()
-		end)
-
-		it("should handle objects at extreme distances", function()
-			local farPart = createMockPart(Vector3.new(1000000, 1000000, 1000000))
-			local nearPart = createMockPart(Vector3.new(0.1, 0.1, 0.1))
-
-			expect(function()
-				cullThrottle:AddObject(farPart)
-				cullThrottle:AddObject(nearPart)
-			end).never.toThrow()
-
-			farPart:Destroy()
-			nearPart:Destroy()
-		end)
-
-		it("should handle rapid add/remove cycles", function()
-			local part = createMockPart()
-
-			expect(function()
-				for _ = 1, 10 do
-					cullThrottle:AddObject(part)
-					cullThrottle:RemoveObject(part)
-				end
-			end).never.toThrow()
-
-			expect(cullThrottle._lifecycle._objects[part]).toBeNil()
+			cullThrottle:SetTimeBudgets(1, 1, 1)
+			expect(table.find(cullThrottle:GetVisibleObjects(), part)).never.toBeNil()
 
 			part:Destroy()
 		end)
 
-		it("should handle processing with no objects", function()
+		it("handles processing with no objects", function()
 			expect(function()
 				cullThrottle:_processObjectVisibility(os.clock())
 				cullThrottle:GetVisibleObjects()

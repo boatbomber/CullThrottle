@@ -27,12 +27,35 @@ describe("RenderDistanceController", function()
 	end)
 
 	--[[
-		Stages the perf metrics so the worst weighted load lands deep in shrink
-		territory against the default budgets.
+		Stages the search duration far over its default budget while the ingest
+		duration and the update pace sit under the grow headroom, so the search
+		term alone votes the shrink.
 	]]
-	local function stageHeavyLoad()
+	local function stageSearchOverrun()
 		cullThrottle._perfMetrics._searchDuration = 0.01
+		cullThrottle._perfMetrics._ingestDuration = 0.0001
+		cullThrottle._perfMetrics._averageObjectDeltaTime = 0.01
+	end
+
+	--[[
+		Stages the ingest duration far over its default budget while the search
+		duration and the update pace sit under the grow headroom, so the ingest
+		term alone votes the shrink.
+	]]
+	local function stageIngestOverrun()
+		cullThrottle._perfMetrics._searchDuration = 0.0001
 		cullThrottle._perfMetrics._ingestDuration = 0.01
+		cullThrottle._perfMetrics._averageObjectDeltaTime = 0.01
+	end
+
+	--[[
+		Stages the per-object update pace far past the refresh period midpoint
+		while both pass durations sit under the grow headroom, so the pace term
+		alone votes the shrink.
+	]]
+	local function stageSlowUpdatePace()
+		cullThrottle._perfMetrics._searchDuration = 0.0001
+		cullThrottle._perfMetrics._ingestDuration = 0.0001
 		cullThrottle._perfMetrics._averageObjectDeltaTime = 1
 	end
 
@@ -62,26 +85,25 @@ describe("RenderDistanceController", function()
 		move it took.
 	]]
 	local function adjustOnce(): number
-		local before = cullThrottle._config.renderDistance
+		local before = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
-		return cullThrottle._config.renderDistance - before
+		return cullThrottle:GetRenderDistance() - before
 	end
 
-	it("should adjust render distance when performance is poor", function()
+	it("shrinks the render distance when the search load runs over budget", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
-		-- The staged durations sit far past their budgets (the default search
-		-- budget alone is 0.0008s), so the worst weighted load lands deep in
-		-- shrink territory.
-		stageHeavyLoad()
+		-- The staged search duration sits far past the default 0.0008s search
+		-- budget, so the worst weighted load lands deep in shrink territory.
+		stageSearchOverrun()
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeLessThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
 	end)
 
-	it("should increase render distance when performance is good", function()
+	it("grows the render distance when every load sits under the grow headroom", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
 		-- The staged durations all sit under the grow headroom (60 percent of
@@ -90,10 +112,10 @@ describe("RenderDistanceController", function()
 		-- light the load is.
 		stageLightLoad()
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeGreaterThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(originalDistance)
 	end)
 
 	it("holds the render distance when the worst load sits inside the deadband", function()
@@ -105,10 +127,10 @@ describe("RenderDistanceController", function()
 		-- exists to prevent.
 		stageDeadbandLoad()
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBe(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBe(originalDistance)
 	end)
 
 	it("forces a shrink when the search pass skipped voxels despite light load", function()
@@ -122,10 +144,10 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._skippedSearch = { 1, 0, 0, 0 }
 		cullThrottle._perfMetrics._skippedIngest = { 0, 0, 0, 0 }
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeLessThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
 	end)
 
 	it("forces a shrink when the ingest pass skipped voxels even with the search budget off", function()
@@ -142,10 +164,30 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._skippedIngest = { 1, 0, 0, 0 }
 		cullThrottle._perfMetrics._skippedSearch = { 0, 0, 0, 0 }
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeLessThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
+	end)
+
+	it("resumes growing once the skipped frames age out of the ring", function()
+		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
+
+		-- A recent skipped frame forces a shrink even though every load reads
+		-- light.
+		stageLightLoad()
+		cullThrottle._perfMetrics._skippedSearch = { 1, 0, 0, 0 }
+		local originalDistance = cullThrottle:GetRenderDistance()
+		cullThrottle._renderDistanceController:adjust()
+		local shrunkDistance = cullThrottle:GetRenderDistance()
+		expect(shrunkDistance).toBeLessThan(originalDistance)
+
+		-- The skip pressure must release once the skipped frame ages out of
+		-- the lookback ring rather than latching. With the ring back at zeros
+		-- and the load still light, growth resumes on the very next adjustment.
+		cullThrottle._perfMetrics._skippedSearch = { 0, 0, 0, 0 }
+		cullThrottle._renderDistanceController:adjust()
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(shrunkDistance)
 	end)
 
 	it("shrinks when only one of the three loads runs over budget", function()
@@ -162,24 +204,55 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._ingestDuration = 0.00005
 		cullThrottle._perfMetrics._averageObjectDeltaTime = 0.005
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeLessThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
 	end)
 
-	it("damps the step when the direction reverses", function()
+	it("shrinks when the ingest load alone runs over budget", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
-		-- The first move shrinks under heavy load, taking the full step clamped
-		-- to the cap.
-		stageHeavyLoad()
+		-- Only the staged ingest duration runs over its budget, while the
+		-- search duration and the update pace read light. The ingest term must
+		-- carry the shrink on its own, so a controller missing that term would
+		-- read pure headroom here and grow instead.
+		stageIngestOverrun()
+
+		local originalDistance = cullThrottle:GetRenderDistance()
+		cullThrottle._renderDistanceController:adjust()
+
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
+	end)
+
+	it("shrinks when the update pace alone falls behind the refresh midpoint", function()
+		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
+
+		-- Only the per-object delta runs past the refresh period midpoint,
+		-- while both pass durations read light. The pace term must carry the
+		-- shrink on its own, so a controller missing that term would read pure
+		-- headroom here and grow instead.
+		stageSlowUpdatePace()
+
+		local originalDistance = cullThrottle:GetRenderDistance()
+		cullThrottle._renderDistanceController:adjust()
+
+		expect(cullThrottle:GetRenderDistance()).toBeLessThan(originalDistance)
+	end)
+
+	it("recovers from a single overrun spike with one shrink and a damped reversal", function()
+		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
+
+		-- One frame's search load spikes over budget and the controller
+		-- shrinks once at the full step.
+		stageSearchOverrun()
 		local shrinkDelta = -adjustOnce()
 		expect(shrinkDelta).toBeGreaterThan(0)
 
-		-- The load lifts and the next move reverses into a grow. A reversal
-		-- damps the step rather than swinging back equally, so the grow must
-		-- move strictly less than the shrink it answers.
+		-- The load reads healthy again on the very next frame, so the recovery
+		-- grow is a reversal. A reversal damps the step rather than swinging
+		-- back equally, so the grow must move strictly less than the shrink it
+		-- answers instead of bouncing the distance around one bad frame.
 		stageLightLoad()
 		local growDelta = adjustOnce()
 
@@ -190,17 +263,21 @@ describe("RenderDistanceController", function()
 	it("accelerates the step while the direction stays consistent", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
-		-- The first move from rest pegs the step at its cap, so acceleration
-		-- only becomes observable after a reversal damps the step back down.
-		-- One heavy frame shrinks at the pegged step.
-		stageHeavyLoad()
-		local peggedDelta = -adjustOnce()
-		expect(peggedDelta).toBeGreaterThan(0)
+		-- The controller clamps its step to 0.025 of the range midpoint, so no
+		-- single move may exceed this bound no matter how long a streak runs.
+		local maxMove = 0.025 * cullThrottle._config.renderDistanceMidpoint
+
+		-- The first move from rest takes the full starting step, so
+		-- acceleration only becomes observable after a reversal damps the step
+		-- back down. One overrun frame shrinks first, moving within the cap.
+		stageSearchOverrun()
+		local firstShrinkDelta = -adjustOnce()
+		expect(firstShrinkDelta).toBeGreaterThan(0)
+		expect(firstShrinkDelta).toBeLessThanOrEqual(maxMove + 1e-9)
 
 		-- The load then lifts for good. The reversal damps the first grow, and
 		-- every grow after it accelerates while the direction holds, so the
-		-- streak's moves must take strictly increasing deltas without ever
-		-- outrunning the pegged cap.
+		-- streak's moves must take strictly increasing deltas.
 		stageLightLoad()
 		local deltas = {}
 		for i = 1, 4 do
@@ -209,30 +286,39 @@ describe("RenderDistanceController", function()
 
 		for i = 1, 4 do
 			expect(deltas[i]).toBeGreaterThan(0)
-			expect(deltas[i]).toBeLessThan(peggedDelta)
+			expect(deltas[i]).toBeLessThanOrEqual(maxMove + 1e-9)
 			if i > 1 then
 				expect(deltas[i]).toBeGreaterThan(deltas[i - 1])
 			end
 		end
 
-		-- A long enough streak climbs the step back up to the cap, where the
-		-- moves level off at the pegged size instead of growing without bound.
-		for _ = 1, 3 do
-			adjustOnce()
+		-- A long enough streak climbs the step to its cap, where consecutive
+		-- moves level off instead of growing without bound.
+		local previousMove = deltas[4]
+		local leveledOff = false
+		for _ = 1, 32 do
+			local move = adjustOnce()
+			expect(move).toBeLessThanOrEqual(maxMove + 1e-9)
+			if move <= previousMove + 1e-9 then
+				leveledOff = true
+				break
+			end
+			previousMove = move
 		end
-		expect(adjustOnce()).toBeCloseTo(peggedDelta, 5)
+		expect(leveledOff).toBe(true)
 	end)
 
 	it("keeps damping the step for every frame it settles in the deadband", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
 		--[[
-			Pegs the step with one heavy shrink, settles in the deadband for the
-			given number of frames, then returns the grow move that follows.
+			Takes one full-step shrink under an overrun, settles in the deadband
+			for the given number of frames, then returns the grow move that
+			follows.
 		]]
 		local function growAfterSettling(deadbandFrames: number): number
 			cullThrottle._renderDistanceController:reset()
-			stageHeavyLoad()
+			stageSearchOverrun()
 			adjustOnce()
 			stageDeadbandLoad()
 			for _ = 1, deadbandFrames do
@@ -259,15 +345,16 @@ describe("RenderDistanceController", function()
 	it("damps oscillating moves down to a nonzero floor instead of deadlocking", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
-		-- The load flips between heavy and light on every adjustment, so every
-		-- move after the first is a reversal and the controller damps over and
-		-- over. The step must converge on its floor rather than damping toward
-		-- zero, because a step that damped all the way out would leave the
-		-- controller unable to respond once the scene actually changed.
+		-- The load flips between an overrun and light on every adjustment, so
+		-- every move after the first is a reversal and the controller damps
+		-- over and over. The step must converge on its floor rather than
+		-- damping toward zero, because a step that damped all the way out
+		-- would leave the controller unable to respond once the scene actually
+		-- changed.
 		local magnitudes = {}
 		for cycle = 1, 24 do
 			if cycle % 2 == 1 then
-				stageHeavyLoad()
+				stageSearchOverrun()
 			else
 				stageLightLoad()
 			end
@@ -304,10 +391,10 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._averageObjectDeltaTime = 0.01
 		cullThrottle._perfMetrics._skippedIngest = { 0, 0, 0, 0 }
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeGreaterThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(originalDistance)
 	end)
 
 	it("ignores the ingest pass when its budget is zero", function()
@@ -323,10 +410,10 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._averageObjectDeltaTime = 0.01
 		cullThrottle._perfMetrics._skippedSearch = { 0, 0, 0, 0 }
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeGreaterThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(originalDistance)
 	end)
 
 	it("ignores the update pace when the update budget is zero", function()
@@ -340,23 +427,44 @@ describe("RenderDistanceController", function()
 		cullThrottle._perfMetrics._searchDuration = 0.0001
 		cullThrottle._perfMetrics._ingestDuration = 0.0001
 
-		local originalDistance = cullThrottle._config.renderDistance
+		local originalDistance = cullThrottle:GetRenderDistance()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBeGreaterThan(originalDistance)
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(originalDistance)
 	end)
 
-	it("should respect min and max render distance limits", function()
+	it("grows toward the max when every budget is zero", function()
+		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
+		cullThrottle:SetTimeBudgets(0, 0, 0)
+
+		-- With every pass configured off, no constraint gets a vote no matter
+		-- what the metrics read, and reading no signal as full headroom is the
+		-- intended choice. The distance drifts toward the configured max
+		-- rather than freezing wherever it happened to sit. The staged
+		-- overruns and skip rings pin that none of them can sneak a vote in.
+		cullThrottle._perfMetrics._searchDuration = 0.01
+		cullThrottle._perfMetrics._ingestDuration = 0.01
+		cullThrottle._perfMetrics._averageObjectDeltaTime = 1
+		cullThrottle._perfMetrics._skippedSearch = { 9, 9, 9, 9 }
+		cullThrottle._perfMetrics._skippedIngest = { 9, 9, 9, 9 }
+
+		local originalDistance = cullThrottle:GetRenderDistance()
+		cullThrottle._renderDistanceController:adjust()
+
+		expect(cullThrottle:GetRenderDistance()).toBeGreaterThan(originalDistance)
+	end)
+
+	it("clamps adjustments at the render distance bounds", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 
 		-- The distance starts barely above the floor and the staged shrink
 		-- moves far more than that gap, so the clamp must catch the move
 		-- exactly at the minimum rather than letting it pass below.
 		cullThrottle._config.renderDistance = cullThrottle._config.minRenderDistance + 1
-		stageHeavyLoad()
+		stageSearchOverrun()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBe(cullThrottle._config.minRenderDistance)
+		expect(cullThrottle:GetRenderDistance()).toBe(cullThrottle:GetRenderDistanceRange().Min)
 
 		-- The same idea mirrored at the ceiling, where a light load grows
 		-- across the gap and the clamp must catch the move exactly at the
@@ -365,29 +473,28 @@ describe("RenderDistanceController", function()
 		stageLightLoad()
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBe(cullThrottle._config.maxRenderDistance)
+		expect(cullThrottle:GetRenderDistance()).toBe(cullThrottle:GetRenderDistanceRange().Max)
 	end)
 
-	it("should not adjust render distance for a zero-width range", function()
+	it("holds the render distance still for a zero-width range", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(500, 500))
 
-		stageHeavyLoad()
+		stageSearchOverrun()
 
 		cullThrottle._renderDistanceController:adjust()
 
-		expect(cullThrottle._config.renderDistance).toBe(500)
+		expect(cullThrottle:GetRenderDistance()).toBe(500)
 	end)
 
 	it("starts with fresh momentum when the range changes", function()
 		cullThrottle:SetRenderDistanceRange(NumberRange.new(200, 2500))
 		local oldMidpoint = cullThrottle._config.renderDistanceMidpoint
 
-		-- Drive a shrink streak so the controller builds momentum (a pegged
-		-- step and a shrink direction). The first move pegs the step, so its
-		-- fraction of the midpoint is the largest fraction any single move can
-		-- take.
-		stageHeavyLoad()
-		local peggedFraction = -adjustOnce() / oldMidpoint
+		-- Drive a shrink streak so the controller builds momentum (an
+		-- accelerated step and a shrink direction). The first move's fraction
+		-- of the midpoint is what a first move from rest takes in any range.
+		stageSearchOverrun()
+		local firstMoveFraction = -adjustOnce() / oldMidpoint
 		for _ = 1, 2 do
 			cullThrottle._renderDistanceController:adjust()
 		end
@@ -400,9 +507,12 @@ describe("RenderDistanceController", function()
 		local midpoint = cullThrottle._config.renderDistanceMidpoint
 		local growFraction = adjustOnce() / midpoint
 
-		-- A first move from rest takes the same pegged step fraction the old
-		-- range's first move took, while leftover shrink momentum would read
-		-- the grow as a reversal and damp it to a fraction of that.
-		expect(growFraction).toBeCloseTo(peggedFraction, 5)
+		-- A first move from rest grows by no more than the step cap's 0.025 of
+		-- the midpoint, and it comes out no smaller than the old range's first
+		-- move (a whisker of float slack aside). Leftover shrink momentum
+		-- would instead read the grow as a reversal and damp it to a fraction
+		-- of that.
+		expect(growFraction).toBeGreaterThan(firstMoveFraction * 0.99)
+		expect(growFraction).toBeLessThanOrEqual(0.025 + 1e-9)
 	end)
 end)

@@ -98,7 +98,9 @@ function ObjectLifecycle.pollPhysicsObjects(self: ObjectLifecycle, timeBudget: n
 
 	while os.clock() - now < timeBudget do
 		local object = self._physicsObjects[self._physicsObjectIterIndex]
-		self._physicsObjectIterIndex = self._physicsObjectIterIndex % #self._physicsObjects + 1
+		-- Nothing in this loop mutates the list, so the length hoisted above
+		-- stays true for the whole poll.
+		self._physicsObjectIterIndex = self._physicsObjectIterIndex % numPhysicsObjects + 1
 
 		if object then
 			local objectData = self._objects[object]
@@ -265,11 +267,7 @@ function ObjectLifecycle.removeObject(self: ObjectLifecycle, object: Instance)
 	-- ObjectRemoved, not ObjectExitedView.
 	self._signals:forget(objectData)
 
-	-- Drop any pending voxel-update entry. remove() only consults the heap, not
-	-- the not-yet-enqueued incoming batch, but an entry still in the batch is
-	-- harmless because it gets enqueued and then discarded by the not-objectData
-	-- guard next frame.
-	self._grid._updateObjectVoxelsQueue:remove(object)
+	self._grid:cancelQueuedUpdate(object)
 
 	local physicsObjectIndex = objectData.physicsObjectIndex
 	if physicsObjectIndex ~= 0 then
@@ -297,6 +295,21 @@ function ObjectLifecycle.removeObject(self: ObjectLifecycle, object: Instance)
 end
 
 --[[
+	Adds one tagged instance, choosing physics tracking for unanchored
+	BaseParts. captureTag pcalls this per instance, so it lives here as a
+	plain module function instead of a fresh closure per add. The variadic
+	return annotation is for the pcall wrapping, whose error slot needs the
+	callee to admit more than zero results.
+]]
+local function addTaggedObject(self: ObjectLifecycle, object: Instance): ...any
+	if object:IsA("BasePart") and object.Anchored == false then
+		self:addPhysicsObject(object)
+	else
+		self:addObject(object)
+	end
+end
+
+--[[
 	Tracks every instance carrying the tag, now and as the tag set changes.
 	Capturing a tag is a bulk, declarative operation where the caller tags a set
 	of instances and expects CullThrottle to track whatever it can. But a tagged
@@ -319,13 +332,9 @@ function ObjectLifecycle.captureTag(self: ObjectLifecycle, tag: string)
 	self:releaseTag(tag)
 
 	local function tryAddTaggedObject(object: Instance)
-		local ok, err = pcall(function()
-			if object:IsA("BasePart") and object.Anchored == false then
-				self:addPhysicsObject(object)
-			else
-				self:addObject(object)
-			end
-		end)
+		-- The pcall takes the add function and its arguments directly, so a
+		-- bulk capture doesn't allocate a wrapper closure per instance.
+		local ok, err = pcall(addTaggedObject, self, object)
 		if not ok then
 			warn(`[CullThrottle] Skipping tagged instance {object:GetFullName()}: {err}`)
 		end

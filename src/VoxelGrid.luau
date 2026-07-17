@@ -410,16 +410,23 @@ function VoxelGrid.removeFromVoxel(self: VoxelGrid, voxelKey: types.VoxelKey, ob
 				end
 			end
 		end
-	elseif n == objectIndex then
-		voxel[objectIndex] = nil
 	else
-		-- To avoid shifting the whole array, we take the
-		-- last object and move it to overwrite this one,
-		-- since order doesn't matter in this list.
-		local lastObject = voxel[n]
+		-- To avoid shifting the whole array, the last object overwrites this
+		-- one (a self-assignment when they coincide), since order doesn't
+		-- matter in this list.
+		voxel[objectIndex] = voxel[n]
 		voxel[n] = nil
-		voxel[objectIndex] = lastObject
 	end
+end
+
+--[[
+	Drops any pending voxel-update queue entry for the object. Only the heap
+	is consulted, not the not-yet-enqueued incoming batch, but an entry still
+	in the batch is harmless because it gets enqueued and then discarded by
+	the missing-objectData guard on the next maintenance pass.
+]]
+function VoxelGrid.cancelQueuedUpdate(self: VoxelGrid, object: Instance)
+	self._updateObjectVoxelsQueue:remove(object)
 end
 
 --[[

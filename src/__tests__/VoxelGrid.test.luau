@@ -12,6 +12,7 @@ local afterEach = JestGlobals.afterEach
 local CullThrottlePackage = Packages:WaitForChild("CullThrottle")
 local CullThrottle = require(CullThrottlePackage)
 local Frustum = require(CullThrottlePackage:WaitForChild("Frustum"))
+local VoxelGrid = require(CullThrottlePackage:WaitForChild("VoxelGrid"))
 local Utilities = CullThrottlePackage:WaitForChild("Utilities")
 local CameraCache = require(Utilities:WaitForChild("CameraCache"))
 
@@ -24,7 +25,7 @@ local roomyFrustumPlanes = TestHelpers.roomyFrustumPlanes
 
 --[[
 	Sweeps every voxel in the oriented box's world AABB and asserts the fill
-	left empty each candidate whose center sits provably outside the box,
+	left empty each candidate whose center sits outside the box,
 	meaning farther past one of the box's face planes than the face extent plus
 	the half-voxel-diagonal inflation the fill may legitimately keep. Returns
 	how many such clearly outside candidates it checked, so callers can require
@@ -80,8 +81,8 @@ describe("VoxelGrid", function()
 		cullThrottle = nil
 	end)
 
-	describe("Voxel operations", function()
-		it("should insert object to voxel correctly", function()
+	describe("Voxel insert and remove", function()
+		it("inserts an object into its voxel", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()
 			local objectData = stubObjectData(part)
@@ -94,7 +95,7 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should remove the requested object and keep the others in the voxel", function()
+		it("removes the requested object and keeps the others in the voxel", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local partA = createMockPart()
 			local partB = createMockPart()
@@ -117,7 +118,8 @@ describe("VoxelGrid", function()
 			expect(table.find(voxel, dataC)).toBeDefined()
 			expect(table.find(voxel, dataB)).toBeNil()
 
-			-- Removing the entry that now sits last takes the tail fast path.
+			-- Removing the entry that now sits last swap-assigns it onto itself
+			-- before the tail slot is trimmed.
 			cullThrottle._grid:removeFromVoxel(voxelKey, dataC)
 			expect(#voxel).toBe(1)
 			expect(voxel[1]).toBe(dataA)
@@ -127,7 +129,7 @@ describe("VoxelGrid", function()
 			partC:Destroy()
 		end)
 
-		it("should clean up empty voxels", function()
+		it("cleans up empty voxels", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()
 			local objectData = stubObjectData(part)
@@ -139,7 +141,9 @@ describe("VoxelGrid", function()
 
 			part:Destroy()
 		end)
+	end)
 
+	describe("Occupancy generation", function()
 		it("moves the occupancy generation exactly when the occupied key set changes", function()
 			local grid = cullThrottle._grid
 			local voxelKey = Vector3.new(1, 1, 1)
@@ -148,10 +152,11 @@ describe("VoxelGrid", function()
 			local dataA = stubObjectData(partA)
 			local dataB = stubObjectData(partB)
 
-			-- Creating the voxel changes the occupied key set.
+			-- Creating the voxel changes the occupied key set. The replay gate
+			-- only needs the counter to move, not any particular step size.
 			local generation = grid._occupancyGeneration
 			grid:insertToVoxel(voxelKey, dataA)
-			expect(grid._occupancyGeneration).toBe(generation + 1)
+			expect(grid._occupancyGeneration).never.toBe(generation)
 
 			-- A second object in the same voxel doesn't, and neither does
 			-- removing it while the voxel stays occupied, so a still frame
@@ -164,13 +169,42 @@ describe("VoxelGrid", function()
 
 			-- Emptying the voxel changes the set again.
 			grid:removeFromVoxel(voxelKey, dataA)
-			expect(grid._occupancyGeneration).toBe(generation + 1)
+			expect(grid._occupancyGeneration).never.toBe(generation)
 
 			partA:Destroy()
 			partB:Destroy()
 		end)
 
-		it("should clear cached voxel visibility when a voxel empties", function()
+		it("moves the occupancy generation when clearAll rebuilds the grid empty", function()
+			local part = createMockPart()
+			cullThrottle._grid:insertToVoxel(Vector3.new(1, 1, 1), stubObjectData(part))
+
+			-- The search's whole-frame replay gate watches this counter, and a
+			-- wholesale clear changes the occupied key set as much as anything
+			-- can, so the counter must move.
+			local generation = cullThrottle._grid._occupancyGeneration
+			cullThrottle._grid:clearAll()
+			expect(cullThrottle._grid._occupancyGeneration).never.toBe(generation)
+
+			part:Destroy()
+		end)
+
+		it("moves the occupancy generation on destroy", function()
+			local part = createMockPart()
+			cullThrottle._grid:insertToVoxel(Vector3.new(1, 1, 1), stubObjectData(part))
+
+			-- Destroy empties the grid like clearAll does, so a replay armed
+			-- against the old occupancy must see the counter move here too.
+			local generation = cullThrottle._grid._occupancyGeneration
+			cullThrottle._grid:destroy()
+			expect(cullThrottle._grid._occupancyGeneration).never.toBe(generation)
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("Cache eviction", function()
+		it("clears cached voxel visibility when a voxel empties", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()
 			local objectData = stubObjectData(part)
@@ -189,7 +223,7 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should keep cached voxel visibility while the voxel still holds objects", function()
+		it("keeps cached voxel visibility while the voxel still holds objects", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part1 = createMockPart()
 			local part2 = createMockPart()
@@ -212,7 +246,7 @@ describe("VoxelGrid", function()
 			part2:Destroy()
 		end)
 
-		it("should clear a cached bucket verdict when its coarse bucket empties", function()
+		it("clears a cached bucket verdict when its coarse bucket empties", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local coarseKey = Vector3.new(0, 0, 0)
 			local part = createMockPart()
@@ -232,7 +266,7 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should keep a cached bucket verdict while the bucket still holds voxels", function()
+		it("keeps a cached bucket verdict while the bucket still holds voxels", function()
 			local coarseKey = Vector3.new(0, 0, 0)
 			local partA = createMockPart()
 			local partB = createMockPart()
@@ -252,8 +286,10 @@ describe("VoxelGrid", function()
 			partA:Destroy()
 			partB:Destroy()
 		end)
+	end)
 
-		it("should add a new voxel to the coarse grid", function()
+	describe("Coarse bucket index", function()
+		it("adds a new voxel to the coarse grid", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()
 
@@ -269,7 +305,7 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should drop a voxel from the coarse grid when it empties", function()
+		it("drops a voxel from the coarse grid when it empties", function()
 			local voxelKey = Vector3.new(1, 1, 1)
 			local part = createMockPart()
 			local objectData = stubObjectData(part)
@@ -284,7 +320,7 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should keep co-located voxels in the coarse grid when one empties", function()
+		it("keeps co-located voxels in the coarse grid when one empties", function()
 			-- These two distinct voxels share one coarse bucket (COARSE_VOXEL_SIZE is 4).
 			local voxelKeyA = Vector3.new(0, 0, 0)
 			local voxelKeyB = Vector3.new(1, 0, 0)
@@ -306,7 +342,7 @@ describe("VoxelGrid", function()
 			partB:Destroy()
 		end)
 
-		it("should filter out edge-bucket voxels that fall outside the queried box", function()
+		it("filters out edge-bucket voxels that fall outside the queried box", function()
 			-- Both voxels share coarse bucket (0,0,0) but only one is inside the box.
 			local insideKey = Vector3.new(1, 1, 1)
 			local outsideKey = Vector3.new(3, 1, 1)
@@ -326,7 +362,7 @@ describe("VoxelGrid", function()
 			outsidePart:Destroy()
 		end)
 
-		it("should seed occupied voxels at negative coordinates", function()
+		it("seeds occupied voxels at negative coordinates", function()
 			-- Bucket keys floor-divide voxel coordinates, so both voxels here land
 			-- in bucket (-1, 0, -1) rather than wrapping toward bucket zero, and
 			-- the scan range must reach them when the query box crosses the origin.
@@ -354,29 +390,102 @@ describe("VoxelGrid", function()
 			part:Destroy()
 		end)
 
-		it("should grow the coarse bounds when an insert lands outside them", function()
-			-- The first insert anchors the occupied bounds around its own bucket.
-			-- A later insert in a far bucket must grow them, or the seed scan's
-			-- clamp would silently cut the new bucket out of every search.
-			local partA = createMockPart()
-			local partB = createMockPart()
-			cullThrottle._grid:insertToVoxel(Vector3.new(1, 1, 1), stubObjectData(partA))
-			cullThrottle._grid:insertToVoxel(Vector3.new(1, 41, 1), stubObjectData(partB))
+		-- The roomy frustum fixture faces +Y, so the growth tests steer it toward
+		-- the other five directions with an axis mapping applied to every plane
+		-- position and normal. Each mapping is orthogonal (axis swaps and sign
+		-- flips preserve dot products), and it carries the fixture's fully-inside
+		-- far bucket onto a real bucket box in the target direction, so the
+		-- mapped planes classify that bucket exactly the way the fixture
+		-- classifies its own.
+		local function mapPlanes(map: (Vector3) -> Vector3): { Vector3 }
+			local mapped = table.create(#roomyFrustumPlanes)
+			for i, plane in roomyFrustumPlanes do
+				mapped[i] = map(plane)
+			end
+			return mapped
+		end
 
-			-- The query box covers only the far bucket, which sits fully inside
-			-- the roomy frustum, so its voxel arrives through the bucket verdict's
-			-- bulk append.
-			local search = cullThrottle._search
-			search:seedSearchVolumes(roomyFrustumPlanes, 0, 40, 0, 4, 44, 4)
+		local growthDirections = {
+			{
+				name = "+Y",
+				map = function(v: Vector3): Vector3
+					return v
+				end,
+			},
+			{
+				name = "-Y",
+				map = function(v: Vector3): Vector3
+					return Vector3.new(v.X, -v.Y, v.Z)
+				end,
+			},
+			{
+				name = "+X",
+				map = function(v: Vector3): Vector3
+					return Vector3.new(v.Y, v.X, v.Z)
+				end,
+			},
+			{
+				name = "-X",
+				map = function(v: Vector3): Vector3
+					return Vector3.new(-v.Y, v.X, v.Z)
+				end,
+			},
+			{
+				name = "+Z",
+				map = function(v: Vector3): Vector3
+					return Vector3.new(v.X, v.Z, v.Y)
+				end,
+			},
+			{
+				name = "-Z",
+				map = function(v: Vector3): Vector3
+					return Vector3.new(v.X, v.Z, -v.Y)
+				end,
+			},
+		}
 
-			expect(search._visibleVoxelCount).toBe(1)
-			expect(search._pendingVoxelKeys[1]).toBe(Vector3.new(1, 41, 1))
+		for _, direction in growthDirections do
+			it("grows the coarse bounds when an insert lands past them toward " .. direction.name, function()
+				-- The first insert anchors the occupied bounds around its own
+				-- bucket. A later insert in a far bucket must grow them, or the
+				-- seed scan's clamp would silently cut the new bucket out of
+				-- every search. Each direction lands in its own branch of the
+				-- six-way growth ladder, so a transposed field in any branch
+				-- fails exactly one of these cases.
+				local partA = createMockPart()
+				local partB = createMockPart()
+				local farKey = direction.map(Vector3.new(1, 41, 1))
+				cullThrottle._grid:insertToVoxel(Vector3.new(1, 1, 1), stubObjectData(partA))
+				cullThrottle._grid:insertToVoxel(farKey, stubObjectData(partB))
 
-			partA:Destroy()
-			partB:Destroy()
-		end)
+				-- The query box covers only the far bucket, which sits fully
+				-- inside the mapped frustum, so its voxel arrives in the visible
+				-- output through the bucket verdict's bulk append.
+				local coarseSize = VoxelGrid.COARSE_VOXEL_SIZE
+				local x0 = (farKey.X // coarseSize) * coarseSize
+				local y0 = (farKey.Y // coarseSize) * coarseSize
+				local z0 = (farKey.Z // coarseSize) * coarseSize
+				local search = cullThrottle._search
+				search:seedSearchVolumes(
+					mapPlanes(direction.map),
+					x0,
+					y0,
+					z0,
+					x0 + coarseSize,
+					y0 + coarseSize,
+					z0 + coarseSize
+				)
+				search:sortVisibleVoxelKeys()
 
-		it("should re-anchor the coarse bounds at the first insert after the grid empties", function()
+				expect(search._visibleVoxelCount).toBe(1)
+				expect(search._visibleVoxelKeys[1]).toBe(farKey)
+
+				partA:Destroy()
+				partB:Destroy()
+			end)
+		end
+
+		it("re-anchors the coarse bounds at the first insert after the grid empties", function()
 			-- clearAll empties the grid for a voxel size change and leaves the old
 			-- bounds behind with the dirty flag down, so the first insert
 			-- afterwards must re-anchor the bounds at its own bucket. Growing the
@@ -391,21 +500,62 @@ describe("VoxelGrid", function()
 			cullThrottle._grid:insertToVoxel(Vector3.new(1, 41, 1), stubObjectData(partB))
 
 			-- The bounds hug the lone occupied bucket on both sides, which proves
-			-- a re-anchor rather than a union with the stale box.
-			expect(cullThrottle._grid._coarseMinY).toBe(10)
-			expect(cullThrottle._grid._coarseMaxY).toBe(10)
+			-- a re-anchor rather than a union with the stale box. Voxel y = 41
+			-- lands in coarse bucket 41 // COARSE_VOXEL_SIZE.
+			local expectedCoarseY = 41 // VoxelGrid.COARSE_VOXEL_SIZE
+			expect(cullThrottle._grid._coarseMinY).toBe(expectedCoarseY)
+			expect(cullThrottle._grid._coarseMaxY).toBe(expectedCoarseY)
 
 			local search = cullThrottle._search
 			search:seedSearchVolumes(roomyFrustumPlanes, 0, 40, 0, 4, 44, 4)
+			search:sortVisibleVoxelKeys()
 
 			expect(search._visibleVoxelCount).toBe(1)
-			expect(search._pendingVoxelKeys[1]).toBe(Vector3.new(1, 41, 1))
+			expect(search._visibleVoxelKeys[1]).toBe(Vector3.new(1, 41, 1))
 
 			partA:Destroy()
 			partB:Destroy()
 		end)
 
-		it("should stage a clean enter and leave diff when the object moves", function()
+		it("keeps a surviving bucket findable after the lazy bounds recompute", function()
+			-- Two occupied buckets stretch the bounds. Emptying the one on the
+			-- bounds surface arms the lazy recompute, which the next seed scan
+			-- runs before clamping. The survivor sits in an asymmetric bucket, so
+			-- a recompute that transposes axes or clamps live buckets out of the
+			-- box makes this scan come back empty.
+			local partA = createMockPart()
+			local partB = createMockPart()
+			local dataB = stubObjectData(partB)
+			local survivorKey = Vector3.new(5, 41, 9)
+			cullThrottle._grid:insertToVoxel(survivorKey, stubObjectData(partA))
+			cullThrottle._grid:insertToVoxel(Vector3.new(41, 1, 1), dataB)
+
+			-- The emptied bucket sat on the bounds surface, so the recompute must
+			-- actually be armed for the scan below to exercise it.
+			cullThrottle._grid:removeFromVoxel(Vector3.new(41, 1, 1), dataB)
+			expect(cullThrottle._grid._coarseBoundsDirty).toBe(true)
+
+			-- The query box covers only the survivor's bucket, which sits fully
+			-- inside the roomy frustum, so its voxel arrives through the bucket
+			-- verdict's bulk append.
+			local coarseSize = VoxelGrid.COARSE_VOXEL_SIZE
+			local x0 = (survivorKey.X // coarseSize) * coarseSize
+			local y0 = (survivorKey.Y // coarseSize) * coarseSize
+			local z0 = (survivorKey.Z // coarseSize) * coarseSize
+			local search = cullThrottle._search
+			search:seedSearchVolumes(roomyFrustumPlanes, x0, y0, z0, x0 + coarseSize, y0 + coarseSize, z0 + coarseSize)
+			search:sortVisibleVoxelKeys()
+
+			expect(search._visibleVoxelCount).toBe(1)
+			expect(search._visibleVoxelKeys[1]).toBe(survivorKey)
+
+			partA:Destroy()
+			partB:Destroy()
+		end)
+	end)
+
+	describe("Desired-voxel diff", function()
+		it("stages a clean enter and leave diff when the object moves", function()
 			cullThrottle:SetVoxelSize(100)
 
 			local part = createMockPart(Vector3.new(0, 0, 0))
@@ -460,6 +610,28 @@ describe("VoxelGrid", function()
 				expect(occurrences).toBe(1)
 			end
 			expect(cullThrottle._grid._voxels[Vector3.new(-1, 0, 0)]).toBeNil()
+
+			part:Destroy()
+		end)
+
+		it("keeps a skipQueue recompute out of the update queue", function()
+			local part = createMockPart(Vector3.new(50, 50, 50))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			-- skipQueue promises that the caller applies the diff itself, so the
+			-- recompute must stage nothing for the deferred maintenance pass.
+			objectData.cframe = CFrame.new(450, 50, 50)
+			local diff = cullThrottle._grid:updateDesiredVoxelKeys(part, objectData, true)
+			expect(diff[Vector3.new(4, 0, 0)]).toBe(true)
+
+			cullThrottle._grid:updateObjectVoxels(1, os.clock())
+
+			-- The pass found nothing queued for the object, so the staged move
+			-- is still pending and no voxel changed hands.
+			expect(objectData.voxelKeys[Vector3.new(4, 0, 0)]).toBeUndefined()
+			expect(cullThrottle._grid._voxels[Vector3.new(4, 0, 0)]).toBeNil()
+			expect((next(objectData.desiredVoxelKeys))).never.toBeNil()
 
 			part:Destroy()
 		end)
@@ -646,8 +818,11 @@ describe("VoxelGrid", function()
 			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
 			cullThrottle:RemoveObject(part)
 
-			-- Removal purges only the queue proper, so the batch entry survives
-			-- to be enqueued and then discarded at dequeue time.
+			-- This assert is the premise of the resurrection check below, not the
+			-- contract under test. Removal purges only the queue proper, so the
+			-- batch entry survives to be enqueued and then discarded at dequeue
+			-- time. A future change that also purges the batch would be fine and
+			-- should update this test to stage the stale entry another way.
 			local batchItems = cullThrottle._grid._updateObjectVoxelsQueue._incomingBatch.items
 			expect(table.find(batchItems, part)).never.toBeNil()
 
@@ -658,6 +833,59 @@ describe("VoxelGrid", function()
 			-- The stale entry must not resurrect the object into either voxel.
 			expect(cullThrottle._grid._voxels[Vector3.new(4, 0, 0)]).toBeNil()
 			expect(cullThrottle._grid._voxels[Vector3.new(0, 0, 0)]).toBeNil()
+
+			part:Destroy()
+		end)
+	end)
+
+	describe("cancelQueuedUpdate", function()
+		it("drops a heap-queued update so the apply pass never runs it", function()
+			local part = createMockPart(Vector3.new(50, 50, 50))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			objectData.cframe = CFrame.new(450, 50, 50)
+			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+
+			-- A zero-budget pass promotes the staged entry from the incoming
+			-- batch into the heap without applying it, which is where cancel
+			-- looks.
+			cullThrottle._grid:updateObjectVoxels(0, os.clock())
+			expect(cullThrottle._grid._updateObjectVoxelsQueue:contains(part)).toBe(true)
+
+			cullThrottle._grid:cancelQueuedUpdate(part)
+
+			expect(cullThrottle._grid._updateObjectVoxelsQueue:contains(part)).toBe(false)
+
+			-- With the entry gone, a full-budget pass leaves the staged move
+			-- unapplied.
+			cullThrottle._grid:updateObjectVoxels(1, os.clock())
+			expect(objectData.voxelKeys[Vector3.new(4, 0, 0)]).toBeUndefined()
+			expect(cullThrottle._grid._voxels[Vector3.new(4, 0, 0)]).toBeNil()
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			part:Destroy()
+		end)
+
+		it("leaves an update still staged in the incoming batch to apply anyway", function()
+			local part = createMockPart(Vector3.new(50, 50, 50))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			objectData.cframe = CFrame.new(450, 50, 50)
+			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+
+			-- This pins the method's documented contract. Cancel consults only
+			-- the heap, so an entry still sitting in the incoming batch survives
+			-- the call. The real removal flow tolerates that because deleting
+			-- the objectData leaves the dequeue guard to discard the survivor,
+			-- but for a live object the surviving entry still applies its move,
+			-- which is the observable this test rides on.
+			cullThrottle._grid:cancelQueuedUpdate(part)
+			cullThrottle._grid:updateObjectVoxels(1, os.clock())
+
+			expect(objectData.voxelKeys[Vector3.new(4, 0, 0)]).toBe(true)
+			expect(cullThrottle._grid._voxels[Vector3.new(4, 0, 0)]).toBeDefined()
 
 			part:Destroy()
 		end)
@@ -704,7 +932,7 @@ describe("VoxelGrid", function()
 			end
 
 			-- Sweeping the AABB proves the fill rejected every candidate sitting
-			-- provably past the box's faces, and the count proves the sweep
+			-- past the box's faces, and the count proves the sweep
 			-- exercised real rejections.
 			expect(expectNoFillBeyondReach(objectData, cframe, size, voxelSize)).toBeGreaterThan(0)
 
@@ -761,6 +989,60 @@ describe("VoxelGrid", function()
 			expect(cullThrottle._grid._voxels[Vector3.new(-1, 0, 0)]).toBeNil()
 			expect(cullThrottle._grid._voxels[Vector3.new(1, 0, 0)]).toBeNil()
 			expect(table.find(cullThrottle._grid._voxels[Vector3.new(0, 0, 0)], objectData)).toBeDefined()
+
+			part:Destroy()
+		end)
+
+		it("fills the oriented box when the object grows past the multi-voxel threshold", function()
+			-- This part starts as a single-cell object holding only its center
+			-- voxel. Growing it to span three voxels along x must fill the vacant
+			-- neighbors once the recompute and the apply run.
+			local part = createMockPart(Vector3.new(50, 50, 50))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+			expect(objectData.voxelKeys[Vector3.new(-1, 0, 0)]).toBeUndefined()
+			expect(objectData.voxelKeys[Vector3.new(1, 0, 0)]).toBeUndefined()
+
+			-- Stage the grown dimensions the way the change connections record
+			-- them, then run the recompute and the apply.
+			objectData.halfBoundingBox = Vector3.new(125, 10, 10)
+			objectData.radius = objectData.halfBoundingBox.Magnitude
+			cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+			cullThrottle._grid:updateObjectVoxels(1, os.clock())
+
+			for _, key in { Vector3.new(-1, 0, 0), Vector3.new(0, 0, 0), Vector3.new(1, 0, 0) } do
+				expect(objectData.voxelKeys[key]).toBe(true)
+				expect(table.find(cullThrottle._grid._voxels[key], objectData)).toBeDefined()
+			end
+
+			part:Destroy()
+		end)
+
+		it("stays single-cell when the radius exactly equals the multi-voxel threshold", function()
+			-- The multi-voxel branch requires the radius to be strictly above the
+			-- threshold, so a radius sitting exactly on it keeps the object in
+			-- the one cell holding its center even though its box pokes past the
+			-- voxel boundary at x = 100.
+			local part = createMockPart(Vector3.new(90, 50, 50))
+			cullThrottle:AddObject(part)
+			local objectData = cullThrottle._lifecycle._objects[part]
+			expect(objectData.voxelKeys[Vector3.new(0, 0, 0)]).toBe(true)
+
+			-- A 15/20/0 half box has a magnitude of exactly 25, which is the
+			-- threshold the default 100 voxel size derives.
+			objectData.halfBoundingBox = Vector3.new(15, 20, 0)
+			objectData.radius = objectData.halfBoundingBox.Magnitude
+			expect(objectData.radius).toBe(cullThrottle._config.multiVoxelRadiusThreshold)
+
+			local diff = cullThrottle._grid:updateDesiredVoxelKeys(part, objectData)
+
+			-- The desired set is just the center cell the object already
+			-- occupies, so the diff comes back empty. The multi-voxel fill would
+			-- have staged an enter for voxel (1, 0, 0).
+			expect(diff[Vector3.new(1, 0, 0)]).toBeUndefined()
+			expect((next(diff))).toBeNil()
 
 			part:Destroy()
 		end)
