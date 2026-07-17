@@ -26,6 +26,14 @@
 	from the camera, inflated by the stored slack since translation can carry
 	the camera farther while the proof lives). See CameraMotion for the
 	accumulators.
+
+	Above all three layers sits a whole-frame replay. The pass is a
+	deterministic function of the frustum, the occupied voxel set, and the
+	proof caches, so when every one of those provably stands exactly where the
+	last complete pass left it (no charged camera motion of any kind, no cache
+	flush, and no occupancy change), run hands back that pass's output instead
+	of re-deriving it. Any charged motion at all re-runs the search, so the
+	replay is a parked-camera fast path rather than an approximation.
 ]]
 
 local types = require(script.Parent.types)
@@ -108,6 +116,20 @@ type VisibilitySearchProto = {
 	_visibleVoxelCount: number,
 	_pendingVoxelKeys: { types.VoxelKey },
 	_pendingVoxelDistances: { number },
+
+	-- These record the state the last complete pass ran against, so run can
+	-- hand back that pass's output while every watched input is bit-identical.
+	-- The count is how many pending keys the pass accumulated, which still sit
+	-- untouched in their slots (only the search writes them, and the buffer
+	-- rebuild preserves every occupied slot). A pass the budget truncated
+	-- leaned on the stale-verdict fallback, so it never arms the replay.
+	_replayReady: boolean,
+	_replayAccumT: number,
+	_replayAccumR: number,
+	_replayAccumF: number,
+	_replayFlushCount: number,
+	_replayOccupancyGeneration: number,
+	_replayVisibleVoxelCount: number,
 }
 
 export type VisibilitySearch = typeof(setmetatable({} :: VisibilitySearchProto, VisibilitySearch))
@@ -138,6 +160,13 @@ function VisibilitySearch.new(
 		_visibleVoxelCount = 0,
 		_pendingVoxelKeys = {},
 		_pendingVoxelDistances = {},
+		_replayReady = false,
+		_replayAccumT = 0,
+		_replayAccumR = 0,
+		_replayAccumF = 0,
+		_replayFlushCount = 0,
+		_replayOccupancyGeneration = 0,
+		_replayVisibleVoxelCount = 0,
 	}, VisibilitySearch)
 
 	return self
@@ -899,8 +928,44 @@ end
 	subdivides within the search time budget, falling back to cached verdicts
 	for whatever the budget can't reach. The visible set this accumulates is
 	unsorted, and Ingest:sortVisibleVoxelKeys orders it afterward.
+
+	Before any of that, the replay gate checks whether every input the pass
+	reads is bit-identical to the last complete pass. When it is, re-running
+	could only reproduce that pass's output, so run restores its visible count
+	instead (the pending keys still sit in their slots) and returns. A pass
+	that drains its whole stack re-anchors the gate, and one the budget
+	truncated disarms it, since its output leaned on the stale-verdict
+	fallback rather than the watched inputs alone.
 ]]
 function VisibilitySearch.run(self: VisibilitySearch, now: number)
+	local motion = self._motion
+	local grid = self._grid
+	local perfMetrics = self._perfMetrics
+
+	-- A visualizing dev session draws the gizmo boxes from inside the pass,
+	-- so the replay stands down to keep them on screen.
+	local visualizing = false
+	if _G.__DEV__ then
+		visualizing = _G.__VISUALIZE__ == true
+	end
+
+	if
+		self._replayReady
+		and not visualizing
+		and motion._accumT == self._replayAccumT
+		and motion._accumR == self._replayAccumR
+		and motion._accumF == self._replayAccumF
+		and motion._flushCount == self._replayFlushCount
+		and grid._occupancyGeneration == self._replayOccupancyGeneration
+	then
+		-- Nothing the pass reads has changed, so the frame re-marks the
+		-- previous output. The caches are exactly as the anchor pass left
+		-- them, unaged because the odometers never moved.
+		self._visibleVoxelCount = self._replayVisibleVoxelCount
+		perfMetrics._searchDuration = os.clock() - now
+		return
+	end
+
 	local config = self._config
 	local searchTimeBudget = config.searchTimeBudget
 	local voxelSize = config.voxelSize
@@ -948,7 +1013,6 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number)
 	debug.profilebegin("searchVolumes")
 	-- These are hoisted once per frame. Every proof comparison charges translation
 	-- and render distance change at full weight, and rotation at the proof's arm.
-	local motion = self._motion
 	local accumTF = motion._accumT + motion._accumF
 	local accumR = motion._accumR
 	local volumesSinceClockCheck = 0
@@ -981,7 +1045,23 @@ function VisibilitySearch.run(self: VisibilitySearch, now: number)
 			end
 		end
 	end
-	self._perfMetrics._searchDuration = os.clock() - now
+
+	-- A pass that drained its whole stack produced output pinned by nothing
+	-- but the watched inputs, so it anchors the replay gate. A truncated pass
+	-- leaned on the stale-verdict fallback and can't.
+	if self._volumesToCheckSize == 0 then
+		self._replayReady = true
+		self._replayAccumT = motion._accumT
+		self._replayAccumR = motion._accumR
+		self._replayAccumF = motion._accumF
+		self._replayFlushCount = motion._flushCount
+		self._replayOccupancyGeneration = grid._occupancyGeneration
+		self._replayVisibleVoxelCount = self._visibleVoxelCount
+	else
+		self._replayReady = false
+	end
+
+	perfMetrics._searchDuration = os.clock() - now
 	debug.profileend()
 end
 
@@ -1040,6 +1120,8 @@ function VisibilitySearch.destroy(self: VisibilitySearch)
 	tableClear(self._pendingVoxelDistances)
 	tableClear(self._volumesToCheck)
 	self._volumesToCheckSize = 0
+	-- The replayable output lived in the buffers just cleared.
+	self._replayReady = false
 end
 
 return VisibilitySearch

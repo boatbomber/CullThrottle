@@ -73,6 +73,18 @@ describe("CameraMotion", function()
 		expect(motion._accumF).toBe(f)
 	end)
 
+	it("counts the flush when the cache flushes", function()
+		local motion = cullThrottle._motion
+		local flushCountBefore = motion._flushCount
+
+		-- A flush leaves the accumulators at zero while re-anchoring what they
+		-- measure from, and the count is what tells the search's replay gate
+		-- that matching readings across one prove nothing.
+		motion:flushVisibilityCache()
+
+		expect(motion._flushCount).toBe(flushCountBefore + 1)
+	end)
+
 	it("charges pure roll to the rotation accumulator", function()
 		local motion = cullThrottle._motion
 

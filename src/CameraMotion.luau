@@ -46,6 +46,12 @@ type CameraMotionProto = {
 	_accumT: number,
 	_accumR: number,
 	_accumF: number,
+	-- This counts every visibility cache flush. The search's whole-frame
+	-- replay compares it across frames, because a flush leaves the
+	-- accumulators at zero while re-anchoring what they measure from (and can
+	-- mean the camera itself was replaced), so matching accumulator readings
+	-- across one prove nothing.
+	_flushCount: number,
 	_lastCameraCFrame: CFrame,
 	_lastRenderDistanceVoxels: number,
 	_lastHalfVerticalFOV: number,
@@ -66,6 +72,7 @@ function CameraMotion.new(config: Config.Config, visibilityCache: VisibilityCach
 		_accumT = 0,
 		_accumR = 0,
 		_accumF = 0,
+		_flushCount = 0,
 		_lastCameraCFrame = CameraCache.CFrame,
 		_lastRenderDistanceVoxels = config.renderDistance / config.voxelSize,
 		_lastHalfVerticalFOV = CameraCache.HalfVerticalFOV,
@@ -89,6 +96,7 @@ function CameraMotion.flushVisibilityCache(self: CameraMotion)
 	self._accumT = 0
 	self._accumR = 0
 	self._accumF = 0
+	self._flushCount += 1
 	self._lastCameraCFrame = CameraCache.CFrame
 	self._lastRenderDistanceVoxels = self._config.renderDistance / self._config.voxelSize
 	self._lastHalfVerticalFOV = CameraCache.HalfVerticalFOV

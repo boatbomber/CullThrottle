@@ -30,7 +30,7 @@ Almost every design choice in CullThrottle traces back to one of these two princ
 
 The first idea is that every phase runs under a fixed time budget with a graceful fallback. The frame never waits for a perfect answer. Each phase front-loads its most valuable work then falls back to a reasonable approximation when time runs out, reusing stale results or deferring what's left. Deferred work gains urgency the longer it waits, so the system self-balances and self-corrects over the next few frames. Section 14 collects all of these fallbacks in one place.
 
-The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict provably survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up properly.
+The second idea is that consecutive frames are nearly identical, so it pays to prove when answers remain true instead of recomputing them. Between two frames, the camera usually moves a few studs and turns a fraction of a degree, meaning nearly everything visible in the last frame is still visible now. The hard part is knowing exactly which ones. Caching answers for a fixed time is wrong (the camera can teleport), and invalidating on any camera change is useless (the camera always moves a little). CullThrottle's answer is to make every visibility test report, alongside its verdict, how much camera motion that verdict survives. Checking whether a cached answer is still trustworthy then costs a single comparison. Section 6 builds this up properly.
 
 ### 3. One frame at a glance
 
@@ -52,7 +52,7 @@ flowchart TD
 1. Poll physics objects, so parts moved by the physics engine have fresh positions (section 12).
 2. Apply queued voxel updates, moving objects between voxels to match where they've gone (sections 4 and 12).
 3. Accumulate camera motion, advancing the running totals that every cached visibility answer is judged against (section 6).
-4. Search the grid for every occupied voxel that intersects the view frustum (section 7).
+4. Search the grid for every occupied voxel that intersects the view frustum (section 7), or replay the previous frame's result outright when nothing that feeds the search has changed (section 7).
 5. Sort the visible voxels closest-first (section 8).
 6. Ingest the objects in those voxels, scoring them into a priority queue (section 8).
 7. Sweep for objects that have stayed out of view long enough to count as gone (section 10).
@@ -122,7 +122,7 @@ The box is inside all five planes, with this much room to
 spare before the nearest one.
 ```
 
-A verdict with slack is a verdict with a shelf life: it stays provably true until the camera has moved enough to use up the slack. Let's turn that observation into a cache mechanic.
+A verdict with slack is a verdict with a shelf life: it stays true until the camera has moved enough to use up the slack. Let's turn that observation into a cache mechanic.
 
 ### 6. Remembering what we proved: motion proofs
 
@@ -172,6 +172,8 @@ The third layer is single voxels, where a volume clipped down to one voxel trust
 Two more measures handle cases where the budget runs out before the search completes. The first is the budget fallback. The clock is sampled every few volumes rather than after each one, since reading the clock itself has a cost. When the budget expires with volumes still on the stack, each remaining voxel is re-marked visible if its last verdict was visible, without re-validating it. Assuming it's still visible is the best option because an object flickering invisible for a frame is a far worse outcome than spending an update on something that just slipped out of view. The number of voxels handled by this fallback is recorded, and section 11 explains what's watching that number.
 
 The second safety measure is a fairness rotation. The stack is last-in-first-out, so the top volume gets the front of the budget. A counter rotates which root volume is processed first each frame and alternates the push order of child volumes. When the budget consistently falls short, this ensures every straddling volume eventually gets a fresh search in turn, rather than one corner of the view always consuming the budget while another runs indefinitely on stale proofs.
+
+Above all three layers sits a whole-frame replay for the case where nothing moved at all. The pass is a deterministic function of the camera's frustum, the set of occupied voxels, and the cached proofs, so when every one of those stands exactly where the last complete pass left it, re-running the search could only reproduce the same output, and the frame hands back the previous visible set instead. The gate checks a handful of counters: all three motion accumulators and the flush count (any charged translation, rotation, projection change, or render distance change breaks it), and an occupancy generation the grid bumps whenever a voxel is created or emptied (an object joining or leaving an already occupied voxel doesn't break it, since the output names voxels rather than their contents, and ingest reads contents fresh either way). A pass the budget truncated never arms the replay, because its output leaned on the stale-verdict fallback rather than the watched inputs alone. There's no approximation here and no error direction to track, since the gate demands bit-identical inputs, and the caches don't age while it holds (the odometers aren't moving). What it buys is the common case of a parked camera in a quiet scene, where the search phase drops to a few comparisons.
 
 ## Part III: From visibility to your update loop
 
@@ -260,7 +262,7 @@ Let's look at the pipeline from section 3 again, now with our full context and u
 1. Poll physics objects (0.05 ms). Physics-driven positions refresh before anything reads them, so the rest of the frame works on the freshest data available.
 2. Apply queued voxel updates (0.05 ms, closest-first). The grid must be current before the search trusts it.
 3. Accumulate camera motion (cheap, unbudgeted). The odometers must advance (or flush, on a camera swap) before a single cached proof is consulted, or every validity comparison this frame would be against stale readings.
-4. Search (0.8 ms). This is the work of sections 5 through 7.
+4. Search (0.8 ms). This is the work of sections 5 through 7. When nothing that feeds it has changed since the last complete pass, the whole phase collapses into replaying that pass's output (section 7).
 5. Sort visible voxels (unbudgeted, a linear-time counting sort). Closest-first ordering must exist before ingest so its budget is spent nearest-first.
 6. Ingest (1.2 ms). This stages the priority queue and stamps the visibility clocks that entered-view detection reads.
 7. Sweep for exits (unbudgeted, touches only the objects whose grace deadline came due). It runs after ingest so this frame's sightings count before anyone is judged gone.
